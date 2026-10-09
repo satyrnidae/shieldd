@@ -7,6 +7,7 @@
 //! size and colored for the taskbar's light or dark theme.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::JoinHandle;
@@ -25,11 +26,6 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Controls::EM_LIMITTEXT;
-use windows::Win32::UI::Controls::{
-    ICC_BAR_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, TOOLTIPS_CLASSW, TTF_ABSOLUTE, TTF_TRACK,
-    TTM_ADDTOOLW, TTM_SETMAXTIPWIDTH, TTM_TRACKACTIVATE, TTM_TRACKPOSITION, TTM_UPDATETIPTEXTW, TTS_ALWAYSTIP,
-    TTS_NOPREFIX, TTTOOLINFOW,
-};
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForSystem, GetSystemMetricsForDpi, SetThreadDpiAwarenessContext,
 };
@@ -41,23 +37,21 @@ use windows::Win32::UI::Shell::{
     NIM_MODIFY, NOTIFY_ICON_MESSAGE, NOTIFYICONDATAW, NOTIFYICONIDENTIFIER, Shell_NotifyIconGetRect, Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, CW_USEDEFAULT, CreateIconIndirect, CreatePopupMenu, CreateWindowExW,
-    DS_CENTER, DS_MODALFRAME, DS_SETFONT, DefWindowProcW, DestroyIcon, DestroyMenu, DestroyWindow,
-    DialogBoxIndirectParamW, DispatchMessageW, ES_AUTOHSCROLL, EndDialog, EndMenu, EnumThreadWindows, GetClassNameW,
-    GetCursorPos, GetDlgItemTextW, GetMenuItemID, GetMenuState, GetMessageW, HICON, HMENU, HWND_TOPMOST, ICONINFO,
-    IDCANCEL, IDOK, KillTimer, MB_DEFBUTTON2, MB_ICONINFORMATION, MB_ICONWARNING, MB_OK, MB_OKCANCEL, MB_SETFOREGROUND,
-    MENU_ITEM_FLAGS, MF_BYPOSITION, MF_DISABLED, MF_GRAYED, MF_SEPARATOR, MF_STRING, MSG, MessageBoxW, PostMessageW,
-    PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SM_CXSMICON, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SendDlgItemMessageW, SendMessageW, SetDlgItemTextW, SetForegroundWindow, SetTimer, SetWindowPos, TPM_RETURNCMD,
-    TrackPopupMenu, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_COMMAND, WM_CONTEXTMENU, WM_ENTERIDLE, WM_INITDIALOG,
-    WM_LBUTTONUP, WM_MENURBUTTONUP, WM_MENUSELECT, WM_NULL, WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_BORDER, WS_CAPTION,
-    WS_CHILD, WS_EX_TOPMOST, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    AppendMenuW, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, CreateIconIndirect, CreatePopupMenu, CreateWindowExW, DS_CENTER,
+    DS_MODALFRAME, DS_SETFONT, DefWindowProcW, DestroyIcon, DestroyMenu, DestroyWindow, DialogBoxIndirectParamW,
+    DispatchMessageW, ES_AUTOHSCROLL, EndDialog, EndMenu, EnumThreadWindows, GetClassNameW, GetCursorPos,
+    GetDlgItemTextW, GetMessageW, HICON, HMENU, ICONINFO, IDCANCEL, IDOK, KillTimer, MB_DEFBUTTON2, MB_ICONINFORMATION,
+    MB_ICONWARNING, MB_OK, MB_OKCANCEL, MB_SETFOREGROUND, MENU_ITEM_FLAGS, MF_DISABLED, MF_GRAYED, MF_POPUP,
+    MF_SEPARATOR, MF_STRING, MSG, MessageBoxW, PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW,
+    SM_CXSMICON, SendDlgItemMessageW, SetDlgItemTextW, SetForegroundWindow, SetTimer, TPM_RETURNCMD, TrackPopupMenu,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_COMMAND, WM_CONTEXTMENU, WM_INITDIALOG, WM_LBUTTONUP, WM_NULL,
+    WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 
 use crate::battery::{Battery, Gauge};
 use crate::{About, Command, Connected, Shunned, Status};
 use shieldutl::names::MAX_NAME;
-use windows::core::{BOOL, PCWSTR, PWSTR, w};
+use windows::core::{BOOL, PCWSTR, w};
 
 //region Icons
 
@@ -507,23 +501,52 @@ const WM_WAKE: u32 = WM_APP + 3;
 const TICK_TIMER: usize = 1;
 const IDLE_TICK: Duration = Duration::from_millis(100);
 
-/// A menu item: flags, ID, text
-type Item = (MENU_ITEM_FLAGS, usize, String);
+/// A menu item, or a submenu with its items
+#[derive(Debug, Clone, PartialEq)]
+struct Item {
+    flags: MENU_ITEM_FLAGS,
+    /// Ignored for a submenu
+    id: usize,
+    text: String,
+    sub: Vec<Item>,
+}
+
+impl Item {
+    fn new(flags: MENU_ITEM_FLAGS, id: usize, text: impl Into<String>) -> Item {
+        Item { flags, id, text: text.into(), sub: Vec::new() }
+    }
+
+    fn separator() -> Item {
+        Item::new(MF_SEPARATOR, 0, "")
+    }
+}
 /// The tray window, for Tray::drop; one per process
 static TRAY_HWND: AtomicIsize = AtomicIsize::new(0);
 
 /// Menu item IDs; 0 is TrackPopupMenu's "nothing picked"
 mod id {
-    pub const PAIR: usize = 1;
-    pub const VBAN: usize = 2;
-    /// The controller line: identifies the controller, and WM_MENUSELECT knows it by this
-    pub const CONTROLLER: usize = 3;
-    pub const DISCONNECT: usize = 4;
-    pub const EXIT: usize = 5;
     /// The title line
-    pub const ABOUT: usize = 6;
-    /// Not an item: the controller line, right-clicked
-    pub const RENAME: usize = 7;
+    pub const ABOUT: usize = 1;
+    pub const PAIR: usize = 2;
+    pub const RECONFIGURE: usize = 3;
+    pub const EXIT: usize = 4;
+    /// A controller's submenu: CONTROLLER + its index * PER_CONTROLLER + one of the below
+    pub const CONTROLLER: usize = 0x100;
+    pub const PER_CONTROLLER: usize = 0x10;
+    pub const IDENTIFY: usize = 0;
+    pub const RENAME: usize = 1;
+    pub const VBAN: usize = 2;
+    pub const DISCONNECT: usize = 3;
+
+    pub fn of(index: usize, action: usize) -> usize {
+        CONTROLLER + index * PER_CONTROLLER + action
+    }
+
+    /// A controller's index and action, from a pick
+    pub fn controller(picked: usize) -> Option<(usize, usize)> {
+        let n = picked.checked_sub(CONTROLLER)?;
+        Some((n / PER_CONTROLLER, n % PER_CONTROLLER))
+    }
 }
 
 /// The menu closed with the cursor on the icon: the click that closed it arrives as a tray
@@ -537,10 +560,6 @@ thread_local! {
     static MENU_WANTED: Cell<bool> = const { Cell::new(false) };
     static TASKBAR_CREATED: Cell<u32> = const { Cell::new(0) };
     static READD_WANTED: Cell<bool> = const { Cell::new(false) };
-    /// Tooltip for the controller line, and its text while the menu is up
-    static TIP: Cell<Option<HWND>> = const { Cell::new(None) };
-    static TIP_TEXT: RefCell<Vec<u16>> = const { RefCell::new(Vec::new()) };
-    static TIP_ON: Cell<bool> = const { Cell::new(false) };
     /// Shutting down: no more menus or boxes
     static QUITTING: Cell<bool> = const { Cell::new(false) };
     /// The open menu's items, so tick can tell when they've gone stale
@@ -551,8 +570,6 @@ thread_local! {
     static CLOSED_ON_ICON: Cell<Option<Instant>> = const { Cell::new(None) };
     /// In menu(): the menu, or a box it opened, is up
     static MENU_BUSY: Cell<bool> = const { Cell::new(false) };
-    /// What a right-click in the open menu picked
-    static RIGHT_PICK: Cell<Option<usize>> = const { Cell::new(None) };
     /// The rename dialog's text, in and out
     static RENAME_TEXT: RefCell<Vec<u16>> = const { RefCell::new(Vec::new()) };
 }
@@ -572,14 +589,6 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
         } else {
             MENU_WANTED.set(true);
         }
-    } else if msg == WM_MENURBUTTONUP {
-        right_click(HMENU(lp.0 as *mut _), wp.0 as i32);
-    } else if msg == WM_MENUSELECT {
-        // Item ID in the low word; the menu, or none once it closes
-        show_tip(hwnd, wp.0 & 0xFFFF == id::CONTROLLER && lp.0 != 0);
-    } else if msg == WM_ENTERIDLE {
-        // The menu loop has caught up, e.g. after a mouse move
-        follow_mouse();
     } else if msg == WM_SHUTDOWN {
         QUITTING.set(true);
         close_modals();
@@ -595,19 +604,6 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
     }
     // SAFETY: the arguments we were called with
     unsafe { DefWindowProcW(hwnd, msg, wp, lp) }
-}
-
-/// A right-click on item `pos` of the open menu: renames on the controller line, and picks
-/// anything else as a left-click would
-fn right_click(m: HMENU, pos: i32) {
-    // SAFETY: the open menu, from WM_MENURBUTTONUP
-    let (id, state) = unsafe { (GetMenuItemID(m, pos) as usize, GetMenuState(m, pos as u32, MF_BYPOSITION)) };
-    if state & (MF_GRAYED.0 | MF_DISABLED.0 | MF_SEPARATOR.0) != 0 || id == 0 {
-        return;
-    }
-    RIGHT_PICK.set(Some(if id == id::CONTROLLER { id::RENAME } else { id }));
-    // SAFETY: plain call; closes the menu this thread has open
-    let _ = unsafe { EndMenu() };
 }
 
 /// Brings any message box or dialog of this thread to the front
@@ -672,6 +668,21 @@ fn quit() {
     unsafe { PostQuitMessage(0) };
 }
 
+/// One controller's battery, as the tray follows it
+#[derive(Debug, Default)]
+struct Watch {
+    gauge: Gauge,
+    /// The gauge's last answer
+    pct: Option<u8>,
+    critical_alerted: bool,
+    /// Last must-charge notification
+    must_charge_told: Option<Instant>,
+    /// Last refresh found it on the charger
+    was_charging: bool,
+    /// Its charging bolt flashes until then
+    charge_flash_until: Option<Instant>,
+}
+
 struct State {
     hwnd: HWND,
     rx: Receiver<Msg>,
@@ -681,12 +692,10 @@ struct State {
     /// What's on screen, if the icon is shown
     shown: Option<Icon>,
     status: Status,
-    gauge: Gauge,
-    /// The gauge's last answer, for the menu
-    pct: Option<u8>,
-    critical_alerted: bool,
-    /// Last must-charge notification
-    must_charge_told: Option<Instant>,
+    /// Every controller seen this run, by MAC
+    watches: HashMap<[u8; 6], Watch>,
+    /// The controller the battery icon shows: the lowest
+    focus: Option<[u8; 6]>,
     /// When the animation on screen last moved
     frame_at: Instant,
     /// Last refresh found nothing connected, pairing or joining
@@ -697,10 +706,6 @@ struct State {
     first: bool,
     /// The disconnected icon flashes until then
     flash_until: Option<Instant>,
-    /// Last refresh found the controller on the charger
-    was_charging: bool,
-    /// The charging bolt flashes until then
-    charge_flash_until: Option<Instant>,
     /// What the battery icon settles on once a flash is over
     settled: Option<Icon>,
     commands: Sender<Command>,
@@ -740,7 +745,6 @@ fn run(rx: Receiver<Msg>, commands: Sender<Command>) -> Result<()> {
         )
     }
     .context("tray window")?;
-    TIP.set(create_tip(hwnd));
     let mut st = State {
         hwnd,
         rx,
@@ -749,17 +753,13 @@ fn run(rx: Receiver<Msg>, commands: Sender<Command>) -> Result<()> {
         icons: Vec::new(),
         shown: None,
         status: Status::default(),
-        gauge: Gauge::default(),
-        pct: None,
-        critical_alerted: false,
-        must_charge_told: None,
+        watches: HashMap::new(),
+        focus: None,
         frame_at: Instant::now(),
         was_disconnected: false,
         had_controller: false,
         first: true,
         flash_until: None,
-        was_charging: false,
-        charge_flash_until: None,
         settled: None,
         commands,
     };
@@ -802,20 +802,14 @@ fn menu_and_boxes(hwnd: HWND) {
     // SAFETY: at outlives the call
     let _ = unsafe { GetCursorPos(&mut at) };
     let (picked, s, commands) = loop {
-        let Some((items, tip, s, commands)) = with_state(|st| {
-            let (items, tip) = st.menu_items();
-            (items, tip, st.status.clone(), st.commands.clone())
-        }) else {
+        let Some((items, s, commands)) = with_state(|st| (st.menu_items(), st.status.clone(), st.commands.clone()))
+        else {
             return;
         };
-        TIP_TEXT.set(tip.as_deref().map(wide).unwrap_or_default());
         MENU_REOPEN.set(false);
-        RIGHT_PICK.set(None);
         MENU_SHOWN.set(Some(items.clone()));
         let picked = track(hwnd, &items, at);
         MENU_SHOWN.set(None);
-        // Before a reopen, which would lose it
-        let picked = RIGHT_PICK.take().filter(|_| picked == 0).unwrap_or(picked);
         if picked == 0 && MENU_REOPEN.replace(false) && !QUITTING.get() {
             continue;
         }
@@ -825,32 +819,40 @@ fn menu_and_boxes(hwnd: HWND) {
         }
         break (picked, s, commands);
     };
-    show_tip(hwnd, false);
-    let connected = s.controller.is_some();
-    let cmd = match picked {
+    let connected = !s.controllers.is_empty();
+    let cmd = match (picked, id::controller(picked)) {
         _ if QUITTING.get() => return,
-        id::PAIR if confirm_pair(hwnd, connected) => Command::Pair,
-        id::VBAN => Command::Vban(!s.vban),
-        id::CONTROLLER => Command::Identify,
-        id::RENAME => {
-            let Some(c) = &s.controller else { return };
-            let Some(name) = rename(hwnd, c) else { return };
-            Command::Rename(c.mac, name)
+        (id::PAIR, _) if confirm_pair(hwnd, connected) => Command::Pair,
+        (id::RECONFIGURE, _) if confirm_reconfigure(hwnd) => Command::Reconfigure,
+        (id::EXIT, _) => Command::Exit,
+        (id::ABOUT, _) => return about(hwnd),
+        (_, Some((n, action))) => {
+            let Some(c) = s.controllers.get(n) else { return };
+            match action {
+                id::IDENTIFY => Command::Identify(c.mac),
+                id::RENAME => {
+                    let Some(name) = rename(hwnd, c) else { return };
+                    Command::Rename(c.mac, name)
+                }
+                id::VBAN => Command::Vban(c.mac, !c.vban),
+                id::DISCONNECT => Command::Disconnect(c.mac),
+                _ => return,
+            }
         }
-        id::DISCONNECT => Command::Disconnect,
-        id::EXIT => Command::Exit,
-        id::ABOUT => return about(hwnd),
         _ => return,
     };
     debug!(?cmd, "tray menu");
-    let vban_on = cmd == Command::Vban(true);
+    // The first one on starts the streams; say where they are
+    let vban_on = matches!(cmd, Command::Vban(_, true)) && !s.controllers.iter().any(|c| c.vban);
     let _ = commands.send(cmd);
     if vban_on && !QUITTING.get() {
         let text = format!(
             "Controller audio over VBAN, for Voicemeeter:\n\n\
              Mic: stream {}, sent to 127.0.0.1 port {}\n\
              Headset: stream {}, received on port {}\n\n\
-             Point an incoming stream at the first and an outgoing one at the second, PCM 16-bit.",
+             Point an incoming stream at the first and an outgoing one at the second, PCM 16-bit. \
+             Every controller with VBAN on shares them: their mics are mixed, and each headset plays \
+             the same audio.",
             shieldutl::vban::MIC_STREAM,
             shieldutl::vban::MIC_PORT,
             shieldutl::vban::PAD_STREAM,
@@ -871,14 +873,10 @@ fn menu_and_boxes(hwnd: HWND) {
 
 /// Pops up `items` at `at` until something's picked or it's closed; 0 for nothing
 fn track(hwnd: HWND, items: &[Item], at: POINT) -> usize {
-    // SAFETY: the menu is ours and destroyed below; the strings outlive AppendMenuW, which
-    // copies them
+    // SAFETY: the menus are ours and destroyed below, submenus with the top; the strings outlive
+    // AppendMenuW, which copies them
     unsafe {
-        let Ok(m) = CreatePopupMenu() else { return 0 };
-        for (flags, id, text) in items {
-            let text = wide(text);
-            let _ = AppendMenuW(m, *flags, *id, PCWSTR(text.as_ptr()));
-        }
+        let Some(m) = build_menu(items) else { return 0 };
         // Without the window in front, the menu won't close on a click elsewhere
         let _ = SetForegroundWindow(hwnd);
         // A menu underlines its shortcut letters only after keyboard input, and the window's UI
@@ -891,6 +889,29 @@ fn track(hwnd: HWND, items: &[Item], at: POINT) -> usize {
     }
 }
 
+/// A popup menu of `items`, submenus and all. Destroying it destroys them too.
+///
+/// # Safety
+/// The caller destroys what it returns.
+unsafe fn build_menu(items: &[Item]) -> Option<HMENU> {
+    // SAFETY: as the caller promises; a submenu that fails goes with its parent
+    unsafe {
+        let m = CreatePopupMenu().ok()?;
+        for i in items {
+            let text = wide(&i.text);
+            let (flags, id) = match i.sub.is_empty() {
+                true => (i.flags, i.id),
+                false => match build_menu(&i.sub) {
+                    Some(sub) => (i.flags | MF_POPUP, sub.0 as usize),
+                    None => (i.flags | MF_GRAYED, 0),
+                },
+            };
+            let _ = AppendMenuW(m, flags, id, PCWSTR(text.as_ptr()));
+        }
+        Some(m)
+    }
+}
+
 /// Shift down and up, as keyboard input
 fn tap_shift() {
     let key = |flags| INPUT {
@@ -899,95 +920,6 @@ fn tap_shift() {
     };
     // SAFETY: two well-formed keyboard inputs
     let _ = unsafe { SendInput(&[key(KEYBD_EVENT_FLAGS(0)), key(KEYEVENTF_KEYUP)], size_of::<INPUT>() as i32) };
-}
-
-/// A tracking tooltip, owned by the tray window; positioned and shown by show_tip
-fn create_tip(owner: HWND) -> Option<HWND> {
-    // SAFETY: plain window creation; the tool info is copied by TTM_ADDTOOLW
-    unsafe {
-        let icc = INITCOMMONCONTROLSEX { dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32, dwICC: ICC_BAR_CLASSES };
-        let _ = InitCommonControlsEx(&icc);
-        let tip = CreateWindowExW(
-            WS_EX_TOPMOST,
-            TOOLTIPS_CLASSW,
-            None,
-            WS_POPUP | WINDOW_STYLE(TTS_NOPREFIX | TTS_ALWAYSTIP),
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            Some(owner),
-            None,
-            None,
-            None,
-        )
-        .ok()?;
-        let ti = tool(owner, w!("").as_ptr());
-        SendMessageW(tip, TTM_ADDTOOLW, None, Some(LPARAM(&raw const ti as isize)));
-        // Any max width turns on line breaks
-        SendMessageW(tip, TTM_SETMAXTIPWIDTH, None, Some(LPARAM(400)));
-        Some(tip)
-    }
-}
-
-/// The one tool on the tooltip. Sized without lpReserved, which comctl32 v5 refuses; there's no
-/// manifest asking for v6.
-fn tool(owner: HWND, text: *const u16) -> TTTOOLINFOW {
-    TTTOOLINFOW {
-        cbSize: (size_of::<TTTOOLINFOW>() - size_of::<*mut core::ffi::c_void>()) as u32,
-        uFlags: TTF_TRACK | TTF_ABSOLUTE,
-        hwnd: owner,
-        uId: 1,
-        lpszText: PWSTR(text.cast_mut()),
-        ..Default::default()
-    }
-}
-
-/// Shows the tooltip at the mouse, or hides it
-fn show_tip(owner: HWND, on: bool) {
-    let Some(tip) = TIP.get() else { return };
-    let on = on && TIP_TEXT.with_borrow(|t| t.len() > 1);
-    if on == TIP_ON.get() {
-        return;
-    }
-    TIP_ON.set(on);
-    TIP_TEXT.with_borrow(|text| {
-        let ti = tool(owner, text.as_ptr());
-        let ti = LPARAM(&raw const ti as isize);
-        // SAFETY: ti and text outlive the calls, which copy what they need
-        unsafe {
-            if on {
-                SendMessageW(tip, TTM_UPDATETIPTEXTW, None, Some(ti));
-                follow_mouse();
-            }
-            SendMessageW(tip, TTM_TRACKACTIVATE, Some(WPARAM(on.into())), Some(ti));
-            if on {
-                raise(tip);
-            }
-        }
-    });
-}
-
-/// Moves a shown tooltip to just below and right of the pointer, where a regular one goes
-fn follow_mouse() {
-    let Some(tip) = TIP.get().filter(|_| TIP_ON.get()) else { return };
-    let mut at = POINT::default();
-    // SAFETY: plain queries and a message with no pointers
-    unsafe {
-        if GetCursorPos(&mut at).is_err() {
-            return;
-        }
-        let (x, y) = (at.x + 16, at.y + 20);
-        let packed = (x as u16 as u32) | ((y as u16 as u32) << 16);
-        SendMessageW(tip, TTM_TRACKPOSITION, None, Some(LPARAM(packed as isize)));
-        raise(tip);
-    }
-}
-
-/// Above the menu, which is topmost too and opened after the tooltip was made
-fn raise(tip: HWND) {
-    // SAFETY: our own window; no move, size or focus change
-    let _ = unsafe { SetWindowPos(tip, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE) };
 }
 
 /// Copies `s` into a fixed UTF-16 field, truncated, NUL-terminated
@@ -1015,15 +947,9 @@ fn menu_name(name: Option<&str>) -> String {
     menu_text(name.unwrap_or("Controller"))
 }
 
-/// The controller line of the menu
-fn controller_line(c: Option<&Connected>, pct: Option<u8>, shunned: Option<&Shunned>) -> String {
-    let Some(c) = c else {
-        return match shunned {
-            Some(s) => format!("{} (shunned)", menu_name(s.name.as_deref())),
-            None => "No controllers connected".into(),
-        };
-    };
-    let name = menu_name(c.name.as_deref());
+/// A connected controller's line of the menu, with a shortcut letter not in `used`
+fn controller_line(c: &Connected, pct: Option<u8>, used: &mut Vec<char>) -> String {
+    let name = shortcut(c.name.as_deref().unwrap_or("Controller"), used);
     let port = c.port.map_or_else(|| "?".into(), |p| p.to_string());
     match (c.battery, pct) {
         (Some(b), Some(p)) if b.charging && p >= 100 => format!("{name}: Port #{port} ({p}%) (charged)"),
@@ -1031,6 +957,108 @@ fn controller_line(c: Option<&Connected>, pct: Option<u8>, shunned: Option<&Shun
         (Some(_), Some(p)) => format!("{name}: Port #{port} ({p}%)"),
         _ => format!("{name}: Port #{port}"),
     }
+}
+
+/// `name` as menu text, its first letter or digit not in `used` the shortcut, which then is.
+/// Without a free one, none.
+fn shortcut(name: &str, used: &mut Vec<char>) -> String {
+    let mut out = String::with_capacity(name.len() + 2);
+    let mut picked = false;
+    for ch in name.chars() {
+        let key = ch.to_lowercase().next().unwrap_or(ch);
+        if !picked && ch.is_alphanumeric() && !used.contains(&key) {
+            used.push(key);
+            out.push('&');
+            picked = true;
+        }
+        // A lone & would underline the next letter
+        if ch == '&' {
+            out.push('&');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// The shortcut letter `text` underlines, if any
+fn accel(text: &str) -> Option<char> {
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c == '&' {
+            match chars.next()? {
+                '&' => {}
+                n => return n.to_lowercase().next(),
+            }
+        }
+    }
+    None
+}
+
+fn shunned_line(s: &Shunned) -> String {
+    format!("{} (shunned)", menu_name(s.name.as_deref()))
+}
+
+/// A battery's level for the icon's tooltip
+fn level(b: &Battery, pct: u8) -> String {
+    match b.charging {
+        true if pct >= 100 => format!("{pct}% (charged)"),
+        true => format!("{pct}% (charging)"),
+        false => format!("{pct}%"),
+    }
+}
+
+/// The controller with a battery reading and the lowest percent shown, which the icon follows
+fn lowest(controllers: &[Connected], pct: impl Fn(&[u8; 6]) -> Option<u8>) -> Option<&Connected> {
+    controllers.iter().filter(|c| c.battery.is_some()).min_by_key(|c| pct(&c.mac).unwrap_or(u8::MAX))
+}
+
+/// The menu for `s`, with each controller's percent as the tray shows it
+fn menu_items(s: &Status, pct: impl Fn(&[u8; 6]) -> Option<u8>) -> Vec<Item> {
+    let gray = |on: bool| if on { MF_STRING } else { MF_STRING | MF_GRAYED };
+    let title = MF_STRING | MF_DISABLED;
+    let mut items = vec![
+        Item::new(MF_STRING, id::ABOUT, format!("shieldd (v{})", about_info().version)),
+        Item::new(title, 0, format!(" > {} connected.", s.controllers.len())),
+    ];
+    if let Some(ssid) = &s.ssid {
+        let ssid = menu_text(ssid);
+        let line = match s.channel {
+            Some(c) => format!(" > {ssid}, ch.{c}"),
+            None => format!(" > {ssid}"),
+        };
+        items.push(Item::new(title, 0, line));
+    }
+    items.push(Item::separator());
+    let pair = if s.controllers.is_empty() { "&Pair controller..." } else { "Re-&pair controller..." };
+    let (reconfigure, exit) = ("Re&configure network", "E&xit");
+    // Controllers get the letters the rest leave
+    let mut used: Vec<char> = [pair, reconfigure, exit].into_iter().filter_map(accel).collect();
+    for (n, c) in s.controllers.iter().enumerate() {
+        let sub = vec![
+            Item::new(title, 0, format!("MAC {}", shieldutl::mac::fmt_mac(&c.mac))),
+            Item::separator(),
+            Item::new(MF_STRING, id::of(n, id::IDENTIFY), "&Identify"),
+            Item::new(MF_STRING, id::of(n, id::RENAME), "&Rename..."),
+            Item::new(MF_STRING, id::of(n, id::VBAN), if c.vban { "Disable &audio" } else { "Enable &audio" }),
+            Item::new(MF_STRING, id::of(n, id::DISCONNECT), "&Disconnect"),
+        ];
+        let line = Item { sub, ..Item::new(MF_STRING, 0, controller_line(c, pct(&c.mac), &mut used)) };
+        items.push(line);
+    }
+    for sh in &s.shunned {
+        items.push(Item::new(gray(false), 0, shunned_line(sh)));
+    }
+    if s.controllers.is_empty() && s.shunned.is_empty() {
+        items.push(Item::new(gray(false), 0, "No controllers connected"));
+    }
+    items.extend([
+        Item::separator(),
+        Item::new(gray(!s.pairing), id::PAIR, pair),
+        Item::new(MF_STRING, id::RECONFIGURE, reconfigure),
+        Item::separator(),
+        Item::new(MF_STRING, id::EXIT, exit),
+    ]);
+    items
 }
 
 impl State {
@@ -1064,9 +1092,9 @@ impl State {
         let s = self.status.clone();
         // Not for pairing that timed out, a join that gave up, or a controller we sent away to
         // sleep, which would otherwise flash every time a flat one came back
-        let disconnected = !s.pairing && !s.joining && s.controller.is_none();
-        self.had_controller |= s.controller.is_some();
-        let left = self.had_controller && s.shunned.is_none();
+        let disconnected = !s.pairing && !s.joining && s.controllers.is_empty();
+        self.had_controller |= !s.controllers.is_empty();
+        let left = self.had_controller && s.shunned.is_empty();
         if disconnected && !self.was_disconnected && (self.first || left) {
             self.flash_until = Some(now + FLASH_FOR);
         }
@@ -1075,73 +1103,98 @@ impl State {
         }
         self.was_disconnected = disconnected;
         self.first = false;
-        let charging =
-            !s.pairing && !s.joining && s.controller.as_ref().and_then(|c| c.battery).is_some_and(|b| b.charging);
-        if charging && !self.was_charging {
-            self.charge_flash_until = Some(now + FLASH_FOR);
+
+        // Each controller's gauge and alerts. What the charger did belongs to a connection.
+        let reading = |m: &[u8; 6]| s.controllers.iter().find(|c| c.mac == *m).and_then(|c| c.battery);
+        for (mac, w) in &mut self.watches {
+            if reading(mac).is_none() {
+                w.gauge.forget_charger();
+                w.was_charging = false;
+            }
         }
-        self.was_charging = charging;
+        let mut alerts = Vec::new();
+        for c in &s.controllers {
+            let Some(b) = c.battery else { continue };
+            let w = self.watches.entry(c.mac).or_default();
+            let (shown, fresh) = w.gauge.feed(&b, now);
+            w.pct = Some(shown);
+            if fresh || b.charging {
+                w.critical_alerted = false;
+            }
+            let tell_must_charge =
+                b.must_charge && w.must_charge_told.is_none_or(|t| now.duration_since(t) >= MUST_CHARGE_EVERY);
+            if b.must_charge {
+                // Says it all already
+                w.critical_alerted = true;
+            }
+            if tell_must_charge {
+                w.must_charge_told = Some(now);
+            }
+            // Once per discharge, when rumble cuts out
+            let alert = !b.charging && b.critical && !w.critical_alerted;
+            if alert {
+                w.critical_alerted = true;
+            }
+            if b.charging && !w.was_charging {
+                w.charge_flash_until = Some(now + FLASH_FOR);
+            }
+            w.was_charging = b.charging;
+            let name = c.name.as_deref().unwrap_or("Controller");
+            if alert {
+                alerts.push((
+                    format!("{name} battery critical"),
+                    format!("{shown}% left. Rumble is off; charge it now."),
+                ));
+            }
+            if tell_must_charge {
+                alerts.push((format!("{name} battery empty"), "Disconnected; plug it in to use it.".into()));
+            }
+        }
+
+        let pct = |m: &[u8; 6]| self.watches.get(m).and_then(|w| w.pct);
+        let up = lowest(&s.controllers, pct).cloned();
+        self.focus = up.as_ref().map(|c| c.mac);
         if s.pairing {
-            self.pct = None;
             let icon = self.animate(Icon::Pairing(0), now);
             self.show(icon, msg, Some("SHIELD controller: pairing"));
-            return;
-        }
-        if s.joining {
-            self.pct = None;
+        } else if s.joining && up.is_none() {
             let icon = self.animate(Icon::Spinner(0), now);
             self.show(icon, msg, Some("SHIELD controller: connecting..."));
-            return;
-        }
-        let Some(b) = s.controller.as_ref().and_then(|c| c.battery) else {
-            let tip = match s.controller {
-                Some(_) => "SHIELD controller: connected, no battery reading",
-                None => "SHIELD controller: not connected",
+        } else if let Some(c) = up {
+            let b = c.battery.expect("lowest has a reading");
+            let shown = self.watches.get(&c.mac).and_then(|w| w.pct).unwrap_or(0);
+            // Plugged in: the bolt flashes for a bit, already charged or not, then the icon settles
+            let settled = Icon::of(&b, shown);
+            self.settled = Some(settled);
+            let icon = match settled {
+                Icon::Charging | Icon::Charged if self.charge_flashing(now) => self.animate(Icon::Charging, now),
+                _ => settled,
             };
-            self.pct = None;
-            self.gauge.forget_charger();
+            let mut up: Vec<_> =
+                s.controllers.iter().filter_map(|c| Some((c, c.battery?, self.watches.get(&c.mac)?.pct?))).collect();
+            let tip = match up.len() {
+                1 => format!("SHIELD controller: {}", level(&b, shown)),
+                _ => {
+                    up.sort_by_key(|(_, _, p)| *p);
+                    let lines: Vec<_> = up
+                        .iter()
+                        .map(|(c, b, p)| format!("{}: {}", c.name.as_deref().unwrap_or("Controller"), level(b, *p)))
+                        .collect();
+                    format!("SHIELD controllers\n{}", lines.join("\n"))
+                }
+            };
+            self.show(icon, msg, Some(&tip));
+        } else {
+            let tip = match s.controllers.is_empty() {
+                false => "SHIELD controller: connected, no battery reading",
+                true => "SHIELD controller: not connected",
+            };
             // Flashing only with nothing connected, and only for a bit
             let icon = if self.flashing(now) { self.animate(Icon::Disconnected, now) } else { Icon::Disconnected };
             self.show(icon, msg, Some(tip));
-            return;
-        };
-        let (shown, fresh) = self.gauge.feed(&b, now);
-        self.pct = Some(shown);
-        if fresh || b.charging {
-            self.critical_alerted = false;
         }
-        let tell_must_charge =
-            b.must_charge && self.must_charge_told.is_none_or(|t| now.duration_since(t) >= MUST_CHARGE_EVERY);
-        if b.must_charge {
-            // Says it all already
-            self.critical_alerted = true;
-        }
-        if tell_must_charge {
-            self.must_charge_told = Some(now);
-        }
-        // Once per discharge, when rumble cuts out
-        let alert = !b.charging && b.critical && !self.critical_alerted;
-        if alert {
-            self.critical_alerted = true;
-        }
-        // Plugged in: the bolt flashes for a bit, already charged or not, then the icon settles
-        let settled = Icon::of(&b, shown);
-        self.settled = Some(settled);
-        let icon = match settled {
-            Icon::Charging | Icon::Charged if self.charge_flashing(now) => self.animate(Icon::Charging, now),
-            _ => settled,
-        };
-        let tip = match settled {
-            Icon::Charged => format!("SHIELD controller: {shown}% (charged)"),
-            _ if b.charging => format!("SHIELD controller: {shown}% (charging)"),
-            _ => format!("SHIELD controller: {shown}%"),
-        };
-        self.show(icon, msg, Some(&tip));
-        if alert {
-            self.notify("Controller battery critical", &format!("{shown}% left. Rumble is off; charge it now."), true);
-        }
-        if tell_must_charge {
-            self.notify("Controller battery empty", "Disconnected; plug in the controller to use it.", true);
+        for (title, text) in alerts {
+            self.notify(&title, &text, true);
         }
     }
 
@@ -1175,9 +1228,10 @@ impl State {
         self.was_disconnected && self.flash_until.is_some_and(|t| now < t)
     }
 
-    /// The charging bolt should be flashing
+    /// The charging bolt should be flashing, on the controller the icon shows
     fn charge_flashing(&self, now: Instant) -> bool {
-        self.was_charging && self.charge_flash_until.is_some_and(|t| now < t)
+        let w = self.focus.and_then(|m| self.watches.get(&m));
+        w.is_some_and(|w| w.was_charging && w.charge_flash_until.is_some_and(|t| now < t))
     }
 
     /// The frame of `icon` to show; a new animation starts its clock. The run loop steps it
@@ -1234,51 +1288,9 @@ impl State {
         }
     }
 
-    /// The menu for the current status, and the controller line's tooltip
-    fn menu_items(&self) -> (Vec<Item>, Option<String>) {
-        let s = &self.status;
-        let connected = s.controller.is_some();
-        let gray = |on: bool| if on { MF_STRING } else { MF_STRING | MF_GRAYED };
-        let tip = match (&s.controller, &s.shunned) {
-            (Some(c), _) => {
-                Some(format!("MAC {}\nClick to identify, right-click to rename", shieldutl::mac::fmt_mac(&c.mac)))
-            }
-            // Grayed, so nothing to click
-            (None, Some(sh)) => Some(format!("MAC {}", shieldutl::mac::fmt_mac(&sh.mac))),
-            (None, None) => None,
-        };
-        let title = MF_STRING | MF_DISABLED;
-        let mut items: Vec<Item> = vec![
-            (MF_STRING, id::ABOUT, format!("shieldd (v{})", about_info().version)),
-            (title, 0, format!(" > {} connected.", u8::from(connected))),
-        ];
-        if let Some(ssid) = &s.ssid {
-            let ssid = menu_text(ssid);
-            items.push((
-                title,
-                0,
-                match s.channel {
-                    Some(c) => format!(" > {ssid}, ch.{c}"),
-                    None => format!(" > {ssid}"),
-                },
-            ));
-        }
-        items.extend([
-            (MF_SEPARATOR, 0, String::new()),
-            // Click to identify
-            (gray(connected), id::CONTROLLER, controller_line(s.controller.as_ref(), self.pct, s.shunned.as_ref())),
-            (MF_SEPARATOR, 0, String::new()),
-            (
-                gray(!s.pairing),
-                id::PAIR,
-                if connected { "Re-&pair controller..." } else { "&Pair controller..." }.into(),
-            ),
-            (MF_STRING, id::VBAN, if s.vban { "Disable &VBAN" } else { "Enable &VBAN" }.into()),
-            (gray(connected), id::DISCONNECT, "&Disconnect".into()),
-            (MF_SEPARATOR, 0, String::new()),
-            (MF_STRING, id::EXIT, "E&xit".into()),
-        ]);
-        (items, tip)
+    /// The menu for the current status
+    fn menu_items(&self) -> Vec<Item> {
+        menu_items(&self.status, |m| self.watches.get(m).and_then(|w| w.pct))
     }
 
     /// Takes in what Tray sent, follows the taskbar theme, steps the animation, flags a stale
@@ -1298,8 +1310,12 @@ impl State {
         if READD_WANTED.replace(false) {
             self.shown = None;
             self.refresh();
-        } else if self.gauge.look_due(Instant::now()) {
-            self.refresh();
+        } else {
+            let now = Instant::now();
+            // Every gauge gets its look, not just the first that's due
+            if self.watches.values_mut().map(|w| w.gauge.look_due(now)).fold(false, |a, due| a | due) {
+                self.refresh();
+            }
         }
         if self.last_theme.elapsed() >= THEME_EVERY {
             self.last_theme = Instant::now();
@@ -1322,7 +1338,7 @@ impl State {
             self.frame_at = Instant::now();
             self.show(next, NIM_MODIFY, None);
         }
-        let stale = MENU_SHOWN.with_borrow(|shown| shown.as_ref().is_some_and(|items| *items != self.menu_items().0));
+        let stale = MENU_SHOWN.with_borrow(|shown| shown.as_ref().is_some_and(|items| *items != self.menu_items()));
         if stale {
             MENU_REOPEN.set(true);
             // SAFETY: plain call; closes the menu this thread has open
@@ -1468,24 +1484,34 @@ fn about(hwnd: HWND) {
     };
 }
 
-/// Pairing throws the current group away, so ask first
+/// How to pair, before turning it on
 fn confirm_pair(hwnd: HWND, connected: bool) -> bool {
-    let dropped =
-        if connected { "Re-pairing controllers will drop the connected controller from the network.\n" } else { "" };
-    let text = format!(
-        "{dropped}Once a new controller is paired, the network will be updated with a new name and passphrase. \
-         Any controller paired to the old network will need to be paired again.\n\
-         If no controller pairs within 2 minutes, the changes will be discarded. Any dropped controllers will \
-         automatically reconnect.\n\nContinue pairing?"
+    let text = wide(
+        "Hold the NVIDIA button on the controller until its light flashes.\n\n\
+         Pairing stays open for 2 minutes, or until one controller pairs; pair again for each more. \
+         Controllers already connected stay connected.",
     );
-    let text = wide(&text);
     let title = if connected { w!("shieldd: re-pair controller") } else { w!("shieldd: pair controller") };
+    // SAFETY: text outlives the call
+    let r = unsafe {
+        MessageBoxW(Some(hwnd), PCWSTR(text.as_ptr()), title, MB_OKCANCEL | MB_ICONINFORMATION | MB_SETFOREGROUND)
+    };
+    r == IDOK
+}
+
+/// A new network throws every pairing away, so ask first
+fn confirm_reconfigure(hwnd: HWND) -> bool {
+    let text = wide(
+        "The network will be made over with a new name and passphrase. All paired controllers will be \
+         disconnected, and each will need to be paired again.\n\n\
+         Pairing opens right after, for the first of them.\n\nReconfigure the network?",
+    );
     // SAFETY: text outlives the call
     let r = unsafe {
         MessageBoxW(
             Some(hwnd),
             PCWSTR(text.as_ptr()),
-            title,
+            w!("shieldd: reconfigure network"),
             MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2 | MB_SETFOREGROUND,
         )
     };
@@ -1634,16 +1660,85 @@ mod tests {
         assert!(off < 8, "{off} pixels off");
     }
 
+    fn up(mac: u8, name: &str, vban: bool) -> Connected {
+        let battery = Battery { charging: false, band: 50, reading: 0xD500, critical: false, must_charge: false };
+        Connected { mac: [mac; 6], name: Some(name.into()), port: Some(mac), battery: Some(battery), vban }
+    }
+
     #[test]
-    fn shunned_line() {
-        assert_eq!(controller_line(None, None, None), "No controllers connected");
+    fn lines() {
         let sh = |name: Option<&str>| Shunned { mac: [0; 6], name: name.map(Into::into) };
-        assert_eq!(controller_line(None, None, Some(&sh(Some("nVidiaBlake")))), "nVidiaBlake (shunned)");
-        assert_eq!(controller_line(None, None, Some(&sh(None))), "Controller (shunned)");
-        assert_eq!(controller_line(None, None, Some(&sh(Some("Pad&Co")))), "Pad&&Co (shunned)");
-        // A connected one wins
+        assert_eq!(shunned_line(&sh(Some("nVidiaBlake"))), "nVidiaBlake (shunned)");
+        assert_eq!(shunned_line(&sh(None)), "Controller (shunned)");
+        assert_eq!(shunned_line(&sh(Some("Pad&Co"))), "Pad&&Co (shunned)");
         let c = Connected { name: Some("Pad&Co".into()), port: Some(4), ..Default::default() };
-        assert_eq!(controller_line(Some(&c), None, Some(&sh(None))), "Pad&&Co: Port #4");
+        assert_eq!(controller_line(&c, None, &mut vec![]), "&Pad&&Co: Port #4");
+        assert_eq!(controller_line(&up(2, "A", false), Some(40), &mut vec![]), "&A: Port #2 (40%)");
+        // Past what's taken, and past & and other non-letters
+        let mut used = vec!['p', 'c', 'x'];
+        assert_eq!(shortcut("Pad", &mut used), "P&ad");
+        assert_eq!(shortcut("Pal", &mut used), "Pa&l");
+        assert_eq!(shortcut("Controller", &mut used), "C&ontroller");
+        assert_eq!(shortcut("P&A-1", &mut used), "P&&A-&1");
+        assert_eq!(shortcut("pal", &mut used), "pal", "nothing left");
+        assert_eq!(used, ['p', 'c', 'x', 'a', 'l', 'o', '1']);
+        assert_eq!(accel("Re-&pair controller..."), Some('p'));
+        assert_eq!(accel("Pad&&Co"), None);
+    }
+
+    #[test]
+    fn a_submenu_per_controller() {
+        let s = Status {
+            controllers: vec![up(1, "A", false), up(2, "B", true)],
+            shunned: vec![Shunned { mac: [3; 6], name: None }],
+            ..Default::default()
+        };
+        let items = menu_items(&s, |m| Some(m[0] * 10));
+        let texts: Vec<&str> = items.iter().map(|i| i.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            [
+                &format!("shieldd (v{})", about_info().version),
+                " > 2 connected.",
+                "",
+                "&A: Port #1 (10%)",
+                "&B: Port #2 (20%)",
+                "Controller (shunned)",
+                "",
+                "Re-&pair controller...",
+                "Re&configure network",
+                "",
+                "E&xit",
+            ]
+        );
+        let b = &items[4];
+        let sub: Vec<_> = b.sub.iter().map(|i| (i.id, i.text.as_str())).collect();
+        assert_eq!(
+            sub,
+            [
+                (0, "MAC 02:02:02:02:02:02"),
+                (0, ""),
+                (id::of(1, id::IDENTIFY), "&Identify"),
+                (id::of(1, id::RENAME), "&Rename..."),
+                (id::of(1, id::VBAN), "Disable &audio"),
+                (id::of(1, id::DISCONNECT), "&Disconnect"),
+            ]
+        );
+        assert_eq!(id::controller(id::of(1, id::VBAN)), Some((1, id::VBAN)));
+        assert_eq!(id::controller(id::EXIT), None);
+        assert!(items[5].flags.0 & MF_GRAYED.0 != 0 && items[5].sub.is_empty());
+        // Pairing grays its line; with nothing at all there's a line to say so
+        let none = menu_items(&Status { pairing: true, ..Default::default() }, |_| None);
+        let at = |t: &str| none.iter().find(|i| i.text == t).unwrap().flags.0 & MF_GRAYED.0 != 0;
+        assert!(at("No controllers connected") && at("&Pair controller..."));
+    }
+
+    #[test]
+    fn the_icon_follows_the_lowest() {
+        let cs = [up(1, "A", false), up(2, "B", false), Connected { mac: [3; 6], ..Default::default() }];
+        let pct = |m: &[u8; 6]| [None, Some(60), Some(30), None][usize::from(m[0])];
+        assert_eq!(lowest(&cs, pct).map(|c| c.mac), Some([2; 6]));
+        assert_eq!(lowest(&cs[2..], pct).map(|c| c.mac), None, "no reading, nothing to show");
     }
 
     #[test]

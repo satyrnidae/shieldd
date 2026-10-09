@@ -36,7 +36,8 @@ pub struct ApOptions {
     pub ps_hold: Option<Duration>,
     /// Keep the SSID out of beacons, see ApConfig::hidden
     pub hidden: bool,
-    /// Pairing: WPS push-button until one enrollee has the credential
+    /// Pairing: WPS push-button on from the start, until one enrollee has the credential or
+    /// Link::set_wps turns it off
     pub wps: Option<WpsConfig>,
 }
 
@@ -94,8 +95,20 @@ impl Link<'_> {
     }
 
     /// See Bss::shunned
-    pub fn shunned(&self) -> Option<Mac> {
+    pub fn shunned(&self) -> Vec<Mac> {
         self.bss.shunned()
+    }
+
+    /// Turns WPS push-button on with this credential, or off, without restarting the AP. It goes off
+    /// on its own once one enrollee has the credential. The SSID shows while it's on; see
+    /// ApConfig::hidden. A station partway through EAP-WSC when it goes off still finishes.
+    pub fn set_wps(&mut self, wps: Option<WpsConfig>) -> Result<()> {
+        self.bss.set_wps(self.chip, self.tx, wps)
+    }
+
+    /// See Bss::is_associated
+    pub fn is_associated(&self, sta: &Mac) -> bool {
+        self.bss.is_associated(sta)
     }
 }
 
@@ -273,8 +286,7 @@ fn deliver(
 ) -> Result<()> {
     if let Event::Paired(..) = e {
         // One controller per pairing: drop the WPS IE, and hide the SSID again if asked to
-        bss.cfg.wps = None;
-        chip.download_beacon(tx, &bss.cfg.beacon())?;
+        bss.set_wps(chip, tx, None)?;
     }
     let ev = match &e {
         Event::Associated(m) => RadioEvent::Associated(*m),

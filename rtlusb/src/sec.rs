@@ -1,7 +1,7 @@
 //! Hardware CCMP: security engine and key CAM, as rtw88 sec.c and rtw_ops_set_key.
 //!
 //! Default key search is on, like rtw88: CAM entries 0-3 hold group keys by key index,
-//! pairwise keys go in entry 4 and up, matched by station address.
+//! pairwise keys go in entry 4 and up, one per station, matched by station address.
 
 use anyhow::Result;
 
@@ -26,6 +26,8 @@ const ENGINE_EN: u16 = 1 << 9;
 const CAM_AES: u32 = 4;
 
 pub const FIRST_PAIRWISE_ENTRY: u8 = 4;
+/// The key CAM's size, as rtw88's RTW_MAX_SEC_CAM_NUM
+pub const CAM_ENTRIES: u8 = 32;
 
 impl Chip {
     /// rtw_sec_enable_sec_engine

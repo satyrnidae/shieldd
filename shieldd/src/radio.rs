@@ -1,32 +1,39 @@
-//! The host: the controller on our own RTL8811AU driver (rtlusb). A frame from the controller
-//! and our reply to it are handled on one thread with no driver queue in between; the Windows
+//! The host: controllers on our own RTL8811AU driver (rtlusb). A frame from a controller and
+//! our reply to it are handled on one thread with no driver queue in between; the Windows
 //! Wi-Fi Direct stack's queue held replies for the dozing controller, ~330 ms of input lag.
 //!
-//! `--pair`: the same, but on a fresh group (pair.rs) with WPS push-button on. The group goes
-//! to --conf once the controller has it, and hosting carries on when it rejoins.
+//! Up to four controllers at once, each with its own session and virtual pad (seat.rs), sharing
+//! the mouse, media keys and VBAN streams.
+//!
+//! `--pair`: WPS push-button on the saved group until one controller has the credential, or
+//! PAIR_WINDOW runs out. Nobody already connected is dropped.
+//!
+//! `--reconfigure-network`: a fresh group (pair.rs), saved to --conf at once, then pairing as
+//! --pair. Every controller paired to the old group has to pair again.
 //!
 //! `--background`: hosting in a loop that waits for the adapter and starts over when it fails.
 //!
-//! The tray's menu lands here too: pairing restarts the run on a new group, and VBAN feeds
-//! the mic out and the headset in (vban.rs).
+//! The tray's menu lands here too: pairing, reconfiguring, and each controller's identify,
+//! rename, VBAN and disconnect.
 
+use std::collections::{BTreeSet, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use ozproto::Mac;
 use ozproto::wire::ETHERTYPE;
-use ozproto::{Config, Event, Host};
 use rtlusb::ap::WpsConfig;
 use rtlusb::wps::{Credential, Device};
-use rtlusb::{ApOptions, Radio, RadioEvent};
-use shieldtray::{self as tray, Command, Connected, Shunned, Status, Tray};
+use rtlusb::{ApOptions, Link, Radio, RadioEvent};
+use shieldtray::{self as tray, Command, Shunned, Status, Tray};
 use shieldutl::mac::fmt_mac;
 use shieldutl::vban::{self, Vban};
 use tracing::{debug, info, trace, warn};
 
-use crate::controller::{Controller, HEADSET_EP, Report, RumbleProbe};
-use crate::outputs::Outputs;
+use crate::outputs::Desktop;
+use crate::seat::{Leaving, MAX_SEATS, Seat};
 use crate::{Args, hex, known_clients, p2pconf, pair};
 
 /// WPS walk time: how long push-button stays on
@@ -34,7 +41,7 @@ const PAIR_WINDOW: Duration = Duration::from_secs(120);
 const SLOW_POLL: Duration = Duration::from_millis(100);
 /// No frames for this long while connected: let go of everything
 const STALE: Duration = Duration::from_secs(1);
-/// Hold replies for the dozing controller up to this long (rtlusb bss.rs). Override with
+/// Hold replies for a dozing controller up to this long (rtlusb bss.rs). Override with
 /// SHIELDD_PS_HOLD_MS, 0 to send at once.
 const PS_HOLD: Duration = Duration::from_millis(30);
 /// --background: how often to look for the adapter
@@ -43,90 +50,112 @@ const ADAPTER_EVERY: Duration = Duration::from_secs(2);
 /// that lasted longer than the max starts again from the min.
 const RETRY_MIN: Duration = Duration::from_secs(2);
 const RETRY_MAX: Duration = Duration::from_secs(60);
-/// How long a DISCONNECT goodbye gets to be acknowledged before the kick goes out anyway.
-/// The controller acks it and carries on, so it only goes first as a courtesy.
-const GOODBYE_WAIT: Duration = Duration::from_secs(1);
 /// A controller sent away is ignored this long, so it gives up and sleeps: its sleep timer is
 /// 30 s, plus some slack. Kicked without this, it rejoins within ~130 ms.
 const SLEEP_SHUN: Duration = Duration::from_millis(30_250);
 /// A controller that associated, or is connected without a battery reading, shows as joining until
 /// it's up, or this long
 const JOIN_TIMEOUT: Duration = Duration::from_secs(15);
-/// Retry saving a just-paired group this often until it works
+/// Retry saving a new group this often until it works
 const SAVE_RETRY: Duration = Duration::from_secs(5);
 /// Headset audio owed after a stall goes, past this much
 const ISOC_CREDIT_MAX: Duration = Duration::from_millis(40);
 
-/// A controller being sent away: a DISCONNECT goodbye, then a kick, SLEEP_SHUN and the end of
-/// its session once it's acknowledged or GOODBYE_WAIT runs out
-#[derive(Debug, Clone, Copy)]
-struct Leaving {
-    since: Instant,
-    deadline: Instant,
+/// How a run starts
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Start {
+    /// A new group, saved before anything else
+    reconfigure: bool,
+    /// WPS push-button on from the start
+    pair: bool,
 }
 
-impl Leaving {
-    fn new(now: Instant) -> Self {
-        Leaving { since: now, deadline: now + GOODBYE_WAIT }
-    }
+impl Start {
+    const RECONFIGURE: Start = Start { reconfigure: true, pair: true };
 }
 
 /// Why a run ended
 enum Next {
     Quit,
-    /// Pair from the tray: a new run, on a new group
-    Pair,
-    /// Tray pairing timed out: back to the saved group
-    Host,
+    /// Reconfigure from the tray: a new run, on a new group
+    Reconfigure,
 }
 
-/// What outlives a run: the tray, VBAN with its sockets, and a paired group --conf wouldn't take
+/// What outlives a run: the tray, VBAN with its sockets, and a new group --conf wouldn't take
 struct Shared {
     tray: Tray,
+    /// The shared VBAN streams, up while any controller has VBAN on
     vban: Option<Vban>,
+    /// Controllers with VBAN on, connected or not
+    vban_on: BTreeSet<Mac>,
     /// Hosted in place of --conf's, and saved again each run until it works
     unsaved: Option<p2pconf::Group>,
     /// --conf, which known-clients sits next to
     conf: PathBuf,
     /// --conf is the default one, whose key gets sealed
     seal: bool,
+    /// Picked from the tray with no adapter to do it on; done once there is
+    pending: Option<Start>,
 }
 
 impl Shared {
-    fn vban_marker() -> PathBuf {
+    fn vban_file() -> PathBuf {
+        crate::settings_dir().join("vban-clients")
+    }
+
+    /// From before VBAN was per controller; which one it meant is anyone's guess
+    fn old_vban_marker() -> PathBuf {
         crate::settings_dir().join("vban.on")
     }
 
-    /// Starts or stops VBAN, and remembers it for next time
-    fn set_vban(&mut self, on: bool) {
-        if on == self.vban.is_some() {
-            return;
+    /// Controllers that had VBAN on last time, one MAC a line
+    fn load_vban(&mut self) {
+        if std::fs::remove_file(Self::old_vban_marker()).is_ok() {
+            info!("VBAN is per controller now; turn it on again in each one's menu");
         }
-        if on {
+        let text = std::fs::read_to_string(Self::vban_file()).unwrap_or_default();
+        self.vban_on = text.lines().filter_map(|l| known_clients::parse_mac(l.trim())).collect();
+        self.sync_vban();
+    }
+
+    /// The streams up iff any controller wants them
+    fn sync_vban(&mut self) {
+        if self.vban_on.is_empty() {
+            self.vban = None;
+        } else if self.vban.is_none() {
             match Vban::start() {
                 Ok(v) => self.vban = Some(v),
+                // Who wants it stays remembered; the next toggle tries again
                 Err(e) => {
                     warn!("VBAN: {e:#}");
                     self.tray.problem("VBAN failed", &format!("{e:#}"));
-                    return;
                 }
             }
-        } else {
-            self.vban = None;
-        }
-        let marker = Self::vban_marker();
-        let saved = if on {
-            std::fs::create_dir_all(crate::settings_dir()).and_then(|()| std::fs::write(&marker, b""))
-        } else {
-            std::fs::remove_file(&marker)
-        };
-        if let Err(e) = saved {
-            debug!("remembering VBAN {on}: {e}");
         }
     }
 
+    /// Turns VBAN on or off for `mac`, and remembers it for next time. Returns whether it's on.
+    fn set_vban(&mut self, mac: &Mac, on: bool) -> bool {
+        let changed = if on { self.vban_on.insert(*mac) } else { self.vban_on.remove(mac) };
+        if !on && let Some(v) = self.vban.as_mut() {
+            v.forget_mic(mac);
+        }
+        self.sync_vban();
+        if changed {
+            let text: String = self.vban_on.iter().map(|m| format!("{}\n", fmt_mac(m))).collect();
+            let saved = std::fs::create_dir_all(crate::settings_dir()).and_then(|()| match text.is_empty() {
+                true => std::fs::remove_file(Self::vban_file()),
+                false => std::fs::write(Self::vban_file(), text),
+            });
+            if let Err(e) = saved {
+                debug!("remembering VBAN for {}: {e}", fmt_mac(mac));
+            }
+        }
+        self.vban_on.contains(mac)
+    }
+
     /// Saves a controller's new name, or says why it couldn't. Returns whether it did.
-    fn rename(&self, mac: &[u8; 6], name: &str) -> bool {
+    fn rename(&self, mac: &Mac, name: &str) -> bool {
         match known_clients::save(&self.conf, mac, name) {
             Ok(()) => {
                 info!(sta = %fmt_mac(mac), name, "renamed");
@@ -140,30 +169,44 @@ impl Shared {
         }
     }
 
-    /// Between runs, with no radio: Exit, VBAN, and a rename the dialog was still open for
+    /// Between runs, with no radio: Exit, VBAN, a rename the dialog was still open for, and
+    /// pairing or reconfiguring for once there's an adapter
     fn idle(&mut self, quit: &AtomicBool, d: Duration) {
         let until = Instant::now() + d;
         while !quit.load(Ordering::Relaxed) && Instant::now() < until {
             for cmd in self.tray.commands() {
                 match cmd {
                     Command::Exit => quit.store(true, Ordering::Relaxed),
-                    Command::Vban(on) => self.set_vban(on),
-                    Command::Pair => self.tray.problem("Can't pair yet", "Plug in the adapter first."),
+                    Command::Vban(mac, on) => {
+                        self.set_vban(&mac, on);
+                    }
+                    Command::Pair | Command::Reconfigure => {
+                        let start = if cmd == Command::Pair {
+                            Start { pair: true, ..Start::default() }
+                        } else {
+                            Start::RECONFIGURE
+                        };
+                        // A reconfigure already waiting covers a pair
+                        if self.pending != Some(Start::RECONFIGURE) {
+                            self.pending = Some(start);
+                        }
+                        // Between runs that failed, the adapter may well be in already
+                        match rtlusb::usb::present() {
+                            true => self
+                                .tray
+                                .problem("Pairing shortly", "Pairing starts when shieldd tries the adapter again."),
+                            false => self
+                                .tray
+                                .problem("Waiting for the adapter", "Pairing starts once the adapter is plugged in."),
+                        }
+                    }
                     Command::Rename(mac, name) => {
                         self.rename(&mac, &name);
                     }
-                    Command::Identify | Command::Disconnect => {}
+                    Command::Identify(_) | Command::Disconnect(_) => {}
                 }
             }
-            self.tray.update(Status {
-                controller: None,
-                vban: self.vban.is_some(),
-                pairing: false,
-                ssid: None,
-                channel: None,
-                joining: false,
-                shunned: None,
-            });
+            self.tray.update(Status::default());
             std::thread::sleep(Duration::from_millis(100));
         }
     }
@@ -174,16 +217,14 @@ pub fn run(args: Args, quit: &AtomicBool) -> Result<()> {
     let mut sh = Shared {
         tray: Tray::start(crate::ABOUT),
         vban: None,
+        vban_on: BTreeSet::new(),
         unsaved: None,
         conf: args.conf.clone(),
         seal: crate::is_default_conf(&args.conf),
+        pending: None,
     };
-    if Shared::vban_marker().exists() {
-        sh.set_vban(true);
-    }
-    let mut pair = args.pair;
-    // Only `shieldd --pair` itself gives up when nobody pairs; from the tray it's back to hosting
-    let mut pair_bails = args.pair && !args.background;
+    sh.load_vban();
+    let mut start = Start { reconfigure: args.reconfigure_network, pair: args.pair || args.reconfigure_network };
     let mut backoff = RETRY_MIN;
     let mut waiting = false;
     while !quit.load(Ordering::Relaxed) {
@@ -196,20 +237,21 @@ pub fn run(args: Args, quit: &AtomicBool) -> Result<()> {
             continue;
         }
         waiting = false;
+        if let Some(p) = sh.pending.take() {
+            start = p;
+        }
         let started = Instant::now();
-        let next = run_once(&args, pair, pair_bails, quit, &mut sh);
-        pair_bails = false;
+        let next = run_once(&args, start, quit, &mut sh);
+        start = Start::default();
         match next {
             Ok(Next::Quit) => break,
-            Ok(Next::Pair) => pair = true,
-            Ok(Next::Host) => pair = false,
+            Ok(Next::Reconfigure) => start = Start::RECONFIGURE,
             Err(e) if !args.background => return Err(e),
             Err(e) => {
                 if started.elapsed() > RETRY_MAX {
                     backoff = RETRY_MIN;
                 }
                 warn!("{e:#}; starting over in {backoff:?}");
-                pair = false;
                 sh.idle(quit, backoff);
                 backoff = (backoff * 2).min(RETRY_MAX);
             }
@@ -218,21 +260,98 @@ pub fn run(args: Args, quit: &AtomicBool) -> Result<()> {
     Ok(())
 }
 
-fn run_once(args: &Args, pair: bool, pair_bails: bool, quit: &AtomicBool, sh: &mut Shared) -> Result<Next> {
-    let mut outputs = Outputs::new(args.scale())?;
+/// WPS push-button handing out `group`
+fn wps_for(group: &p2pconf::Group) -> Result<WpsConfig> {
+    let passphrase = group
+        .psk
+        .passphrase()
+        .context("the saved group has a key but no passphrase to hand out; reconfigure the network to pair")?;
+    Ok(WpsConfig {
+        device: Device::from_seed(group.ssid.as_bytes(), "shieldd"),
+        credential: Credential { ssid: group.ssid.clone(), passphrase: passphrase.to_owned() },
+    })
+}
+
+/// Saves `group` to --conf, or keeps it hosted unsaved. Returns when to try again. Only the first
+/// try, `!retry`, says it failed.
+fn save_group(args: &Args, sh: &mut Shared, group: &p2pconf::Group, now: Instant, retry: bool) -> Option<Instant> {
+    match p2pconf::write(&args.conf, group, sh.seal) {
+        Ok(backup) => {
+            info!(ssid = group.ssid, conf = %args.conf.display(), backup = ?backup, "new group saved");
+            sh.unsaved = None;
+            None
+        }
+        Err(e) if retry => {
+            debug!("saving the new group: {e:#}");
+            Some(now + SAVE_RETRY)
+        }
+        Err(e) => {
+            // Hosted until shieldd exits, restarts included
+            warn!("saving the new group failed: {e:#}; retrying every {SAVE_RETRY:?}");
+            sh.tray.problem(
+                "Couldn't save the new network",
+                &format!("{e:#}\n\nControllers paired to it work until shieldd exits. Retrying."),
+            );
+            sh.unsaved = Some(group.clone());
+            Some(now + SAVE_RETRY)
+        }
+    }
+}
+
+/// The seat for `mac`, made if it's new. One past MAX_SEATS takes the place of one that's
+/// gone, with no session and not even joining Wi-Fi, or is sent away to sleep if they're all here.
+fn seat_for<'a>(
+    seats: &'a mut Vec<Seat>,
+    mac: Mac,
+    args: &Args,
+    sh: &Shared,
+    link: &mut Link,
+) -> Result<Option<&'a mut Seat>> {
+    if let Some(i) = seats.iter().position(|s| s.mac == mac) {
+        return Ok(Some(&mut seats[i]));
+    }
+    if seats.len() >= MAX_SEATS {
+        match seats.iter().position(|s| s.host.peer().is_none() && !link.is_associated(&s.mac)) {
+            Some(i) => {
+                info!(gone = %fmt_mac(&seats[i].mac), new = %fmt_mac(&mac), "seat handed over");
+                seats.remove(i);
+            }
+            None => {
+                warn!(sta = %fmt_mac(&mac), "a fifth controller; sending it away");
+                link.kick(&mac)?;
+                link.shun(&mac, SLEEP_SHUN);
+                sh.tray.problem(
+                    "Too many controllers",
+                    &format!("Only {MAX_SEATS} can be connected at once; {} was sent away.", fmt_mac(&mac)),
+                );
+                return Ok(None);
+            }
+        }
+    }
+    seats.push(Seat::new(mac, args.mic, sh.vban_on.contains(&mac)));
+    Ok(seats.last_mut())
+}
+
+fn seat_mut<'a>(seats: &'a mut [Seat], mac: &Mac) -> Option<&'a mut Seat> {
+    seats.iter_mut().find(|s| s.mac == *mac)
+}
+
+fn run_once(args: &Args, start: Start, quit: &AtomicBool, sh: &mut Shared) -> Result<Next> {
+    let mut desktop = Desktop::new(args.scale());
+    let reconfigure = start.reconfigure || (start.pair && sh.unsaved.is_none() && !args.conf.exists());
     let mut group = match &sh.unsaved {
-        _ if pair => pair::new_group(),
+        // An unsaved group stays until the new one's saved or takes its place, in case the radio
+        // doesn't come up
+        _ if reconfigure => pair::new_group(),
         Some(g) => g.clone(),
+        None if !args.conf.exists() => bail!(
+            "no saved group in {}; pair a controller first: shieldd --pair, or Pair controller in the tray",
+            args.conf.display()
+        ),
         None => p2pconf::read(&args.conf, sh.seal)?,
     };
-    let wps = match pair {
-        true => Some(WpsConfig {
-            device: Device::from_seed(group.ssid.as_bytes(), "shieldd"),
-            credential: Credential {
-                ssid: group.ssid.clone(),
-                passphrase: group.psk.passphrase().context("a group to pair has no passphrase to hand out")?.to_owned(),
-            },
-        }),
+    let wps = match start.pair || reconfigure {
+        true => Some(wps_for(&group)?),
         false => None,
     };
     let pmk = rtlusb::wpa::pmk_of(&group.psk, &group.ssid);
@@ -242,54 +361,40 @@ fn run_once(args: &Args, pair: bool, pair_bails: bool, quit: &AtomicBool, sh: &m
         None => Some(PS_HOLD),
     };
     info!(?ps_hold, "power save hold");
+    let pairing = wps.is_some();
     let opts =
         ApOptions { ssid: group.ssid.clone(), channel: group.channel, bssid: None, pmk, ps_hold, hidden: true, wps };
     sh.tray.update(Status {
-        controller: None,
-        vban: sh.vban.is_some(),
-        pairing: pair,
+        pairing,
         ssid: Some(group.ssid.clone()),
         channel: (group.channel != 0).then_some(group.channel),
-        joining: false,
-        shunned: None,
+        ..Status::default()
     });
     let mut radio = Radio::start(opts)?;
-    // Pairing surveys for its channel; that's the one the controller will remember
+    // A new group surveys for its channel; that's the one the controllers will remember
     group.channel = radio.channel();
     let channel = group.channel;
     let bssid = fmt_mac(&radio.bssid());
-    if pair {
+    // Saved before anyone pairs, so a controller that does is never left on a group shieldd forgot
+    let mut save_due = match reconfigure {
+        true => save_group(args, sh, &group, Instant::now(), false),
+        false => sh.unsaved.is_some().then(Instant::now),
+    };
+    if pairing {
         info!(ssid = group.ssid, %bssid, channel, "pairing: hold the NVIDIA button until the light flashes");
     } else {
-        info!(ssid = group.ssid, %bssid, channel, "waiting for the controller; tap the NVIDIA button");
+        info!(ssid = group.ssid, %bssid, channel, "waiting for controllers; tap the NVIDIA button");
     }
 
-    let mut host = Host::new(Config::default());
-    let mut ctl = Controller::new(args.mic);
-    let vban_on = sh.vban.is_some();
-    ctl.set_streams(args.mic || vban_on, vban_on);
-    let mut probe = RumbleProbe::from_env();
-    // Rumble waiting for the controller to take the previous one
-    let mut rumble: Option<[u16; 3]> = None;
+    let mut seats: Vec<Seat> = Vec::new();
+    // Past the 4-way handshake: their leaving is worth a sound
+    let mut linked: HashSet<Mac> = HashSet::new();
     let mut last_slow = Instant::now();
-    let mut last_rx: Option<Instant> = None;
-    let pair_until = pair.then(|| Instant::now() + PAIR_WINDOW);
-    let mut paired = false;
-    let mut pair_timed_out = false;
-    // Headset audio: time owed in isoc units, since when, and the unit's frame number
+    let mut pair_until = pairing.then(|| Instant::now() + PAIR_WINDOW);
+    // Headset audio: time owed in isoc units, and since when
     let mut isoc_credit = Duration::ZERO;
     let mut isoc_at: Option<Instant> = None;
-    let mut isoc_frame: u8 = 0;
-    let mut leaving: Option<Leaving> = None;
     let mut names = known_clients::load(&args.conf);
-    // Since a controller associated, until it's up with a battery reading
-    let mut joining: Option<Instant> = None;
-    // JOIN_TIMEOUT ran out on the controller there now; no spinner for it again
-    let mut join_gave_up = false;
-    // Sent away to sleep, with its name looked up once. rtlusb's shun says how long.
-    let mut shunned: Option<Shunned> = None;
-    // Paired, but writing --conf failed: when to try again
-    let mut save_due: Option<Instant> = sh.unsaved.is_some().then(Instant::now);
     // Ends this run but not the program, unlike quit
     let stop = AtomicBool::new(false);
     let mut next = Next::Quit;
@@ -298,28 +403,41 @@ fn run_once(args: &Args, pair: bool, pair_bails: bool, quit: &AtomicBool, sh: &m
         let now = Instant::now();
         match ev {
             RadioEvent::Data { src, ethertype: ETHERTYPE, payload } => {
-                last_rx = Some(now);
                 trace!(src = %fmt_mac(&src), frame = %hex(payload), "rx");
-                for ev in host.on_frame(now, src, payload) {
-                    on_event(ev, now, &mut host, &mut ctl, &mut outputs);
+                if let Some(seat) = seat_for(&mut seats, src, args, sh, link)? {
+                    seat.on_frame(now, payload, &mut desktop);
                 }
             }
             RadioEvent::Data { ethertype, .. } => {
                 debug!(ethertype = format!("{ethertype:#06x}"), "ignoring data frame")
             }
-            RadioEvent::Associated(_) => joining = Some(now),
+            RadioEvent::Associated(sta) => {
+                if let Some(seat) = seat_for(&mut seats, sta, args, sh, link)? {
+                    seat.joining = Some(now);
+                }
+            }
             RadioEvent::Connected(sta) => {
                 info!(sta = %fmt_mac(&sta), "Wi-Fi link up");
-                tray::device_sound(true);
+                linked.insert(sta);
+                // Its pad's first plug-in plays Windows' own sound a moment later; one's enough
+                if seat_mut(&mut seats, &sta).is_some_and(|s| s.pad.plugged()) {
+                    tray::device_sound(true);
+                }
             }
             RadioEvent::Disconnected(sta) => {
-                joining = None;
-                join_gave_up = false;
-                info!(sta = %fmt_mac(&sta), "Wi-Fi link down");
-                tray::device_sound(false);
+                if let Some(seat) = seat_mut(&mut seats, &sta) {
+                    seat.joining = None;
+                    seat.join_gave_up = false;
+                }
+                // Not for one turned away before it ever connected
+                if linked.remove(&sta) {
+                    info!(sta = %fmt_mac(&sta), "Wi-Fi link down");
+                    tray::device_sound(false);
+                }
             }
             RadioEvent::Paired(sta, model) => {
-                paired = true;
+                // rtlusb has turned WPS off already: one controller per pairing
+                pair_until = None;
                 // Named after its model the first time; a rename, or an earlier pairing, wins
                 if !names.contains_key(&sta)
                     && let Some(name) = known_clients::clean(model)
@@ -329,26 +447,7 @@ fn run_once(args: &Args, pair: bool, pair_bails: bool, quit: &AtomicBool, sh: &m
                     }
                     names.insert(sta, name);
                 }
-                // The controller has the credential now, so this group is the one it remembers
-                match p2pconf::write(&args.conf, &group, sh.seal) {
-                    Ok(backup) => info!(
-                        sta = %fmt_mac(&sta),
-                        ssid = group.ssid,
-                        conf = %args.conf.display(),
-                        backup = ?backup,
-                        "paired; group saved, waiting for the controller to rejoin"
-                    ),
-                    Err(e) => {
-                        // Hosted until shieldd exits, restarts included
-                        warn!("paired, but saving the group failed: {e:#}; retrying every {SAVE_RETRY:?}");
-                        sh.tray.problem(
-                            "Couldn't save the paired network",
-                            &format!("{e:#}\n\nThe controller works until shieldd exits. Retrying."),
-                        );
-                        sh.unsaved = Some(group.clone());
-                        save_due = Some(now + SAVE_RETRY);
-                    }
-                }
+                info!(sta = %fmt_mac(&sta), ssid = group.ssid, "paired; waiting for the controller to rejoin");
             }
             RadioEvent::PairingFailed(sta, why) => {
                 warn!(sta = %fmt_mac(&sta), "pairing failed: {why}; still listening, hold the button again")
@@ -358,32 +457,33 @@ fn run_once(args: &Args, pair: bool, pair_bails: bool, quit: &AtomicBool, sh: &m
                     stop.store(true, Ordering::Relaxed);
                 }
                 if let Some(t) = pair_until
-                    && !paired
                     && now >= t
                 {
-                    pair_timed_out = true;
-                    next = Next::Host;
-                    stop.store(true, Ordering::Relaxed);
+                    pair_until = None;
+                    link.set_wps(None)?;
+                    warn!("no controller paired within {PAIR_WINDOW:?}; pairing is off");
+                    sh.tray.problem("No controller paired", "Nothing paired in 2 minutes; pairing is off again.");
                 }
                 if now.duration_since(last_slow) >= SLOW_POLL {
                     last_slow = now;
                     if let Some(t) = save_due
                         && now >= t
                     {
-                        match p2pconf::write(&args.conf, &group, sh.seal) {
-                            Ok(_) => {
-                                info!(conf = %args.conf.display(), "group saved");
-                                sh.unsaved = None;
-                                save_due = None;
-                            }
-                            Err(e) => {
-                                debug!("saving the group: {e:#}");
-                                save_due = Some(now + SAVE_RETRY);
-                            }
-                        }
+                        save_due = save_group(args, sh, &group, now, true);
                     }
-                    for ev in host.poll(now) {
-                        on_event(ev, now, &mut host, &mut ctl, &mut outputs);
+                    for seat in &mut seats {
+                        seat.poll(now, &mut desktop);
+                    }
+                    for seat in &mut seats {
+                        let Some(why) = seat.pad_failed.take() else { continue };
+                        warn!(sta = %fmt_mac(&seat.mac), "no virtual pad for it: {why}; sending it away");
+                        let text = format!("{why}\n\nThe controller was sent away.");
+                        sh.tray.problem("Couldn't add a virtual pad", &text);
+                        if let Some(peer) = seat.host.peer() {
+                            link.kick(&peer)?;
+                            link.shun(&peer, SLEEP_SHUN);
+                            seat.end_session(now, &mut desktop);
+                        }
                     }
                     for cmd in sh.tray.commands() {
                         match cmd {
@@ -391,111 +491,123 @@ fn run_once(args: &Args, pair: bool, pair_bails: bool, quit: &AtomicBool, sh: &m
                                 quit.store(true, Ordering::Relaxed);
                                 stop.store(true, Ordering::Relaxed);
                             }
-                            Command::Pair => {
-                                info!("pairing from the tray; letting go of the controller");
-                                next = Next::Pair;
+                            Command::Pair if pair_until.is_none() => match wps_for(&group) {
+                                Ok(w) => {
+                                    link.set_wps(Some(w))?;
+                                    pair_until = Some(now + PAIR_WINDOW);
+                                    info!("pairing from the tray: hold the NVIDIA button until the light flashes");
+                                }
+                                Err(e) => sh.tray.problem("Can't pair", &format!("{e:#}")),
+                            },
+                            Command::Pair => {}
+                            Command::Reconfigure => {
+                                info!("reconfiguring the network from the tray; letting go of every controller");
+                                next = Next::Reconfigure;
                                 stop.store(true, Ordering::Relaxed);
                             }
-                            Command::Vban(on) => {
-                                sh.set_vban(on);
-                                let on = sh.vban.is_some();
-                                ctl.set_streams(args.mic || on, on);
+                            Command::Vban(mac, on) => {
+                                let on = sh.set_vban(&mac, on);
+                                if let Some(s) = seat_mut(&mut seats, &mac) {
+                                    s.set_vban(on, args.mic);
+                                }
                             }
-                            Command::Identify => ctl.identify(),
+                            Command::Identify(mac) => {
+                                if let Some(s) = seat_mut(&mut seats, &mac) {
+                                    s.ctl.identify();
+                                }
+                            }
                             Command::Rename(mac, name) => {
                                 if sh.rename(&mac, &name) {
                                     names.insert(mac, name);
                                 }
                             }
-                            Command::Disconnect => {
-                                if leaving.is_none() && host.say_goodbye() {
-                                    info!("disconnecting from the tray; saying goodbye first");
-                                    leaving = Some(Leaving::new(now));
+                            Command::Disconnect(mac) => {
+                                if let Some(s) = seat_mut(&mut seats, &mac)
+                                    && s.leaving.is_none()
+                                    && s.host.say_goodbye()
+                                {
+                                    info!(sta = %fmt_mac(&mac), "disconnecting from the tray; saying goodbye first");
+                                    s.leaving = Some(Leaving::new(now));
                                 }
                             }
                         }
                     }
-                    if host.peer().is_some() {
-                        ctl.poll(now, &mut host);
-                        if let Some(p) = probe.as_mut() {
-                            p.poll(now, &mut ctl, &mut host);
+                    for seat in &mut seats {
+                        // Before the tray update, so it says "charge it" rather than "critical"
+                        if seat.leaving.is_none() && seat.ctl.must_charge(now) && seat.host.say_goodbye() {
+                            let sta = fmt_mac(&seat.mac);
+                            warn!(%sta, "battery too low to use; sending the controller away until it charges");
+                            seat.ctl.let_go();
+                            seat.leaving = Some(Leaving::new(now));
                         }
-                    }
-                    // Before the tray update, so it says "charge it" rather than "critical"
-                    if leaving.is_none() && ctl.must_charge(now) && host.say_goodbye() {
-                        warn!("battery too low to use; sending the controller away until it charges");
-                        ctl.let_go();
-                        leaving = Some(Leaving::new(now));
-                    }
-                    // Never on the tick it started, so the tray has seen the flat battery and said
-                    // so before the controller's gone
-                    if let Some(l) = leaving
-                        && now > l.since
-                        && (host.all_delivered() || now >= l.deadline)
-                    {
-                        leaving = None;
-                        if let Some(peer) = host.peer() {
-                            info!(sta = %fmt_mac(&peer), acked = host.all_delivered(), "goodbye done, kicking");
-                            link.kick(&peer)?;
-                            link.shun(&peer, SLEEP_SHUN);
-                            shunned = Some(Shunned { mac: peer, name: names.get(&peer).cloned() });
-                            if let Some(ev) = host.end_session() {
-                                on_event(ev, now, &mut host, &mut ctl, &mut outputs);
+                        // Never on the tick it started, so the tray has seen the flat battery and
+                        // said so before the controller's gone
+                        if let Some(l) = seat.leaving
+                            && now > l.since
+                            && (seat.host.all_delivered() || now >= l.deadline)
+                        {
+                            seat.leaving = None;
+                            if let Some(peer) = seat.host.peer() {
+                                let acked = seat.host.all_delivered();
+                                info!(sta = %fmt_mac(&peer), acked, "goodbye done, kicking");
+                                link.kick(&peer)?;
+                                link.shun(&peer, SLEEP_SHUN);
+                                seat.end_session(now, &mut desktop);
                             }
                         }
+                        let present = seat.host.peer().is_some();
+                        if seat.up() {
+                            seat.joining = None;
+                            seat.join_gave_up = false;
+                        } else if seat.joining.is_some_and(|t| now.duration_since(t) >= JOIN_TIMEOUT) {
+                            warn!(sta = %fmt_mac(&seat.mac), "controller hasn't come up in {JOIN_TIMEOUT:?}");
+                            seat.joining = None;
+                            seat.join_gave_up = present;
+                        } else if present && seat.joining.is_none() && !seat.join_gave_up {
+                            seat.joining = Some(now);
+                        }
+                        // A new session gets its own JOIN_TIMEOUT, Wi-Fi link or not
+                        if !present {
+                            seat.join_gave_up = false;
+                        }
+                        if let Some(t) = seat.last_rx
+                            && now.duration_since(t) > STALE
+                        {
+                            debug!(sta = %fmt_mac(&seat.mac), "no frames for {STALE:?}, releasing outputs");
+                            seat.release(&mut desktop);
+                            seat.last_rx = None;
+                        }
                     }
-                    if shunned.as_ref().is_some_and(|s| link.shunned() != Some(s.mac)) {
-                        shunned = None;
-                    }
-                    let controller = host.peer().map(|mac| Connected {
-                        mac,
-                        name: names.get(&mac).cloned(),
-                        port: outputs.port(),
-                        battery: ctl.battery(),
-                    });
-                    let up = controller.as_ref().is_some_and(|c| c.battery.is_some());
-                    let present = controller.is_some();
-                    if up {
-                        joining = None;
-                        join_gave_up = false;
-                    } else if joining.is_some_and(|t| now.duration_since(t) >= JOIN_TIMEOUT) {
-                        warn!("controller hasn't come up in {JOIN_TIMEOUT:?}");
-                        joining = None;
-                        join_gave_up = present;
-                    } else if present && joining.is_none() && !join_gave_up {
-                        joining = Some(now);
-                    }
-                    // A new session gets its own JOIN_TIMEOUT, Wi-Fi link or not
-                    if !present {
-                        join_gave_up = false;
-                    }
+                    let controllers =
+                        seats.iter_mut().filter_map(|s| s.connected(names.get(&s.mac).cloned())).collect();
+                    let shunned = link
+                        .shunned()
+                        .into_iter()
+                        .filter(|m| !seats.iter().any(|s| s.mac == *m && s.host.peer().is_some()))
+                        .map(|mac| Shunned { mac, name: names.get(&mac).cloned() })
+                        .collect();
                     sh.tray.update(Status {
-                        controller,
-                        vban: sh.vban.is_some(),
-                        pairing: pair && !paired,
+                        controllers,
+                        pairing: pair_until.is_some(),
                         ssid: Some(group.ssid.clone()),
                         channel: Some(channel),
-                        joining: joining.is_some(),
-                        shunned: shunned.clone(),
+                        joining: seats.iter().any(|s| s.joining.is_some()),
+                        shunned,
                     });
-                    if let Some(t) = last_rx
-                        && now.duration_since(t) > STALE
-                    {
-                        debug!("no frames for {STALE:?}, releasing outputs");
-                        outputs.release_all();
-                        last_rx = None;
-                    }
                 }
             }
         }
-        let mic = ctl.take_mic();
-        if let Some(v) = sh.vban.as_mut()
-            && !mic.is_empty()
-        {
-            v.push_mic(&mic);
+        for seat in &mut seats {
+            let mic = seat.ctl.take_mic();
+            if let Some(v) = sh.vban.as_mut()
+                && seat.vban
+                && !mic.is_empty()
+            {
+                v.push_mic(seat.mac, &mic, now);
+            }
         }
-        // Headset audio, one 4 ms unit per 4 ms of wall clock
-        match sh.vban.as_ref().filter(|_| ctl.headset_open()) {
+        // Headset audio, one 4 ms unit per 4 ms of wall clock, the same to each that wants it
+        match sh.vban.as_ref().filter(|_| seats.iter().any(Seat::wants_headset)) {
             Some(v) => {
                 let at = isoc_at.replace(now).unwrap_or(now);
                 isoc_credit = (isoc_credit + now.duration_since(at)).min(ISOC_CREDIT_MAX);
@@ -503,8 +615,9 @@ fn run_once(args: &Args, pair: bool, pair_bails: bool, quit: &AtomicBool, sh: &m
                 while isoc_credit >= unit {
                     isoc_credit -= unit;
                     if let Some(pcm) = v.take_unit() {
-                        host.send_isoc(HEADSET_EP, isoc_frame, vban::UNIT_MS, &pcm);
-                        isoc_frame = isoc_frame.wrapping_add(vban::UNIT_MS);
+                        for seat in seats.iter_mut().filter(|s| s.wants_headset()) {
+                            seat.send_headset(&pcm);
+                        }
                     }
                 }
             }
@@ -513,94 +626,14 @@ fn run_once(args: &Args, pair: bool, pair_bails: bool, quit: &AtomicBool, sh: &m
                 isoc_credit = Duration::ZERO;
             }
         }
-        // Value 1 is the left motor, 3 the right, as an Xbox pad's large and small; 2 is
-        // somewhere in the middle and goes unused
-        if let Some((large, small)) = outputs.take_rumble() {
-            rumble = Some([u16::from(large) * 257, 0, u16::from(small) * 257]);
+        for seat in &mut seats {
+            seat.rumble(now);
         }
-        // Stale by the time a dropped controller is back; the game sends again on its next change
-        if !ctl.ready() {
-            rumble = None;
-        }
-        if let Some(v) = rumble
-            && ctl.set_output(now, &mut host, v)
-        {
-            debug!(large = v[0] >> 8, small = v[2] >> 8, "rumble");
-            rumble = None;
-        }
-        outputs.poll(now);
-        for (dst, frame) in host.take_tx() {
-            // Kicked for a flat battery, the session's still open and still sending, headset
-            // audio included. Nowhere to go, and not worth an error each tick.
-            if !link.is_connected(&dst) {
-                trace!(dst = %fmt_mac(&dst), "tx dropped, not connected");
-                continue;
-            }
-            trace!(dst = %fmt_mac(&dst), frame = %hex(&frame), "tx");
-            // Isoc audio is never retransmitted by Ozmo either; a late unit is no use
-            if frame.first().is_some_and(|c| c & ozproto::wire::ctl::ISOC != 0) {
-                link.send_stream(&dst, ETHERTYPE, &frame)?;
-            } else {
-                link.send(&dst, ETHERTYPE, &frame)?;
-            }
+        desktop.poll(now);
+        for seat in &mut seats {
+            seat.flush(link)?;
         }
         Ok(())
     })?;
-    if pair_timed_out {
-        if pair_bails {
-            bail!("no controller paired within {PAIR_WINDOW:?}; --conf is unchanged");
-        }
-        warn!("no controller paired within {PAIR_WINDOW:?}; back to the saved group");
-        sh.tray.problem("No controller paired", "Nothing paired in 2 minutes; back to the saved one.");
-    }
     Ok(next)
-}
-
-fn on_event(ev: Event, now: Instant, host: &mut Host, ctl: &mut Controller, outputs: &mut Outputs) {
-    match ev {
-        Event::Connected { peer, session_id, .. } => {
-            info!(peer = %fmt_mac(&peer), session_id, "controller connected");
-            outputs.release_all();
-            ctl.start(now, host);
-        }
-        Event::Resumed { session_id } => info!(session_id, "controller resumed session"),
-        Event::Rejected { peer, status } => {
-            warn!(peer = %fmt_mac(&peer), status, "connect rejected")
-        }
-        Event::Usb(msg) => {
-            let was_ready = ctl.ready();
-            for report in ctl.on_usb(now, &msg, host) {
-                trace!(?report, "report");
-                match report {
-                    Report::Pad(p) => outputs.pad(&p),
-                    Report::Trackpad(t) => outputs.trackpad(&t),
-                }
-            }
-            if ctl.ready()
-                && !was_ready
-                && let Err(e) = outputs.plug()
-            {
-                warn!("{e:#}");
-            }
-        }
-        Event::Serial(data) => debug!(data = %hex(&data), "serial app data"),
-        Event::Farewell { ep, index, report } => {
-            debug!(ep, index, report = %hex(&report), "farewell report")
-        }
-        Event::UpdateParam(p) => debug!(?p, "update param"),
-        Event::Disconnect => {
-            info!("controller going to sleep");
-            outputs.release_all();
-        }
-        // The controller asks for a 300 ms presleep and then routinely goes
-        // quiet that long, so this fires every second or so. Releasing here
-        // snapped held sticks to neutral; the STALE check covers real dropouts instead.
-        Event::Asleep => trace!("controller idle"),
-        // The pad stays plugged in until shieldd exits, so a dropout doesn't
-        // make it vanish from Windows and come back as a new device
-        Event::Stopped => {
-            info!("controller session ended");
-            outputs.release_all();
-        }
-    }
 }

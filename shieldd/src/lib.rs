@@ -1,8 +1,9 @@
 //! shieldd: hosts the 2015 SHIELD controller natively on Windows.
 //!
 //! Default: our own RTL8811AU driver (rtlusb over WinUSB) runs the AP ->
-//! raw Ozmo frames -> ozproto session -> controller setup + HID reports ->
-//! virtual Xbox 360 pad (ViGEm), mouse and media keys (SendInput). See radio.rs.
+//! raw Ozmo frames -> an ozproto session per controller -> controller setup + HID reports ->
+//! a virtual Xbox 360 pad each (ViGEm), plus a shared mouse and media keys (SendInput). See
+//! radio.rs and seat.rs.
 //!
 //! The WSL bridge, for when the radio stays in Linux (ozwpan):
 //! - `--transmit` (Linux): controller evdev/hidraw -> SHD2 UDP packets (transmit.rs)
@@ -30,6 +31,8 @@ mod pair;
 mod radio;
 #[cfg(windows)]
 mod receiver;
+#[cfg(windows)]
+mod seat;
 #[cfg(target_os = "linux")]
 mod transmit;
 
@@ -88,12 +91,17 @@ pub struct Args {
     /// input, and only drive the outputs from those UDP packets
     #[arg(long)]
     receiver: bool,
-    /// Pair a controller: hold its NVIDIA button until the light flashes. Makes a new
-    /// group (random DIRECT-xx-name, on the quietest of channels 1, 6 and 11) and writes it
-    /// to --conf once the controller has it, keeping the old file gzipped in backup/ next to it. Then hosts as
-    /// usual.
+    /// Pair a controller to the saved group: hold its NVIDIA button until the light flashes.
+    /// Push-button stays on until one controller pairs, or 2 minutes; pair again for each more.
+    /// Controllers already connected stay connected. Without a saved group, makes one first, as
+    /// --reconfigure-network. Then hosts as usual.
     #[arg(long, conflicts_with_all = ["receiver", "transmit"])]
     pair: bool,
+    /// Make a new group, a random DIRECT-xx-name on the quietest of channels 1, 6 and 11, and
+    /// write it to --conf at once, keeping the old file gzipped in backup/ next to it. Then
+    /// pairs as --pair. Every controller paired to the old group has to pair again.
+    #[arg(long, conflicts_with_all = ["receiver", "transmit"])]
+    reconfigure_network: bool,
     /// Where --transmit sends to, with --receiver
     #[arg(long, default_value = shdlink::DEFAULT_ADDR, requires = "receiver")]
     listen: SocketAddr,
@@ -112,11 +120,11 @@ pub struct Args {
     hidraw: Option<PathBuf>,
     /// Keep running: wait for the adapter, and start over when it's unplugged or fails.
     /// shieldw always runs this way.
-    #[arg(long, conflicts_with_all = ["receiver", "transmit", "pair"])]
+    #[arg(long, conflicts_with_all = ["receiver", "transmit", "pair", "reconfigure_network"])]
     background: bool,
     /// Start shieldw at login for this user, with the rest of this command line. Doesn't start
     /// it now.
-    #[arg(long, conflicts_with_all = ["receiver", "transmit", "pair", "uninstall", "stop"])]
+    #[arg(long, conflicts_with_all = ["receiver", "transmit", "pair", "reconfigure_network", "uninstall", "stop"])]
     install: bool,
     /// Don't start shieldw at login anymore. Doesn't stop it either; see --stop.
     #[arg(long, exclusive = true)]
@@ -210,14 +218,16 @@ fn dispatch(mut args: Args, windowless: bool, claimed: Option<Quit>) -> Result<(
             return background::stop();
         }
         if windowless {
-            anyhow::ensure!(!(args.pair || args.receiver), "shieldw only hosts in the background; pair with shieldd");
+            anyhow::ensure!(
+                !(args.pair || args.reconfigure_network || args.receiver),
+                "shieldw only hosts in the background; pair with shieldd or the tray"
+            );
             args.background = true;
         }
         // run() claims for anything that hosts, before logging starts
         let quit = anyhow::Context::context(claimed, "hosting without the instance")?;
         if args.receiver {
-            let mut outputs = outputs::Outputs::new(args.scale())?;
-            return receiver::run(args.listen, &mut outputs, &quit);
+            return receiver::run(args.listen, args.scale(), &quit);
         }
         radio::run(args, &quit)
     }

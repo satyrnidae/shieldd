@@ -1,6 +1,7 @@
-//! The tray: battery, connection and pairing at a glance, and a menu to pair, identify, rename
-//! and so on. What it shows and what it sends back are platform-neutral, here and in
-//! battery.rs; the tray itself is per platform, so far windows.rs.
+//! The tray: battery, connection and pairing at a glance, and a menu to pair, reconfigure the
+//! network, and identify, rename, stream or disconnect each controller. What it shows and what
+//! it sends back are platform-neutral, here and in battery.rs; the tray itself is per platform,
+//! so far windows.rs.
 
 #[cfg_attr(not(windows), allow(dead_code, reason = "only the Windows tray uses it so far"))]
 mod battery;
@@ -23,8 +24,8 @@ pub struct About {
 /// What the tray shows
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Status {
-    pub controller: Option<Connected>,
-    pub vban: bool,
+    /// Up to four, in the order they connected
+    pub controllers: Vec<Connected>,
     pub pairing: bool,
     /// The group being hosted, None without an adapter
     pub ssid: Option<String>,
@@ -32,8 +33,8 @@ pub struct Status {
     pub channel: Option<u8>,
     /// A controller is on its way in: associated, but not yet up with a battery reading
     pub joining: bool,
-    /// One sent away to sleep and ignored for now. Listed while no controller's connected.
-    pub shunned: Option<Shunned>,
+    /// Sent away to sleep and ignored for now, listed after the connected ones
+    pub shunned: Vec<Shunned>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -52,17 +53,22 @@ pub struct Connected {
     pub port: Option<u8>,
     /// Once the first status answer is in
     pub battery: Option<Battery>,
+    /// Its mic and headset are on the VBAN streams
+    pub vban: bool,
 }
 
-/// Picked from the menu
+/// Picked from the menu. The ones for a controller carry its MAC.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
+    /// One more controller onto the network as it is
     Pair,
-    /// On or off
-    Vban(bool),
-    Identify,
-    /// The controller with this MAC goes by this name now, already cleaned up
+    /// A new network, which every controller pairs to again
+    Reconfigure,
+    Identify([u8; 6]),
+    /// Goes by this name now, already cleaned up
     Rename([u8; 6], String),
-    Disconnect,
+    /// VBAN on or off for it
+    Vban([u8; 6], bool),
+    Disconnect([u8; 6]),
     Exit,
 }

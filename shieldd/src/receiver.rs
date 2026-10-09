@@ -13,12 +13,12 @@ use tracing::{debug, info, trace, warn};
 use vigem_client::{XButtons, XGamepad};
 
 use crate::controller::key;
-use crate::outputs::Outputs;
+use crate::outputs::{Desktop, Gamepad, Source};
 
 /// No packets this long: let go of everything. Same as shield_rx.py.
 const STALE: Duration = Duration::from_millis(500);
 
-/// SHD2 media bits -> controller key bits, which `Outputs` speaks
+/// SHD2 media bits -> controller key bits, which `Desktop` speaks
 const MEDIA: [(u8, u8); 3] = [(media::VOL_UP, key::VOL_UP), (media::VOL_DOWN, key::VOL_DOWN), (media::MUTE, key::MUTE)];
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -64,8 +64,13 @@ fn trigger(v: f32) -> u8 {
     (v.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
+/// The one transmitter, as Desktop's source
+const TRANSMITTER: Source = [0; 6];
+
 /// Runs until ctrl+c.
-pub fn run(listen: SocketAddr, outputs: &mut Outputs, quit: &AtomicBool) -> Result<()> {
+pub fn run(listen: SocketAddr, mouse_scale: (f32, f32), quit: &AtomicBool) -> Result<()> {
+    let mut gamepad = Gamepad::new();
+    let mut desktop = Desktop::new(mouse_scale);
     let sock = UdpSocket::bind(listen).with_context(|| format!("binding {listen}; is shield_rx.py still running?"))?;
     sock.set_read_timeout(Some(STALE))?;
     info!(%listen, "receiver mode: waiting for shieldd --transmit (or shield_tx.py). ctrl+c to stop");
@@ -78,7 +83,8 @@ pub fn run(listen: SocketAddr, outputs: &mut Outputs, quit: &AtomicBool) -> Resu
             Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
                 if last_seq.take().is_some() {
                     debug!("no packets for {STALE:?}, releasing outputs");
-                    outputs.release_all();
+                    gamepad.release();
+                    desktop.release(&TRANSMITTER);
                 }
                 continue;
             }
@@ -98,17 +104,17 @@ pub fn run(listen: SocketAddr, outputs: &mut Outputs, quit: &AtomicBool) -> Resu
         }
         if last_seq.is_none() {
             info!("transmitter connected");
-            if let Err(e) = outputs.plug() {
+            if let Err(e) = gamepad.plug() {
                 warn!("{e:#}");
             }
         }
         last_seq = Some(p.seq);
-        outputs.gamepad(&p.pad);
-        outputs.set_keys(p.keys);
-        outputs.move_counts(f32::from(p.dx), f32::from(p.dy));
-        outputs.set_mouse_buttons(p.mouse_buttons);
+        gamepad.update(&p.pad);
+        desktop.set_keys(&TRANSMITTER, p.keys);
+        desktop.move_counts(&TRANSMITTER, f32::from(p.dx), f32::from(p.dy));
+        desktop.set_mouse_buttons(&TRANSMITTER, p.mouse_buttons);
         // Repeats only as often as packets come in
-        outputs.poll(Instant::now());
+        desktop.poll(Instant::now());
         trace!(seq = p.seq, "applied");
     }
     info!("shutting down");

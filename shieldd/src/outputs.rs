@@ -1,8 +1,9 @@
-//! Turns controller reports into Windows input: a virtual Xbox 360 pad through
-//! ViGEmBus, plus the trackpad as the mouse and the volume keys as media keys
-//! through SendInput. Same mapping as the old WSL bridge (`shield_tx.py`). Games' rumble on
-//! the virtual pad comes back out through `take_rumble`.
+//! Turns controller reports into Windows input: a virtual Xbox 360 pad per controller through
+//! ViGEmBus (Gamepad), plus the trackpads as the mouse and the volume keys as media keys
+//! through SendInput, shared by all of them (Desktop). Same mapping as the old WSL bridge
+//! (`shield_tx.py`). Games' rumble on a virtual pad comes back out through `take_rumble`.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread::JoinHandle;
@@ -30,6 +31,8 @@ const MEDIA_KEYS: [(u8, VIRTUAL_KEY); 3] =
 /// Keys that repeat while held, like a keyboard's. The controller only reports the level, and
 /// Windows doesn't repeat injected keys. Mute toggles, so it doesn't.
 const REPEATING: u8 = key::VOL_UP | key::VOL_DOWN;
+/// Every key bit in MEDIA_KEYS
+const MEDIA_BITS: u8 = key::VOL_UP | key::VOL_DOWN | key::MUTE;
 
 const XBUTTON1: u32 = 0x0001;
 
@@ -41,13 +44,22 @@ const MOUSE_BUTTONS: [(u8, MOUSE_EVENT_FLAGS, MOUSE_EVENT_FLAGS, u32); 4] = [
     (0x04, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, 0),
     (0x08, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, XBUTTON1),
 ];
+/// Every bit in MOUSE_BUTTONS
+const MOUSE_BITS: u8 = 0x0f;
 
-/// Set in `Outputs::rumble` while a value is waiting to be taken
+/// Set in `Gamepad::rumble` while a value is waiting to be taken
 const RUMBLE_NEW: u32 = 1 << 16;
 
-pub struct Outputs {
+/// Whose input it is, for Desktop: a controller's MAC
+pub type Source = [u8; 6];
+
+//region Gamepad
+
+/// One controller's virtual Xbox 360 pad. Each has its own ViGEm client and XInput port.
+pub struct Gamepad {
+    /// Connected on the first plug, and kept for a replug
     client: Option<Client>,
-    /// Plugged in while the controller is connected
+    /// Plugged in from the controller's first setup until this is dropped
     pad: Option<Xbox360Wired<Client>>,
     /// Latest rumble a game set on the pad: large motor << 8 | small motor, plus RUMBLE_NEW.
     /// Written by the notification thread.
@@ -56,34 +68,12 @@ pub struct Outputs {
     rumble_thread: Option<JoinHandle<()>>,
     /// The pad's XInput port, 1-4, once Windows has given it one
     port: Option<u8>,
-    keys: u8,
-    /// Next repeat while a REPEATING key is held, and the interval after it
-    next_repeat: Option<(Instant, Duration)>,
-    mouse_buttons: u8,
-    /// Last finger position while touching
-    touch: Option<(u16, u16)>,
-    /// Trackpad counts -> pixels, x and y
-    mouse_scale: (f32, f32),
-    /// Sub-pixel motion carried between reports
-    carry: (f32, f32),
 }
 
-impl Outputs {
-    pub fn new(mouse_scale: (f32, f32)) -> Result<Self> {
-        let client = Client::connect().context("connecting to ViGEmBus; is it installed?")?;
-        Ok(Outputs {
-            client: Some(client),
-            pad: None,
-            rumble: Arc::new(AtomicU32::new(0)),
-            rumble_thread: None,
-            port: None,
-            keys: 0,
-            next_repeat: None,
-            mouse_buttons: 0,
-            touch: None,
-            mouse_scale,
-            carry: (0.0, 0.0),
-        })
+impl Gamepad {
+    /// Nothing's asked of ViGEm until plug
+    pub fn new() -> Self {
+        Gamepad { client: None, pad: None, rumble: Arc::new(AtomicU32::new(0)), rumble_thread: None, port: None }
     }
 
     /// Shows the virtual pad to Windows.
@@ -94,7 +84,7 @@ impl Outputs {
         // A target owns its client; ViGEm allows any number of connections
         let client = match self.client.take() {
             Some(c) => c,
-            None => Client::connect().context("connecting to ViGEmBus")?,
+            None => Client::connect().context("connecting to ViGEmBus; is it installed?")?,
         };
         let mut pad = Xbox360Wired::new(client, TargetId::XBOX360_WIRED);
         pad.plugin().context("plugging in virtual Xbox 360 pad")?;
@@ -114,9 +104,9 @@ impl Outputs {
         Ok(())
     }
 
-    /// Releases everything and removes the virtual pad.
+    /// Neutral, then removes the virtual pad.
     pub fn unplug(&mut self) {
-        self.release_all();
+        self.release();
         if let Some(mut pad) = self.pad.take() {
             if let Err(e) = pad.unplug() {
                 warn!("unplugging virtual pad: {e}");
@@ -129,6 +119,11 @@ impl Outputs {
         }
         self.rumble.store(0, Ordering::Relaxed);
         self.port = None;
+    }
+
+    /// Windows can see it
+    pub fn plugged(&self) -> bool {
+        self.pad.is_some()
     }
 
     /// The pad's XInput port, 1-4, asked of ViGEm until it has one
@@ -147,74 +142,140 @@ impl Outputs {
         (v & RUMBLE_NEW != 0).then_some(((v >> 8) as u8, v as u8))
     }
 
-    /// Neutral pad, keys and mouse buttons up. For when input stops arriving.
-    pub fn release_all(&mut self) {
-        if let Some(pad) = self.pad.as_mut()
-            && let Err(e) = pad.update(&XGamepad::default())
-        {
-            warn!("resetting virtual pad: {e}");
-        }
-        self.set_keys(0);
-        self.set_mouse_buttons(0);
-        self.touch = None;
+    /// Neutral pad. For when input stops arriving.
+    pub fn release(&mut self) {
+        self.update(&XGamepad::default());
     }
 
     pub fn pad(&mut self, p: &Pad) {
-        self.gamepad(&to_xgamepad(p));
-        self.set_keys(p.keys);
+        self.update(&to_xgamepad(p));
     }
 
     /// Raw XInput state, for senders that already did the mapping
-    pub fn gamepad(&mut self, g: &XGamepad) {
+    pub fn update(&mut self, g: &XGamepad) {
         if let Some(pad) = self.pad.as_mut()
             && let Err(e) = pad.update(g)
         {
             warn!("updating virtual pad: {e}");
         }
     }
+}
+
+impl Drop for Gamepad {
+    fn drop(&mut self) {
+        // Never leave a stick held
+        self.unplug();
+    }
+}
+
+//endregion
+
+//region Desktop
+
+/// Bits each source holds. Windows sees them all OR'd together, so a button stays down while
+/// any controller holds it.
+#[derive(Debug, Default)]
+struct Held {
+    by: HashMap<Source, u8>,
+}
+
+impl Held {
+    fn all(&self) -> u8 {
+        self.by.values().fold(0, |a, b| a | b)
+    }
+
+    /// Sets `src`'s bits; returns everyone's together before and after
+    fn set(&mut self, src: Source, bits: u8) -> (u8, u8) {
+        let was = self.all();
+        if bits == 0 {
+            self.by.remove(&src);
+        } else {
+            self.by.insert(src, bits);
+        }
+        (was, self.all())
+    }
+}
+
+/// A source's finger on its trackpad
+#[derive(Debug, Default)]
+struct Pointer {
+    /// Last finger position while touching
+    touch: Option<(u16, u16)>,
+    /// Sub-pixel motion carried between reports
+    carry: (f32, f32),
+}
+
+/// The mouse and media keys, shared by every controller: trackpads move one pointer, and a
+/// key or button goes down with the first source to press it and up with the last to let go.
+pub struct Desktop {
+    keys: Held,
+    buttons: Held,
+    pointers: HashMap<Source, Pointer>,
+    /// Next repeat while a REPEATING key is held, and the interval after it
+    next_repeat: Option<(Instant, Duration)>,
+    /// Trackpad counts -> pixels, x and y
+    mouse_scale: (f32, f32),
+}
+
+impl Desktop {
+    pub fn new(mouse_scale: (f32, f32)) -> Self {
+        Desktop {
+            keys: Held::default(),
+            buttons: Held::default(),
+            pointers: HashMap::new(),
+            next_repeat: None,
+            mouse_scale,
+        }
+    }
+
+    /// Lets go of whatever `src` alone holds, and forgets its finger. For when its input stops.
+    pub fn release(&mut self, src: &Source) {
+        self.set_keys(src, 0);
+        self.set_mouse_buttons(src, 0);
+        self.pointers.remove(src);
+    }
 
     /// Relative move in trackpad counts, scaled to pixels
-    pub fn move_counts(&mut self, dx: f32, dy: f32) {
-        self.move_mouse(dx * self.mouse_scale.0, dy * self.mouse_scale.1);
-    }
-
-    pub fn trackpad(&mut self, t: &Trackpad) {
-        if t.touch {
-            if let Some((px, py)) = self.touch {
-                let dx = f32::from(t.x) - f32::from(px);
-                let dy = f32::from(t.y) - f32::from(py);
-                self.move_counts(dx, dy);
-            }
-            self.touch = Some((t.x, t.y));
-        } else {
-            self.touch = None;
-            self.carry = (0.0, 0.0);
-        }
-        self.set_mouse_buttons(t.buttons);
-    }
-
-    /// Relative move in pixels; fractions carry over to the next call
-    fn move_mouse(&mut self, dx: f32, dy: f32) {
-        let x = dx + self.carry.0;
-        let y = dy + self.carry.1;
+    pub fn move_counts(&mut self, src: &Source, dx: f32, dy: f32) {
+        let (sx, sy) = self.mouse_scale;
+        let p = self.pointers.entry(*src).or_default();
+        let x = dx * sx + p.carry.0;
+        let y = dy * sy + p.carry.1;
         let (ix, iy) = (x.trunc(), y.trunc());
-        self.carry = (x - ix, y - iy);
+        p.carry = (x - ix, y - iy);
         if ix != 0.0 || iy != 0.0 {
             send(&[mouse(ix as i32, iy as i32, 0, MOUSEEVENTF_MOVE)]);
         }
     }
 
-    /// Controller key bits; media keys go out on each edge
-    pub fn set_keys(&mut self, keys: u8) {
-        let changed = self.keys ^ keys;
+    pub fn trackpad(&mut self, src: &Source, t: &Trackpad) {
+        let p = self.pointers.entry(*src).or_default();
+        if t.touch {
+            let last = p.touch.replace((t.x, t.y));
+            if let Some((px, py)) = last {
+                let dx = f32::from(t.x) - f32::from(px);
+                let dy = f32::from(t.y) - f32::from(py);
+                self.move_counts(src, dx, dy);
+            }
+        } else {
+            *p = Pointer::default();
+        }
+        self.set_mouse_buttons(src, t.buttons);
+    }
+
+    /// Controller key bits; media keys go out on each edge of everyone's together
+    pub fn set_keys(&mut self, src: &Source, keys: u8) {
+        let (was, keys) = self.keys.set(*src, keys & MEDIA_BITS);
+        let changed = was ^ keys;
+        if changed == 0 {
+            return;
+        }
+        debug!(keys = format!("{keys:#04x}"), was = format!("{was:#04x}"), "media keys");
         let inputs: Vec<INPUT> = MEDIA_KEYS
             .iter()
             .filter(|(bit, _)| changed & bit != 0)
             .map(|&(bit, vk)| keyboard(vk, keys & bit == 0))
             .collect();
-        if changed != 0 {
-            debug!(keys = format!("{keys:#04x}"), was = format!("{:#04x}", self.keys), "media keys");
-        }
         send(&inputs);
         if keys & REPEATING == 0 {
             self.next_repeat = None;
@@ -223,7 +284,6 @@ impl Outputs {
             let (delay, interval) = keyboard_repeat();
             self.next_repeat = Some((Instant::now() + delay, interval));
         }
-        self.keys = keys;
     }
 
     /// Repeats held volume keys; call often, at least every repeat interval
@@ -232,37 +292,43 @@ impl Outputs {
         if now < at {
             return;
         }
+        let keys = self.keys.all();
         let inputs: Vec<INPUT> = MEDIA_KEYS
             .iter()
-            .filter(|(bit, _)| self.keys & REPEATING & bit != 0)
+            .filter(|(bit, _)| keys & REPEATING & bit != 0)
             .map(|&(_, vk)| keyboard(vk, false))
             .collect();
         let late_ms = now.duration_since(at).as_millis() as u64;
-        debug!(keys = format!("{:#04x}", self.keys), late_ms, "media key repeat");
+        debug!(keys = format!("{keys:#04x}"), late_ms, "media key repeat");
         send(&inputs);
         // A stalled caller gets one repeat, not a burst
         self.next_repeat = Some(((at + interval).max(now), interval));
     }
 
-    /// Mouse button bits as in MOUSE_BUTTONS; events go out on each edge
-    pub fn set_mouse_buttons(&mut self, buttons: u8) {
-        let changed = self.mouse_buttons ^ buttons;
+    /// Mouse button bits as in MOUSE_BUTTONS; events go out on each edge of everyone's together
+    pub fn set_mouse_buttons(&mut self, src: &Source, buttons: u8) {
+        let (was, buttons) = self.buttons.set(*src, buttons & MOUSE_BITS);
+        let changed = was ^ buttons;
         let inputs: Vec<INPUT> = MOUSE_BUTTONS
             .iter()
             .filter(|(bit, ..)| changed & bit != 0)
             .map(|&(bit, down, up, data)| mouse(0, 0, data, if buttons & bit != 0 { down } else { up }))
             .collect();
         send(&inputs);
-        self.mouse_buttons = buttons;
     }
 }
 
-impl Drop for Outputs {
+impl Drop for Desktop {
     fn drop(&mut self) {
-        // Never leave a key, mouse button or stick held
-        self.unplug();
+        // Never leave a key or mouse button held
+        let sources: Vec<Source> = self.keys.by.keys().chain(self.buttons.by.keys()).copied().collect();
+        for src in sources {
+            self.release(&src);
+        }
     }
 }
+
+//endregion
 
 //region Mapping
 
@@ -403,6 +469,19 @@ mod tests {
         let (d, i) = repeat_timing(3, 31);
         assert_eq!(d, Duration::from_millis(1000));
         assert_eq!(i.as_millis(), 33);
+    }
+
+    #[test]
+    fn held_until_the_last_one_lets_go() {
+        let (a, b) = ([1; 6], [2; 6]);
+        let mut h = Held::default();
+        assert_eq!(h.set(a, 0x01), (0, 0x01));
+        assert_eq!(h.set(b, 0x01), (0x01, 0x01), "already down");
+        assert_eq!(h.set(b, 0), (0x01, 0x01), "a still holds it");
+        assert_eq!(h.set(b, 0x02), (0x01, 0x03));
+        assert_eq!(h.set(a, 0), (0x03, 0x02));
+        assert_eq!(h.set(b, 0), (0x02, 0));
+        assert!(h.by.is_empty());
     }
 
     #[test]

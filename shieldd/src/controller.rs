@@ -602,59 +602,6 @@ impl Controller {
     }
 }
 
-//region Rumble probe
-
-/// SHIELDD_RUMBLE_TEST=1: once the controller is configured, steps output report 0x01 through
-/// each value on its own, then all at once, with silence between, so whoever holds the
-/// controller can say which steps buzz.
-pub struct RumbleProbe {
-    start: Option<Instant>,
-    sent: usize,
-}
-
-const PROBE_LEAD: Duration = Duration::from_secs(3);
-const PROBE_STEP: Duration = Duration::from_millis(1500);
-const PROBE: [[u16; 3]; 12] = [
-    [0xFFFF, 0, 0],
-    [0, 0, 0],
-    [0, 0xFFFF, 0],
-    [0, 0, 0],
-    [0, 0, 0xFFFF],
-    [0, 0, 0],
-    [0x7FFF, 0x7FFF, 0x7FFF],
-    [0, 0, 0],
-    [0xFFFF, 0xFFFF, 0xFFFF],
-    [0, 0, 0],
-    [0x00FF, 0x00FF, 0x00FF],
-    [0, 0, 0],
-];
-
-impl RumbleProbe {
-    pub fn from_env() -> Option<Self> {
-        (std::env::var("SHIELDD_RUMBLE_TEST").as_deref() == Ok("1")).then_some(RumbleProbe { start: None, sent: 0 })
-    }
-
-    pub fn poll(&mut self, now: Instant, ctl: &mut Controller, host: &mut Host) {
-        if !ctl.ready() {
-            self.start = None;
-            self.sent = 0;
-            return;
-        }
-        let start = *self.start.get_or_insert(now + PROBE_LEAD);
-        let Some(&values) = PROBE.get(self.sent) else { return };
-        if now < start + PROBE_STEP * self.sent as u32 {
-            return;
-        }
-        if ctl.set_output(now, host, values) {
-            let values = values.map(|v| format!("{v:04x}"));
-            info!(step = self.sent + 1, of = PROBE.len(), ?values, "rumble probe");
-            self.sent += 1;
-        }
-    }
-}
-
-//endregion
-
 #[cfg(test)]
 mod tests {
     use super::*;

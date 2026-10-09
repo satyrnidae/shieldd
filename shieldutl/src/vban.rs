@@ -1,16 +1,20 @@
-//! Controller audio over VBAN, Voicemeeter's UDP audio protocol, toggled from the tray. The
-//! mic goes out as stream ShieldMic; stream ShieldPad comes in for the headset jack.
+//! Controller audio over VBAN, Voicemeeter's UDP audio protocol, toggled per controller from
+//! the tray. One sink for all of them: their mics go out mixed as stream ShieldMic, and stream
+//! ShieldPad comes in for every headset jack.
 //! Spec: https://vb-audio.com/Voicemeeter/VBANProtocol_Specifications.pdf
 //!
 //! Ported from linux/shield_audio.py, which did the same from WSL. The headset side carries
 //! its own resampler and jitter buffer, since there's no ALSA here to lean on.
+//!
+//! VBAN is used for WSL and Windows by default; Linux will fall back to Pulse/ALSA if they are
+//! available, but can be forced to use VBAN with `--audio-backend=vban`.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use tracing::{debug, info, warn};
@@ -96,19 +100,68 @@ const AGC_GATE: f32 = 32768.0 * 0.001_778_279_4;
 /// Per 10 ms: cut fast, raise slowly
 const AGC_ATTACK: f32 = 0.5;
 const AGC_RELEASE: f32 = 0.02;
+/// A mic that's sent nothing this long isn't waited for: its controller dozed or left
+const MIX_GRACE: Duration = Duration::from_millis(80);
+/// Most a mic can run ahead of the others before its oldest samples go: the grace's worth, as
+/// no two clocks agree
+const MIX_MAX: usize = MIC_SAMPLES * 8;
+/// Most packets one push sends. A backlog freed by a mic going quiet goes, oldest first, rather
+/// than out in one burst that Voicemeeter's jitter buffer chokes on.
+const MIX_BURST: usize = 2;
+
+/// Which controller a mic is: its MAC
+pub type Source = [u8; 6];
+
+/// Each controller's mic samples, until every mic still sending has a packet's worth. Those
+/// are summed, saturating, into one.
+#[derive(Default)]
+struct Mixer {
+    /// Samples waiting, and when that mic last sent any
+    mics: HashMap<Source, (VecDeque<i16>, Instant)>,
+}
+
+impl Mixer {
+    /// Adds `src`'s samples; returns the packets' worth now mixed
+    fn push(&mut self, src: Source, pcm: &[u8], now: Instant) -> Vec<Vec<i16>> {
+        let (q, last) = self.mics.entry(src).or_insert_with(|| (VecDeque::new(), now));
+        q.extend(pcm.as_chunks::<2>().0.iter().map(|&b| i16::from_le_bytes(b)));
+        *last = now;
+        if q.len() > MIX_MAX {
+            let n = q.len() - MIX_MAX;
+            q.drain(..n);
+        }
+        let quiet = |last: &Instant| now.duration_since(*last) >= MIX_GRACE;
+        let mut out = Vec::new();
+        while self.mics.values().any(|(q, _)| q.len() >= MIC_SAMPLES)
+            && self.mics.values().all(|(q, last)| q.len() >= MIC_SAMPLES || quiet(last))
+        {
+            let mut mix = [0i32; MIC_SAMPLES];
+            for (q, _) in self.mics.values_mut() {
+                let n = q.len().min(MIC_SAMPLES);
+                for (m, x) in mix.iter_mut().zip(q.drain(..n)) {
+                    *m += i32::from(x);
+                }
+            }
+            out.push(mix.iter().map(|&x| x.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16).collect());
+        }
+        self.mics.retain(|_, (q, last)| !q.is_empty() || !quiet(last));
+        if out.len() > MIX_BURST {
+            out.drain(..out.len() - MIX_BURST);
+        }
+        out
+    }
+}
 
 struct Mic {
     sock: UdpSocket,
-    samples: Vec<i16>,
+    mixer: Mixer,
     gain: f32,
     frame: u32,
 }
 
 impl Mic {
-    fn push(&mut self, pcm: &[u8]) {
-        self.samples.extend(pcm.as_chunks::<2>().0.iter().map(|&b| i16::from_le_bytes(b)));
-        while self.samples.len() >= MIC_SAMPLES {
-            let chunk: Vec<i16> = self.samples.drain(..MIC_SAMPLES).collect();
+    fn push(&mut self, src: Source, pcm: &[u8], now: Instant) {
+        for chunk in self.mixer.push(src, pcm, now) {
             self.send(&chunk);
         }
     }
@@ -252,7 +305,7 @@ fn receive(sock: UdpSocket, pad: Arc<Mutex<PadBuf>>, stop: Arc<AtomicBool>) {
 
 //endregion
 
-/// Both streams, while VBAN is on
+/// Both streams, while VBAN is on for any controller
 pub struct Vban {
     mic: Mic,
     pad: Arc<Mutex<PadBuf>>,
@@ -264,7 +317,7 @@ impl Vban {
     pub fn start() -> Result<Vban> {
         let mic = Mic {
             sock: UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).context("mic VBAN socket")?,
-            samples: Vec::new(),
+            mixer: Mixer::default(),
             gain: 1.0,
             frame: 0,
         };
@@ -281,12 +334,18 @@ impl Vban {
         Ok(Vban { mic, pad, stop, rx: Some(rx) })
     }
 
-    /// Mic samples from the controller, 16 kHz mono s16le
-    pub fn push_mic(&mut self, pcm: &[u8]) {
-        self.mic.push(pcm);
+    /// Mic samples from controller `src`, 16 kHz mono s16le, mixed with the others'
+    pub fn push_mic(&mut self, src: Source, pcm: &[u8], now: Instant) {
+        self.mic.push(src, pcm, now);
     }
 
-    /// One isoc unit of headset audio, UNIT_MS of 32 kHz stereo s16le, if there's enough
+    /// Drops what `src`'s mic had waiting; for when VBAN goes off for it
+    pub fn forget_mic(&mut self, src: &Source) {
+        self.mic.mixer.mics.remove(src);
+    }
+
+    /// One isoc unit of headset audio, UNIT_MS of 32 kHz stereo s16le, if there's enough. The same
+    /// unit goes to every controller with VBAN on.
     pub fn take_unit(&self) -> Option<Vec<u8>> {
         let mut p = self.pad.lock().unwrap_or_else(|e| e.into_inner());
         if p.trimmed > 0 {
@@ -325,6 +384,58 @@ mod tests {
         assert!(parse(&p, MIC_STREAM).is_none());
         // Same header as shield_audio.py's: 16 kHz is index 8
         assert_eq!(header(MIC_RATE, MIC_SAMPLES, 2, MIC_STREAM, 0)[4..8], [8, 159, 1, 1]);
+    }
+
+    fn pcm(v: i16, n: usize) -> Vec<u8> {
+        std::iter::repeat_n(v.to_le_bytes(), n).flatten().collect()
+    }
+
+    #[test]
+    fn mics_mix_saturating() {
+        let (a, b) = ([1; 6], [2; 6]);
+        let t = Instant::now();
+        let mut m = Mixer::default();
+        // Alone, a mic goes straight out
+        assert_eq!(m.push(a, &pcm(1000, MIC_SAMPLES), t), vec![vec![1000; MIC_SAMPLES]]);
+        // Two wait for each other, then sum
+        let mut m = Mixer::default();
+        assert_eq!(m.push(a, &pcm(1, 10), t), Vec::<Vec<i16>>::new());
+        assert!(m.push(b, &pcm(1, 10), t).is_empty());
+        assert!(m.push(a, &pcm(30000, MIC_SAMPLES), t).is_empty(), "b's not caught up");
+        let out = m.push(b, &pcm(30000, MIC_SAMPLES), t);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0][..10], [2; 10]);
+        assert_eq!(out[0][10..], [i16::MAX; MIC_SAMPLES - 10]);
+    }
+
+    #[test]
+    fn a_quiet_mic_doesnt_hold_up_the_mix() {
+        let (a, b) = ([1; 6], [2; 6]);
+        let t = Instant::now();
+        let mut m = Mixer::default();
+        assert!(m.push(b, &pcm(5, 4), t).is_empty());
+        assert!(m.push(a, &pcm(7, MIC_SAMPLES), t).is_empty());
+        // b went quiet: its leftovers go in the next packet, then it's dropped
+        let out = m.push(a, &pcm(7, MIC_SAMPLES), t + MIX_GRACE);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0][..4], [12; 4]);
+        assert_eq!(out[0][4..], [7; MIC_SAMPLES - 4]);
+        assert_eq!(out[1], vec![7; MIC_SAMPLES]);
+        assert!(!m.mics.contains_key(&b));
+    }
+
+    #[test]
+    fn a_backlog_doesnt_go_out_in_one_burst() {
+        let (a, b) = ([1; 6], [2; 6]);
+        let t = Instant::now();
+        let mut m = Mixer::default();
+        assert!(m.push(b, &pcm(0, 1), t).is_empty());
+        for i in 0..5 {
+            assert!(m.push(a, &pcm(i, MIC_SAMPLES), t).is_empty());
+        }
+        let out = m.push(a, &pcm(5, MIC_SAMPLES), t + MIX_GRACE);
+        assert_eq!(out.len(), MIX_BURST);
+        assert_eq!(out[MIX_BURST - 1], vec![5; MIC_SAMPLES], "the newest kept");
     }
 
     #[test]

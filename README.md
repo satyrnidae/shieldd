@@ -10,15 +10,10 @@ No Bluetooth, no vendor app, no Linux VM. Input latency is under ~20 ms.
 ## AI disclosure
 
 Most of this project's code, docs and comments were written by an AI model, Anthropic's
-Claude via Claude Code, under the direction of a human maintainer. The maintainer set the
-goals and constraints, tested on real hardware, and judged the results; the protocol work
-leaned on captures and testing rather than on the model's say-so. Even so, assume any given
-line was machine-written.
-
-If you'd rather not run or build on AI-generated code, this isn't the project for you. Other
-ways to use the controller on a PC:
-- **[Syniurge/ShieldControllerWinDriver](https://github.com/Syniurge/ShieldControllerWinDriver)**,
-  continued in **[nefarius' fork](https://github.com/nefarius/ShieldControllerWinDriver)**:
+Claude via Claude Code, under the direction of a human maintainer. If you'd rather not run
+or build on AI-generated code, this isn't the project for you. Other ways to use the
+controller on a PC:
+- **[Syniurge/ShieldControllerWinDriver](https://github.com/Syniurge/ShieldControllerWinDriver)**:
   Windows HID filter driver. Wired only. Written 2016-2017, before AI coding tools.
 - **NVIDIA's own drivers:** wired only, and only on PCs with NVIDIA graphics. Closed source, so
   there's no checking, but NVIDIA has said publicly that its engineers use AI coding tools;
@@ -34,20 +29,25 @@ ways to use the controller on a PC:
 ## Status
 
 Works:
-- Gamepad -> virtual Xbox 360 pad (ViGEmBus)
-- Trackpad -> mouse, volume buttons -> media keys (SendInput)
+- Up to four controllers at once, each its own virtual Xbox 360 pad (ViGEmBus)
+- Trackpad -> mouse, volume buttons -> media keys (SendInput), shared by all of them
 - Rumble: games' rumble on the virtual pad drives the controller's left and right motors
-- WPS push-button pairing to a fresh random group
+- WPS push-button pairing, one controller at a time, to a random group made once
 - Reconnect on a tap of the NVIDIA button, hidden SSID, WPA2-CCMP
 - Adapter LED blinks while waiting, solid while connected
 - Battery in the tray, colored for the taskbar theme, with a notification when it goes critical;
   a short rumble when charging starts. Rumble cuts out near empty, and a controller that
   connects flat is sent away until it's plugged in.
-- Tray menu: pair, identify, rename, disconnect, VBAN audio on/off, about
+- Tray menu: pair, reconfigure the network, and per controller identify, rename, audio on/off
+  and disconnect; about
 - Runs at login, windowless, and picks the adapter back up after a replug
 - Mic and headset audio over VBAN, tested with Voicemeeter Potato
 
-Not yet, or untested:
+Planned:
+- Linux native utility
+- PulseAudio / ALSA audio backend
+
+Unplanned:
 - A native Windows audio device. That would need a kernel driver, and test-signed drivers don't
   get along with anti-cheat.
 - 5 GHz, TX power calibration and IQK on the adapter. 2.4 GHz at fixed power is enough at
@@ -74,6 +74,10 @@ devices and don't apply.
 Run:
 - Windows 10 or 11, x64. Developed on Windows 11.
 - [ViGEmBus](https://github.com/nefarius/ViGEmBus/releases) for the virtual pad.
+  ViGEmBus was retired in 2023 over a trademark conflict with ViGEM GmbH and its repo archived; it
+  won't get any more updates, security fixes included. The last release still installs and works.
+  Its updater phoned home to a domain the project no longer holds, so leave it off or install
+  the final version 1.22.0; see the [End of Life notice](https://docs.nefarius.at/projects/ViGEm/End-of-Life/).
 - [Zadig](https://zadig.akeo.ie/), once, to put the adapter on WinUSB.
 - [Voicemeeter](https://vb-audio.com/Voicemeeter/) or another VBAN app, only for controller
   audio; see [Audio](#audio).
@@ -115,10 +119,20 @@ by serial. shieldd opens the first `0bda:0811` it finds.
 .\target\release\shieldd.exe --pair
 ```
 
-Hold the controller's NVIDIA button until its light flashes. shieldd makes a new group,
-`DIRECT-<2 chars>-<adjective>-<noun>` with a random passphrase, and hands it over
-by WPS push-button. The controller then rejoins on its own and shieldd carries on hosting.
-The pairing window is 120 s.
+Hold the controller's NVIDIA button until its light flashes. shieldd hands the saved group over
+by WPS push-button; the controller then rejoins on its own and shieldd carries on hosting.
+Pairing stays open until one controller pairs, or 120 s; run `--pair` again, or pick
+**Pair controller...** in the tray, for each more. Controllers already connected stay connected.
+
+The group is made once: `DIRECT-<2 chars>-<adjective>-<noun>` with a random passphrase, saved
+right away. `--pair` makes one if there's none yet.
+
+```powershell
+.\target\release\shieldd.exe --reconfigure-network
+```
+
+makes a new group in place of the old, then pairs as `--pair`. Every controller paired to the
+old group has to pair again.
 
 The group is saved to `--conf`, which defaults to the user's settings folder:
 - Windows: `%LOCALAPPDATA%\shieldd\p2p.conf`
@@ -128,7 +142,7 @@ A previous file is kept, gzipped, in `backup\` next to it, named for it and when
 written, like the logs: `p2p.2026-10-09T14_01_04.conf.gz`. The file is in wpa_supplicant's P2P format, except that
 the key is sealed with Windows DPAPI as `psk=dpapi:<base64>`: only the Windows user who saved it
 can read it, and only on that machine. A plain `psk=`, a quoted passphrase or 64 hex digits, is
-sealed in place the first time the default file is read, and in its backup when a new pairing
+sealed in place the first time the default file is read, and in its backup when a new group
 replaces it. A file given with `--conf` is read, backed up and written with a plain key, since
 wpa_supplicant or something else may read it too. Moving to another machine or user means
 pairing again. `rtlusb.exe ap` reads sealed files as well. The key is never logged.
@@ -138,11 +152,11 @@ whitespace, then the name, like a hosts file, with `#` lines as comments. A cont
 named for the model it gives while pairing, `nVidiaBlake` for this one. An older `p2p.models` is
 moved over on first run.
 
-Before pairing, shieldd spends ~4.5 s listening to channels 1-11 and hosts the new group on
+Before making a new group, shieldd spends ~4.5 s listening to channels 1-11 and hosts it on
 the quietest of 1, 6 and 11, counting both how loud and how busy each channel and its
-neighbors are. It only hears Wi-Fi, so microwaves and Bluetooth don't count. The controller
-rejoins on whatever channel it was paired on, read back from the file's `frequency=` line;
-re-pair to move.
+neighbors are. It only hears Wi-Fi, so microwaves and Bluetooth don't count. Controllers
+rejoin on whatever channel the group was made on, read back from the file's `frequency=` line;
+reconfigure the network to move.
 
 ## Use
 
@@ -150,8 +164,13 @@ re-pair to move.
 .\target\release\shieldd.exe
 ```
 
-Tap the NVIDIA button. The adapter's LED goes solid once the controller is connected. Ctrl+C
-to stop; the adapter powers down and the virtual pad unplugs.
+Tap the NVIDIA button. The adapter's LED goes solid once a controller is connected. Each one
+gets its own virtual pad and XInput port, up to four; a fifth is sent away, unless one of the
+four is gone, whose pad it takes over. A controller that drops out comes back on the same port,
+as long as the adapter stays up: a replug or a failed run starts the pads over, and ports may
+shuffle.
+The trackpads share the mouse: a button stays down while any controller holds it. Ctrl+C to
+stop; the adapter powers down and the virtual pads unplug.
 
 Options worth knowing, the rest in `shieldd --help`:
 - `--mouse-scale N`, `--mouse-scale-x`, `--mouse-scale-y`: trackpad speed.
@@ -163,35 +182,44 @@ Options worth knowing, the rest in `shieldd --help`:
 
 ### Tray
 
-The icon shows the controller's battery: a bolt while it charges, the bolt flashing green for
+The icon shows the battery of the controller lowest on charge, and its tooltip each one's: a
+bolt while it charges, the bolt flashing green for
 5 s when it's plugged in; an all-green full battery once it's charged, like the controller's
 light turning green, which it reads from the charger letting go after a top-off, or from one
 plugged in full getting no top-off within 30 s; and an all-red one with a flashing warning mark
 when it's critical. A crossed-out signal flashes red for 5 s at startup and when a
-controller drops off on its own rather than sent away. A spinner turns while one is joining, and
-a Wi-Fi signal lights up blue, a bar at a time, while pairing. A controller joining or leaving
+last controller drops off on its own rather than sent away. A spinner turns while one is
+joining with none up yet, and a Wi-Fi signal lights up blue, a bar at a time, while pairing.
+Critical and empty battery notifications name the controller. A controller joining or leaving
 Wi-Fi plays Windows' Device Connect or Device Disconnect sound, as a USB device would.
 
 Click for a menu. Its title shows the version, how many controllers are connected, and the
 group's name and channel; clicking the version opens an About box with the build date, license and
-notices. The controller line shows its name, XInput port and battery, and its MAC on hover.
-Clicking it buzzes the controller twice, to tell which one it is; right-clicking it renames it,
-up to 15 characters, saved to `known-clients`. Clicking the tray icon again closes the menu. The
-rest:
-- **Pair controller...**, **Re-pair controller...** while one is connected: drops the current
-  controller and pairs a new one on a new group, as `--pair` does, after a confirmation, since
-  every controller paired to the old group has to pair again. Back to the saved group if nothing
-  pairs within 2 minutes.
-- **Enable / Disable VBAN**: controller audio, see below. Remembered between runs.
+notices. Clicking the tray icon again closes the menu.
+
+Each connected controller has a line with its name, XInput port and battery, opening a submenu
+headed by its MAC. Its shortcut is the first letter of its name the menu hasn't used yet:
+- **Identify**: buzzes the controller twice, to tell which one it is.
+- **Rename...**: up to 15 characters, saved to `known-clients`.
+- **Enable / Disable audio**: its mic and headset over VBAN, see below. Remembered between runs.
 - **Disconnect**: says goodbye to the controller over Ozmo, drops it from Wi-Fi, then ignores
   it for 30 s so it gives up and goes to sleep. A controller that connects flat gets the same.
-  Meanwhile it's listed, grayed out, as "(shunned)" when nothing else is connected.
+  Meanwhile it's listed, grayed out, as "(shunned)".
+
+The rest:
+- **Pair controller...**, **Re-pair controller...** while one is connected: pairs one more
+  controller to the network as `--pair` does. Nobody's dropped.
+- **Reconfigure network**: a new network as `--reconfigure-network` makes, after a warning,
+  since every paired controller is disconnected and has to pair again. Pairing opens right
+  after.
 - **Exit**
 
 ### Audio
 
-With VBAN on, the controller's audio goes through
-[Voicemeeter](https://vb-audio.com/Voicemeeter/) over VBAN on localhost:
+With VBAN on, a controller's audio goes through
+[Voicemeeter](https://vb-audio.com/Voicemeeter/) over VBAN on localhost. The streams are up
+while any controller has VBAN on, and shared: their mics are mixed into one, and every headset
+plays the same audio.
 - Mic: stream `ShieldMic`, 16 kHz, sent to port 6980. Add it as an incoming stream.
 - Headset jack: stream `ShieldPad`, PCM 16-bit at any rate, received on port 6981. Point an
   outgoing stream at `127.0.0.1:6981`. Played ~12 dB down, since the jack has no volume of its

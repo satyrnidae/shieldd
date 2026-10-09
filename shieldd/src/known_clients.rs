@@ -23,7 +23,7 @@ fn old_path(conf: &Path) -> PathBuf {
     conf.with_extension("models")
 }
 
-fn parse_mac(s: &str) -> Option<Mac> {
+pub fn parse_mac(s: &str) -> Option<Mac> {
     let mut mac = [0u8; 6];
     let mut parts = s.split(':');
     for b in &mut mac {

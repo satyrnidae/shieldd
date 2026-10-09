@@ -153,14 +153,13 @@ fn backup_path(path: &Path) -> Result<PathBuf> {
 
 /// The file for `g`, its key sealed or plain
 fn format(g: &Group, seal: bool) -> Result<String> {
+    const SEALED: &str = "# psk is sealed with DPAPI; only the Windows user who made it can read it, on this machine.";
     let (psk, note) = match seal {
-        true => {
-            (g.psk.seal()?, "# psk is sealed with DPAPI; only the Windows user who paired can read it, on this machine.")
-        }
+        true => (g.psk.seal()?, SEALED),
         false => (g.psk.plain(), "# psk is plain, for wpa_supplicant and the like to read too."),
     };
     let lines = [
-        "# Written by shieldd --pair: the group the controller was paired with.".to_owned(),
+        "# Written by shieldd: the group controllers pair to.".to_owned(),
         note.to_owned(),
         "network={".to_owned(),
         format!("\tssid=\"{}\"", g.ssid),

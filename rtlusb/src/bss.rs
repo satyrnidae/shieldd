@@ -7,7 +7,7 @@
 //! `ap_ignore_ps` behavior. On Linux, input felt the same either way; held downlink is what
 //! hurts, mainly headset audio.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -17,7 +17,7 @@ use tracing::{debug, info, trace, warn};
 
 use crate::ap::{ApConfig, RSN, WMM_PARAM};
 use crate::chip::Chip;
-use crate::sec::FIRST_PAIRWISE_ENTRY;
+use crate::sec::{CAM_ENTRIES, FIRST_PAIRWISE_ENTRY};
 use crate::tx::{RATE_6M, Tx, TxInfo};
 use crate::wpa::{self, Pmk};
 use crate::wps;
@@ -104,6 +104,8 @@ struct Sta {
     dozing: bool,
     /// Encrypted frames held while it dozes, with when they were queued
     held: VecDeque<Held>,
+    /// Its pairwise key's CAM entry, once the 4-way handshake is done
+    cam: Option<u8>,
 }
 
 /// Power save counters since the last take_ps_stats
@@ -131,8 +133,8 @@ pub struct Bss {
     /// Hold frames for a dozing station up to this long; None sends right away like ap_ignore_ps
     ps_hold: Option<Duration>,
     ps_stats: PsStats,
-    /// Ignored until then, see shun
-    shunned: Option<(Mac, Instant)>,
+    /// Ignored until then, see shun. Ordered, so shunned() lists them the same way each time.
+    shunned: BTreeMap<Mac, Instant>,
 }
 
 fn fc_of(f: &[u8]) -> u16 {
@@ -147,6 +149,18 @@ impl Bss {
     /// Some station got through the 4-way handshake
     pub fn any_connected(&self) -> bool {
         self.stas.values().any(|s| matches!(s.state, State::Connected))
+    }
+
+    /// Authenticated, joining or connected: not gone
+    pub fn is_associated(&self, sta: &Mac) -> bool {
+        self.stas.contains_key(sta)
+    }
+
+    /// WPS push-button on with this credential, or off. The SSID shows while it's on; see
+    /// ApConfig::hidden.
+    pub fn set_wps(&mut self, chip: &Chip, tx: &mut Tx, wps: Option<crate::ap::WpsConfig>) -> Result<()> {
+        self.cfg.wps = wps;
+        chip.download_beacon(tx, &self.cfg.beacon())
     }
 
     /// Past the 4-way handshake, so data to it can go out
@@ -173,7 +187,7 @@ impl Bss {
             next_aid: 1,
             ps_hold: None,
             ps_stats: PsStats::default(),
-            shunned: None,
+            shunned: BTreeMap::new(),
         }
     }
 
@@ -185,29 +199,35 @@ impl Bss {
         self.on_leave(chip, *sta)
     }
 
-    /// Ignores `sta`'s probes, auth and association for `d`, so to it the AP is gone. One
-    /// station at a time; a new shun replaces the old.
+    /// Ignores `sta`'s probes, auth and association for `d`, so to it the AP is gone. A new
+    /// shun for the same station replaces its old one.
     pub fn shun(&mut self, sta: &Mac, d: Duration) {
-        self.shunned = Some((*sta, Instant::now() + d));
+        self.shunned.insert(*sta, Instant::now() + d);
         info!(sta = fmt_mac(sta), ?d, "shunned");
     }
 
-    /// Who's being ignored right now, if anyone
-    pub fn shunned(&self) -> Option<Mac> {
-        self.shunned.filter(|&(_, until)| Instant::now() < until).map(|(m, _)| m)
+    /// Who's being ignored right now
+    pub fn shunned(&self) -> Vec<Mac> {
+        let now = Instant::now();
+        self.shunned.iter().filter(|&(_, until)| now < *until).map(|(m, _)| *m).collect()
     }
 
-    /// `sa` is being ignored. Lifts an expired shun.
+    /// `sa` is being ignored. Lifts any expired shun.
     pub fn is_shunned(&mut self, sa: &Mac) -> bool {
-        match self.shunned {
-            Some((m, until)) if Instant::now() >= until => {
-                self.shunned = None;
-                info!(sta = fmt_mac(&m), "shun over");
-                false
+        let now = Instant::now();
+        self.shunned.retain(|m, until| {
+            let on = now < *until;
+            if !on {
+                info!(sta = fmt_mac(m), "shun over");
             }
-            Some((m, _)) => m == *sa,
-            None => false,
-        }
+            on
+        });
+        self.shunned.contains_key(sa)
+    }
+
+    /// A pairwise CAM entry no station holds
+    fn free_cam(&self) -> Option<u8> {
+        (FIRST_PAIRWISE_ENTRY..CAM_ENTRIES).find(|e| !self.stas.values().any(|s| s.cam == Some(*e)))
     }
 
     /// Install the group key. Call once after the security engine is on.
@@ -273,8 +293,8 @@ impl Bss {
         tx.send(&chip.rtl, TxInfo::mgmt(), &f)?;
         if status == 0 {
             let old = self.stas.remove(&sa);
-            if old.as_ref().is_some_and(|o| matches!(o.state, State::Connected)) {
-                chip.clear_cam(FIRST_PAIRWISE_ENTRY)?;
+            if let Some(entry) = old.as_ref().and_then(|o| o.cam) {
+                chip.clear_cam(entry)?;
             }
             // A station coming back keeps its AID and PN. Frames from the old session may still
             // sit in the chip and go out under the new key; restarting the PN under them would
@@ -296,6 +316,7 @@ impl Bss {
                 last_mgmt_seq: None,
                 dozing: false,
                 held: VecDeque::new(),
+                cam: None,
             };
             self.stas.insert(sa, sta);
             info!(sta = fmt_mac(&sa), "authenticated");
@@ -356,8 +377,8 @@ impl Bss {
         let Some(old) = self.stas.remove(&sa) else {
             return Ok(None);
         };
-        if matches!(old.state, State::Connected) {
-            chip.clear_cam(FIRST_PAIRWISE_ENTRY)?;
+        if let Some(entry) = old.cam {
+            chip.clear_cam(entry)?;
         }
         info!(sta = fmt_mac(&sa), "left");
         if matches!(old.state, State::Wps { .. } | State::WpsDone { .. }) {
@@ -441,7 +462,15 @@ impl Bss {
                     warn!(sta = fmt_mac(&sa), "bad msg 4");
                     return Ok(None);
                 }
-                chip.write_cam(FIRST_PAIRWISE_ENTRY, 0, false, &sa, &tk)?;
+                // A reassociation keeps its entry, which gets the new key
+                let Some(entry) = self.stas.get(&sa).and_then(|s| s.cam).or_else(|| self.free_cam()) else {
+                    warn!(sta = fmt_mac(&sa), "no key CAM entry free; turning it away");
+                    self.send_deauth(chip, tx, &sa, REASON_PREV_AUTH_INVALID)?;
+                    return self.on_leave(chip, sa);
+                };
+                chip.write_cam(entry, 0, false, &sa, &tk)?;
+                let sta = self.stas.get_mut(&sa).expect("station exists");
+                sta.cam = Some(entry);
                 sta.state = State::Connected;
                 info!(sta = fmt_mac(&sa), "4-way handshake done, keys installed");
                 Ok(Some(Event::Connected(sa)))
@@ -835,8 +864,7 @@ mod tests {
 
     #[test]
     fn data_frame_has_qos_ccmp_and_snap() {
-        let cfg = ApConfig { ssid: "x".into(), bssid: [1; 6], channel: 1, beacon_int: 100, hidden: false, wps: None };
-        let bss = Bss::new(cfg, [0; 32]);
+        let bss = Bss::new(cfg(), [0; 32]);
         let sta = Sta {
             aid: 1,
             wmm: true,
@@ -846,11 +874,64 @@ mod tests {
             last_mgmt_seq: None,
             dozing: false,
             held: VecDeque::new(),
+            cam: None,
         };
         let f = bss.data_frame(&[2; 6], &sta, true, 0x892e, &[0xee]);
         assert_eq!(&f[0..2], &[0x88, 0x42]);
         assert_eq!(&f[26..34], &[0x05, 0x04, 0, 0x20, 0x03, 0x02, 0x01, 0x00]);
         assert_eq!(&f[34..42], &[0xaa, 0xaa, 0x03, 0, 0, 0, 0x89, 0x2e]);
         assert_eq!(f[42], 0xee);
+    }
+
+    fn cfg() -> ApConfig {
+        ApConfig { ssid: "x".into(), bssid: [1; 6], channel: 1, beacon_int: 100, hidden: false, wps: None }
+    }
+
+    fn sta(cam: Option<u8>) -> Sta {
+        Sta {
+            aid: 1,
+            wmm: false,
+            state: State::Connected,
+            pn: 1,
+            last_seq: None,
+            last_mgmt_seq: None,
+            dozing: false,
+            held: VecDeque::new(),
+            cam,
+        }
+    }
+
+    #[test]
+    fn each_station_gets_its_own_key_entry() {
+        let mut bss = Bss::new(cfg(), [0; 32]);
+        assert_eq!(bss.free_cam(), Some(FIRST_PAIRWISE_ENTRY));
+        bss.stas.insert([2; 6], sta(Some(FIRST_PAIRWISE_ENTRY)));
+        bss.stas.insert([3; 6], sta(Some(FIRST_PAIRWISE_ENTRY + 2)));
+        bss.stas.insert([4; 6], sta(None));
+        assert_eq!(bss.free_cam(), Some(FIRST_PAIRWISE_ENTRY + 1));
+        for (i, e) in (FIRST_PAIRWISE_ENTRY..CAM_ENTRIES).enumerate() {
+            bss.stas.insert([0x10, 0, 0, 0, 0, i as u8], sta(Some(e)));
+        }
+        assert_eq!(bss.free_cam(), None);
+    }
+
+    #[test]
+    fn shuns_list_in_order() {
+        let mut bss = Bss::new(cfg(), [0; 32]);
+        for m in [[9; 6], [2; 6], [5; 6]] {
+            bss.shun(&m, Duration::from_secs(60));
+        }
+        assert_eq!(bss.shunned(), vec![[2; 6], [5; 6], [9; 6]]);
+    }
+
+    #[test]
+    fn shuns_are_per_station_and_run_out() {
+        let mut bss = Bss::new(cfg(), [0; 32]);
+        bss.shun(&[2; 6], Duration::from_secs(60));
+        bss.shun(&[3; 6], Duration::from_secs(60));
+        bss.shun(&[4; 6], Duration::ZERO);
+        assert!(bss.is_shunned(&[2; 6]) && bss.is_shunned(&[3; 6]));
+        assert!(!bss.is_shunned(&[4; 6]) && !bss.is_shunned(&[5; 6]));
+        assert_eq!(bss.shunned(), vec![[2; 6], [3; 6]]);
     }
 }
