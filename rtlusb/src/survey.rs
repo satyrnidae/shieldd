@@ -29,7 +29,7 @@ pub struct Load {
     pub frames: u32,
     /// Weighted airtime, us: each frame's time on air times its weight(). Busy matters as much
     /// as loud, since our own signal is modest and every frame is air we wait out or collide
-    /// w/; summing mW instead let one loud network drown out everything else. Scaled to a full
+    /// with; summing mW instead let one loud network drown out everything else. Scaled to a full
     /// LISTEN, so a channel that got less time to itself isn't any quieter for it.
     pub busy_us: f64,
     pub max_dbm: Option<i8>,

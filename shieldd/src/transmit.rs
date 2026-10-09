@@ -79,7 +79,7 @@ const TP_TOUCH: u8 = 0x08;
 /// 0x01 = pad click
 const TP_BTNS: [(u8, u8); 3] = [(0x01, mouse::LEFT), (0x02, mouse::RIGHT), (0x04, mouse::MIDDLE)];
 
-/// evdev key -> (xusb bit, name). Verify w/ --dump and edit
+/// evdev key -> (xusb bit, name). Verify with --dump and edit
 const BTN_MAP: &[(u16, u16, &str)] = &[
     (BTN_SOUTH, xb::A, "A"),
     (BTN_EAST, xb::B, "B"),
@@ -279,7 +279,7 @@ fn find_pad_nodes() -> Result<Vec<Node>> {
         }
     }
     if !any_readable {
-        bail!("can't read /dev/input/event*. run w/ sudo or add yourself to group 'input'");
+        bail!("can't read /dev/input/event*. run with sudo or add yourself to group 'input'");
     }
     // gamepad node can lag the others; bail (systemd retries) until it's there
     if !nodes.iter().any(|n| n.has_abs(ABS_X)) {
@@ -480,7 +480,7 @@ pub fn run(dest: SocketAddr, hidraw: Option<&Path>, dump_only: bool) -> Result<(
     }
 
     loop {
-        // wait w/ timeout so keepalive still fires when idle
+        // wait with timeout so keepalive still fires when idle
         let ready = poll(&all, Some(KEEPALIVE.saturating_sub(tx.last.elapsed())))?;
         if ready.is_empty() {
             tx.send();

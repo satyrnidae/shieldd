@@ -89,7 +89,7 @@ impl Request {
         }
     }
 
-    /// The complete APP_DATA element, w/ `seq` as its element sequence number.
+    /// The complete APP_DATA element, with `seq` as its element sequence number.
     pub fn encode(&self, seq: u8) -> Vec<u8> {
         let mut b = vec![app::USB, seq];
         match self {
@@ -291,7 +291,7 @@ impl Request {
         }
     }
 
-    /// `data` starts w/ the report ID, as on the wire
+    /// `data` starts with the report ID, as on the wire
     pub fn hid_set_report(req_id: u8, interface: u16, report_type: u8, data: Vec<u8>) -> Self {
         let report_id = data.first().copied().unwrap_or(0);
         Request::VendorClass {

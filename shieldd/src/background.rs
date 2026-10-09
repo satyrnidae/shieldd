@@ -61,7 +61,7 @@ pub fn stop() -> Result<()> {
         SetEvent(event).context("signal stop")?;
         let _ = CloseHandle(event);
     }
-    // The event goes away w/ the last handle, the instance's
+    // The event goes away with the last handle, the instance's
     let mut waited = Duration::ZERO;
     while waited < STOP_WAIT {
         std::thread::sleep(Duration::from_millis(100));
@@ -127,7 +127,7 @@ pub fn uninstall() -> Result<()> {
 /// One argument for a Windows command line. Quotes break the simple rules, so they're refused.
 fn quote(a: &OsStr) -> Result<String> {
     let a = a.to_str().context("non-Unicode argument")?;
-    ensure!(!a.contains('"'), "argument w/ a quote in it: {a}");
+    ensure!(!a.contains('"'), "argument with a quote in it: {a}");
     if !a.is_empty() && !a.contains([' ', '\t']) {
         return Ok(a.to_owned());
     }

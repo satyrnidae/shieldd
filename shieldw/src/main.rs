@@ -1,4 +1,4 @@
-//! shieldd w/o a console window, for running at login. Logs to the settings folder.
+//! shieldd without a console window, for running at login. Logs to the settings folder.
 
 #![windows_subsystem = "windows"]
 

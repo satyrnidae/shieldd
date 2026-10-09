@@ -1,8 +1,8 @@
 //! The host: the controller on our own RTL8811AU driver (rtlusb). A frame from the controller
-//! and our reply to it are handled on one thread w/ no driver queue in between; the Windows
+//! and our reply to it are handled on one thread with no driver queue in between; the Windows
 //! Wi-Fi Direct stack's queue held replies for the dozing controller, ~330 ms of input lag.
 //!
-//! `--pair`: the same, but on a fresh group (pair.rs) w/ WPS push-button on. The group goes
+//! `--pair`: the same, but on a fresh group (pair.rs) with WPS push-button on. The group goes
 //! to --conf once the controller has it, and hosting carries on when it rejoins.
 //!
 //! `--background`: hosting in a loop that waits for the adapter and starts over when it fails.
@@ -34,7 +34,7 @@ const PAIR_WINDOW: Duration = Duration::from_secs(120);
 const SLOW_POLL: Duration = Duration::from_millis(100);
 /// No frames for this long while connected: let go of everything
 const STALE: Duration = Duration::from_secs(1);
-/// Hold replies for the dozing controller up to this long (rtlusb bss.rs). Override w/
+/// Hold replies for the dozing controller up to this long (rtlusb bss.rs). Override with
 /// SHIELDD_PS_HOLD_MS, 0 to send at once.
 const PS_HOLD: Duration = Duration::from_millis(30);
 /// --background: how often to look for the adapter
@@ -47,9 +47,9 @@ const RETRY_MAX: Duration = Duration::from_secs(60);
 /// The controller acks it and carries on, so it only goes first as a courtesy.
 const GOODBYE_WAIT: Duration = Duration::from_secs(1);
 /// A controller sent away is ignored this long, so it gives up and sleeps: its sleep timer is
-/// 30 s, plus some slack. Kicked w/o this, it rejoins within ~130 ms.
+/// 30 s, plus some slack. Kicked without this, it rejoins within ~130 ms.
 const SLEEP_SHUN: Duration = Duration::from_millis(30_250);
-/// A controller that associated, or is connected w/o a battery reading, shows as joining until
+/// A controller that associated, or is connected without a battery reading, shows as joining until
 /// it's up, or this long
 const JOIN_TIMEOUT: Duration = Duration::from_secs(15);
 /// Retry saving a just-paired group this often until it works
@@ -80,7 +80,7 @@ enum Next {
     Host,
 }
 
-/// What outlives a run: the tray, VBAN w/ its sockets, and a paired group --conf wouldn't take
+/// What outlives a run: the tray, VBAN with its sockets, and a paired group --conf wouldn't take
 struct Shared {
     tray: Tray,
     vban: Option<Vban>,
@@ -140,7 +140,7 @@ impl Shared {
         }
     }
 
-    /// Between runs, w/ no radio: Exit, VBAN, and a rename the dialog was still open for
+    /// Between runs, with no radio: Exit, VBAN, and a rename the dialog was still open for
     fn idle(&mut self, quit: &AtomicBool, d: Duration) {
         let until = Instant::now() + d;
         while !quit.load(Ordering::Relaxed) && Instant::now() < until {
@@ -282,11 +282,11 @@ fn run_once(args: &Args, pair: bool, pair_bails: bool, quit: &AtomicBool, sh: &m
     let mut isoc_frame: u8 = 0;
     let mut leaving: Option<Leaving> = None;
     let mut names = known_clients::load(&args.conf);
-    // Since a controller associated, until it's up w/ a battery reading
+    // Since a controller associated, until it's up with a battery reading
     let mut joining: Option<Instant> = None;
     // JOIN_TIMEOUT ran out on the controller there now; no spinner for it again
     let mut join_gave_up = false;
-    // Sent away to sleep, w/ its name looked up once. rtlusb's shun says how long.
+    // Sent away to sleep, with its name looked up once. rtlusb's shun says how long.
     let mut shunned: Option<Shunned> = None;
     // Paired, but writing --conf failed: when to try again
     let mut save_due: Option<Instant> = sh.unsaved.is_some().then(Instant::now);

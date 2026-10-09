@@ -33,7 +33,7 @@ pub struct TxInfo {
     pub hw_seq: bool,
     /// Hardware CCMP: the frame carries our CCMP header, the chip encrypts and appends the MIC
     pub ccmp: bool,
-    /// Firmware TX report w/ this sequence number, bits 7:2; filled in by Tx::send
+    /// Firmware TX report with this sequence number, bits 7:2; filled in by Tx::send
     pub report: Option<u8>,
     /// Drop the frame after this many retries instead of REG_RETRY_LIMIT's 48
     pub retry_limit: Option<u8>,
@@ -146,7 +146,7 @@ struct Pending {
 pub struct TxStats {
     pub acked: u32,
     pub failed: u32,
-    /// Sent w/ a report request, never reported
+    /// Sent with a report request, never reported
     pub unreported: u32,
     /// Retries over all reported frames, and the most any one needed
     pub retries: u32,
@@ -199,7 +199,7 @@ impl Tx {
 }
 
 impl Tx {
-    /// Counts a frame w/ control field `fc` in flight and returns its sn. Skips any sn still
+    /// Counts a frame with control field `fc` in flight and returns its sn. Skips any sn still
     /// pending: a frame whose report got lost would otherwise take the next one's report.
     fn track(&mut self, fc: u16) -> u8 {
         if self.pending.len() >= MAX_PENDING {
@@ -248,7 +248,7 @@ impl Tx {
         true
     }
 
-    /// Data frames sent in the last `window` w/o a report yet: roughly what's sitting in the chip
+    /// Data frames sent in the last `window` without a report yet: roughly what's sitting in the chip
     pub fn data_in_flight(&self, window: Duration) -> usize {
         self.pending.iter().filter(|p| (p.fc >> 2) & 3 == 2 && p.sent.elapsed() < window).count()
     }

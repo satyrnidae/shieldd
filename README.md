@@ -20,7 +20,7 @@ ways to use the controller on a PC:
 - **[Syniurge/ShieldControllerWinDriver](https://github.com/Syniurge/ShieldControllerWinDriver)**,
   continued in **[nefarius' fork](https://github.com/nefarius/ShieldControllerWinDriver)**:
   Windows HID filter driver. Wired only. Written 2016-2017, before AI coding tools.
-- **NVIDIA's own drivers:** wired only, and only on PCs w/ NVIDIA graphics. Closed source, so
+- **NVIDIA's own drivers:** wired only, and only on PCs with NVIDIA graphics. Closed source, so
   there's no checking, but NVIDIA has said publicly that its engineers use AI coding tools;
   assume current releases are at least partly AI-written.
 - **[devmapal/nvidia-shield-controller-driver](https://github.com/devmapal/nvidia-shield-controller-driver)**:
@@ -28,7 +28,7 @@ ways to use the controller on a PC:
   before AI coding tools. Targets Linux 4.x kernels; newer ones need porting.
 - **[keyboardspecialist/nvshield2015-driver](https://github.com/keyboardspecialist/nvshield2015-driver)**:
   Linux, wireless. Repackages the devmapal patches and chunkeey's standalone ozwpan, both
-  human-written, w/ new scripts and docs. Those scripts and docs show signs of AI generation,
+  human-written, with new scripts and docs. Those scripts and docs show signs of AI generation,
   so the devmapal original is the safer pick if that matters to you.
 
 ## Status
@@ -40,16 +40,16 @@ Works:
 - WPS push-button pairing to a fresh random group
 - Reconnect on a tap of the NVIDIA button, hidden SSID, WPA2-CCMP
 - Adapter LED blinks while waiting, solid while connected
-- Battery in the tray, colored for the taskbar theme, w/ a notification when it goes critical;
+- Battery in the tray, colored for the taskbar theme, with a notification when it goes critical;
   a short rumble when charging starts. Rumble cuts out near empty, and a controller that
   connects flat is sent away until it's plugged in.
 - Tray menu: pair, identify, rename, disconnect, VBAN audio on/off, about
 - Runs at login, windowless, and picks the adapter back up after a replug
-- Mic and headset audio over VBAN, tested w/ Voicemeeter Potato
+- Mic and headset audio over VBAN, tested with Voicemeeter Potato
 
 Not yet, or untested:
 - A native Windows audio device. That would need a kernel driver, and test-signed drivers don't
-  get along w/ anti-cheat.
+  get along with anti-cheat.
 - 5 GHz, TX power calibration and IQK on the adapter. 2.4 GHz at fixed power is enough at
   couch distance.
 
@@ -60,10 +60,10 @@ device `0955:7210`, "NVIDIA Controller v01.03". The later Bluetooth controllers 
 devices and don't apply.
 
 **Adapter:** Realtek RTL8811AU / RTL8821AU, 1T1R 802.11ac USB, at VID:PID `0bda:0811`.
-- Tested: ALFA Network AWUS036ACS, AC600 dual-band w/ an external antenna. It reports Realtek's
+- Tested: ALFA Network AWUS036ACS, AC600 dual-band with an external antenna. It reports Realtek's
   stock `0bda:0811` and efuse strings "Realtek" / "802.11ac WLAN Adapter", so Zadig lists it
   under that name rather than ALFA's.
-- Other 8811AU/8821AU adapters w/ vendor-specific IDs should work once their ID is added to
+- Other 8811AU/8821AU adapters with vendor-specific IDs should work once their ID is added to
   `rtlusb/src/usb.rs`. Untested.
 - Not supported: RTL8812AU (2T2R, different tables), RTL8814AU, and anything on rtw89 or
   older rtl8xxxu chips.
@@ -80,7 +80,7 @@ Run:
 
 Build:
 - Rust 1.88 or newer, `x86_64-pc-windows-msvc` toolchain (edition 2024, let chains).
-- Visual Studio Build Tools w/ the "Desktop development with C++" workload, for the MSVC linker.
+- Visual Studio Build Tools with the "Desktop development with C++" workload, for the MSVC linker.
 
 ## Build
 
@@ -104,7 +104,7 @@ One time per adapter:
 4. Target driver: WinUSB. Replace Driver.
 
 The adapter disappears from Windows' Wi-Fi list; that's expected. To undo, uninstall the device
-in Device Manager w/ "Attempt to remove the driver for this device" ticked, then replug.
+in Device Manager with "Attempt to remove the driver for this device" ticked, then replug.
 
 The USB serial on these adapters is a generic `00E04C000001`, so two of them can't be told apart
 by serial. shieldd opens the first `0bda:0811` it finds.
@@ -116,7 +116,7 @@ by serial. shieldd opens the first `0bda:0811` it finds.
 ```
 
 Hold the controller's NVIDIA button until its light flashes. shieldd makes a new group,
-`DIRECT-<2 chars>-<adjective>-<noun>` w/ a random passphrase, and hands it over
+`DIRECT-<2 chars>-<adjective>-<noun>` with a random passphrase, and hands it over
 by WPS push-button. The controller then rejoins on its own and shieldd carries on hosting.
 The pairing window is 120 s.
 
@@ -126,15 +126,15 @@ The group is saved to `--conf`, which defaults to the user's settings folder:
 
 A previous file is kept, gzipped, in `backup\` next to it, named for it and when it was last
 written, like the logs: `p2p.2026-10-09T14_01_04.conf.gz`. The file is in wpa_supplicant's P2P format, except that
-the key is sealed w/ Windows DPAPI as `psk=dpapi:<base64>`: only the Windows user who saved it
+the key is sealed with Windows DPAPI as `psk=dpapi:<base64>`: only the Windows user who saved it
 can read it, and only on that machine. A plain `psk=`, a quoted passphrase or 64 hex digits, is
 sealed in place the first time the default file is read, and in its backup when a new pairing
-replaces it. A file given w/ `--conf` is read, backed up and written w/ a plain key, since
+replaces it. A file given with `--conf` is read, backed up and written with a plain key, since
 wpa_supplicant or something else may read it too. Moving to another machine or user means
 pairing again. `rtlusb.exe ap` reads sealed files as well. The key is never logged.
 
 Controller names go in `known-clients` alongside, for the tray: one a line, the MAC,
-whitespace, then the name, like a hosts file, w/ `#` lines as comments. A controller starts out
+whitespace, then the name, like a hosts file, with `#` lines as comments. A controller starts out
 named for the model it gives while pairing, `nVidiaBlake` for this one. An older `p2p.models` is
 moved over on first run.
 
@@ -155,7 +155,7 @@ to stop; the adapter powers down and the virtual pad unplugs.
 
 Options worth knowing, the rest in `shieldd --help`:
 - `--mouse-scale N`, `--mouse-scale-x`, `--mouse-scale-y`: trackpad speed.
-- `--mic`: keep the controller's mic stream open even w/o VBAN, which keeps the controller from
+- `--mic`: keep the controller's mic stream open even without VBAN, which keeps the controller from
   dozing between inputs.
 - `RUST_LOG`: log level, e.g. `shieldd=debug,rtlusb=debug`. `trace` dumps every frame.
 - `SHIELDD_PS_HOLD_MS`: how long replies wait for a dozing controller, default 30, 0 to send
@@ -166,14 +166,14 @@ Options worth knowing, the rest in `shieldd --help`:
 The icon shows the controller's battery: a bolt while it charges, the bolt flashing green for
 5 s when it's plugged in; an all-green full battery once it's charged, like the controller's
 light turning green, which it reads from the charger letting go after a top-off, or from one
-plugged in full getting no top-off within 30 s; and an all-red one w/ a flashing warning mark
+plugged in full getting no top-off within 30 s; and an all-red one with a flashing warning mark
 when it's critical. A crossed-out signal flashes red for 5 s at startup and when a
 controller drops off on its own rather than sent away. A spinner turns while one is joining, and
 a Wi-Fi signal lights up blue, a bar at a time, while pairing. A controller joining or leaving
 Wi-Fi plays Windows' Device Connect or Device Disconnect sound, as a USB device would.
 
 Click for a menu. Its title shows the version, how many controllers are connected, and the
-group's name and channel; clicking the version opens an About box w/ the build date, license and
+group's name and channel; clicking the version opens an About box with the build date, license and
 notices. The controller line shows its name, XInput port and battery, and its MAC on hover.
 Clicking it buzzes the controller twice, to tell which one it is; right-clicking it renames it,
 up to 15 characters, saved to `known-clients`. Clicking the tray icon again closes the menu. The
@@ -203,7 +203,7 @@ With VBAN on, the controller's audio goes through
 .\target\release\shieldd.exe --install
 ```
 
-Starts `shieldw.exe` at login for this user, w/ any other options given alongside `--install`;
+Starts `shieldw.exe` at login for this user, with any other options given alongside `--install`;
 a `--conf` among them has to be an absolute path. It waits for the adapter, picks it back up after it's unplugged, and logs to
 `%LOCALAPPDATA%\shieldd\logs\latest.log`, as does a hosting `shieldd`. Earlier runs' logs are
 gzipped next to it, named for when they started, UTC: `2026-10-09T14_01_04.log.gz`. It shows under
@@ -224,7 +224,7 @@ An older path, kept because it still works:
 | Path | What |
 | --- | --- |
 | `shieldtray/` | The tray: what it shows and sends back, the battery gauge, the Windows tray, and its icon SVGs in `res/` |
-| `shieldw/` | shieldd w/o a console window, for running at login |
+| `shieldw/` | shieldd without a console window, for running at login |
 | `shieldutl/` | Shared by rtlusb and shieldd: MAC formatting, base64, `psk=` values and their DPAPI seal |
 | `ozproto/` | Ozmo protocol: wire format and host session state machine, no I/O |
 | `rtlusb/` | Userspace RTL8811AU driver over WinUSB: init, firmware, PHY, AP, WPA2, WPS |

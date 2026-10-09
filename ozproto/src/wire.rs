@@ -96,7 +96,7 @@ impl Header {
     }
 }
 
-/// Control byte w/ the protocol version set and nothing else
+/// Control byte with the protocol version set and nothing else
 pub const fn base_control() -> u8 {
     PROTOCOL_VERSION << ctl::VERSION_SHIFT
 }

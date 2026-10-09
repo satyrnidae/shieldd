@@ -1,6 +1,6 @@
 [package]
 name = "shieldutl"
-description = "Small pieces shared by rtlusb and shieldd: MAC formatting, base64, and psk= values w/ their DPAPI seal"
+description = "Small pieces shared by rtlusb and shieldd: MAC formatting, base64, and psk= values with their DPAPI seal"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

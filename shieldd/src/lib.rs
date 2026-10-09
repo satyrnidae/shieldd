@@ -80,7 +80,7 @@ pub struct Args {
     /// Vertical scale on its own, overriding --mouse-scale
     #[arg(long)]
     mouse_scale_y: Option<f32>,
-    /// Open the mic stream even w/ VBAN off, where it goes nowhere. It keeps the controller from
+    /// Open the mic stream even with VBAN off, where it goes nowhere. It keeps the controller from
     /// dozing between inputs, at the cost of a steady stream of frames. Doesn't change the lag.
     #[arg(long)]
     mic: bool,
@@ -94,27 +94,27 @@ pub struct Args {
     /// usual.
     #[arg(long, conflicts_with_all = ["receiver", "transmit"])]
     pair: bool,
-    /// Where --transmit sends to, w/ --receiver
+    /// Where --transmit sends to, with --receiver
     #[arg(long, default_value = shdlink::DEFAULT_ADDR, requires = "receiver")]
     listen: SocketAddr,
     /// WSL side (Linux only): read the controller's evdev + hidraw nodes
     /// (ozwpan) and send SHD2 packets to a --receiver; replaces shield_tx.py
     #[arg(long, conflicts_with = "receiver")]
     transmit: bool,
-    /// Where to send, w/ --transmit
+    /// Where to send, with --transmit
     #[arg(long, default_value = shdlink::DEFAULT_ADDR, requires = "transmit")]
     dest: SocketAddr,
-    /// Print raw events from every controller node instead of sending, w/ --transmit
+    /// Print raw events from every controller node instead of sending, with --transmit
     #[arg(long, requires = "transmit")]
     dump: bool,
-    /// The controller's hidraw node (default: find 0955:7210), w/ --transmit
+    /// The controller's hidraw node (default: find 0955:7210), with --transmit
     #[arg(long, requires = "transmit")]
     hidraw: Option<PathBuf>,
     /// Keep running: wait for the adapter, and start over when it's unplugged or fails.
     /// shieldw always runs this way.
     #[arg(long, conflicts_with_all = ["receiver", "transmit", "pair"])]
     background: bool,
-    /// Start shieldw at login for this user, w/ the rest of this command line. Doesn't start
+    /// Start shieldw at login for this user, with the rest of this command line. Doesn't start
     /// it now.
     #[arg(long, conflicts_with_all = ["receiver", "transmit", "pair", "uninstall", "stop"])]
     install: bool,
@@ -210,11 +210,11 @@ fn dispatch(mut args: Args, windowless: bool, claimed: Option<Quit>) -> Result<(
             return background::stop();
         }
         if windowless {
-            anyhow::ensure!(!(args.pair || args.receiver), "shieldw only hosts in the background; pair w/ shieldd");
+            anyhow::ensure!(!(args.pair || args.receiver), "shieldw only hosts in the background; pair with shieldd");
             args.background = true;
         }
         // run() claims for anything that hosts, before logging starts
-        let quit = anyhow::Context::context(claimed, "hosting w/o the instance")?;
+        let quit = anyhow::Context::context(claimed, "hosting without the instance")?;
         if args.receiver {
             let mut outputs = outputs::Outputs::new(args.scale())?;
             return receiver::run(args.listen, &mut outputs, &quit);

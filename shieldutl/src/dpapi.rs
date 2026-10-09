@@ -21,7 +21,7 @@ fn take(out: CRYPT_INTEGER_BLOB, secret: bool) -> Vec<u8> {
     if out.pbData.is_null() {
         return Vec::new();
     }
-    // SAFETY: DPAPI filled out w/ a LocalAlloc'd buffer of cbData bytes, ours until freed here
+    // SAFETY: DPAPI filled out with a LocalAlloc'd buffer of cbData bytes, ours until freed here
     unsafe {
         let buf = std::slice::from_raw_parts_mut(out.pbData, out.cbData as usize);
         let v = buf.to_vec();
@@ -47,18 +47,18 @@ pub fn protect(plain: &[u8]) -> Result<Vec<u8>> {
             &mut out,
         )
     }
-    .context("encrypting w/ DPAPI")?;
+    .context("encrypting with DPAPI")?;
     Ok(take(out, false))
 }
 
-/// The caller wipes what it gets back once done w/ it
+/// The caller wipes what it gets back once done with it
 pub fn unprotect(sealed: &[u8]) -> Result<Vec<u8>> {
     let mut out = CRYPT_INTEGER_BLOB::default();
     // SAFETY: as protect
     unsafe {
         CryptUnprotectData(&blob(sealed), None, Some(&blob(ENTROPY)), None, None, CRYPTPROTECT_UI_FORBIDDEN, &mut out)
     }
-    .context("decrypting w/ DPAPI; it only opens for the Windows user who saved it, on that machine")?;
+    .context("decrypting with DPAPI; it only opens for the Windows user who saved it, on that machine")?;
     Ok(take(out, true))
 }
 

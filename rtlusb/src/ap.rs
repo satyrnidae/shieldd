@@ -2,7 +2,7 @@
 //!
 //! What the controller needs: its paired group's SSID on the channel it paired on, OFDM rates
 //! only, WPA2-PSK/CCMP and WMM. It ignores 1 Mbps CCK frames, so EAPOL sent at that rate never
-//! gets an ACK. Rejoining, it sends plain directed probes, broadcast BSSID, w/ only SSID and
+//! gets an ACK. Rejoining, it sends plain directed probes, broadcast BSSID, with only SSID and
 //! rates 6-24 Mbps, no P2P or WPS IEs.
 
 use std::time::Duration;

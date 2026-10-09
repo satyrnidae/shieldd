@@ -26,11 +26,11 @@ pub struct Status {
     pub controller: Option<Connected>,
     pub vban: bool,
     pub pairing: bool,
-    /// The group being hosted, None w/o an adapter
+    /// The group being hosted, None without an adapter
     pub ssid: Option<String>,
     /// Its channel, None until a survey picks one
     pub channel: Option<u8>,
-    /// A controller is on its way in: associated, but not yet up w/ a battery reading
+    /// A controller is on its way in: associated, but not yet up with a battery reading
     pub joining: bool,
     /// One sent away to sleep and ignored for now. Listed while no controller's connected.
     pub shunned: Option<Shunned>,
@@ -61,7 +61,7 @@ pub enum Command {
     /// On or off
     Vban(bool),
     Identify,
-    /// The controller w/ this MAC goes by this name now, already cleaned up
+    /// The controller with this MAC goes by this name now, already cleaned up
     Rename([u8; 6], String),
     Disconnect,
     Exit,

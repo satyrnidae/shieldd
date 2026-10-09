@@ -1,5 +1,5 @@
 //! The controller at the USB level, over Ozmo: configures it after each
-//! connect, runs the HID init, and parses its HID reports. W/o the init, which replays what the
+//! connect, runs the HID init, and parses its HID reports. Without the init, which replays what the
 //! SHIELD Tablet sends, it sends a keepalive a second and ignores every button.
 //!
 //! Report layouts come from the controller's HID report descriptor, as it hands it over.
@@ -17,7 +17,7 @@ const HID_EP: u8 = 0x81;
 const RETRY_AFTER: Duration = Duration::from_secs(2);
 const MAX_TRIES: u32 = 3;
 
-/// What the tablet sends after enumeration, in order. W/o the first eight the
+/// What the tablet sends after enumeration, in order. Without the first eight the
 /// controller connects but never reports input, and resets after ~45 s.
 /// The audio interfaces come after, see `Controller::set_streams`.
 const SETUP: [&str; 14] = [
@@ -46,7 +46,7 @@ const MIC_EP: u8 = 0x83;
 
 /// Feature 0xFD is a mailbox: SET writes a command byte, GET reads back the command and its
 /// answer. The tablet sends 0A, 01, 08 and 0D on every connect in its handshake capture. 0D
-/// answers w/ just 0D, a handshake check as far as anyone can tell.
+/// answers with just 0D, a handshake check as far as anyone can tell.
 const MAILBOX: u8 = 0xFD;
 /// Command whose answer is the best battery candidate: `01 32 d7 xx` in every tablet capture
 const STATUS_CMD: u8 = 0x01;
@@ -54,7 +54,7 @@ const STATUS_CMD: u8 = 0x01;
 /// charger closely. It's two small control requests; one in flight at a time.
 const STATUS_EVERY: Duration = Duration::from_secs(1);
 /// Battery reading below which the controller is as good as dead: at ~0xCCFD on 2026-10-08 it
-/// couldn't keep its radio up even w/o rumble
+/// couldn't keep its radio up even without rumble
 const CRITICAL_BELOW: u16 = 0xCD40;
 /// Critical for this long mid-session before acting on it, so a sag under load doesn't count.
 /// At connect the controller is idle, so its first reading counts right away.
@@ -235,7 +235,7 @@ pub struct Controller {
     /// Kicked for its battery; nothing more to do this session
     let_go: bool,
     /// Rumble the host plays itself, charge pulse and identify: motor values and how long to
-    /// hold them, w/ the step running now already popped
+    /// hold them, with the step running now already popped
     buzz: VecDeque<([u16; 3], Duration)>,
     buzz_until: Option<Instant>,
     /// Audio streams wanted open, mic and headset; kept across sessions
@@ -249,7 +249,7 @@ pub struct Controller {
 }
 
 impl Controller {
-    /// `mic` opens the mic stream after setup. A streaming controller never dozes off: w/o
+    /// `mic` opens the mic stream after setup. A streaming controller never dozes off: without
     /// it, it idles between inputs and goes silent for up to ~2 s at a time.
     pub fn new(mic: bool) -> Self {
         Controller {
@@ -605,7 +605,7 @@ impl Controller {
 //region Rumble probe
 
 /// SHIELDD_RUMBLE_TEST=1: once the controller is configured, steps output report 0x01 through
-/// each value on its own, then all at once, w/ silence between, so whoever holds the
+/// each value on its own, then all at once, with silence between, so whoever holds the
 /// controller can say which steps buzz.
 pub struct RumbleProbe {
     start: Option<Instant>,

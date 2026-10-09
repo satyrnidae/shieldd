@@ -1,5 +1,5 @@
 //! Controller names by MAC, in `known-clients` next to the group's conf. Like a hosts file: one
-//! controller a line, its MAC, whitespace, then its name; a line starting w/ `#` is a comment, so
+//! controller a line, its MAC, whitespace, then its name; a line starting with `#` is a comment, so
 //! a name can still have one. The name starts
 //! out as the model WPS gives at its first pairing, and the tray can rename it.
 
@@ -47,7 +47,7 @@ fn parse(text: &str) -> HashMap<Mac, String> {
     text.lines().filter_map(parse_line).collect()
 }
 
-/// `text` w/ `mac`'s line saying `name`: the first line for it rewritten, any later ones dropped,
+/// `text` with `mac`'s line saying `name`: the first line for it rewritten, any later ones dropped,
 /// or a new line at the end. Comments and everything else stay as they were.
 fn set_line(text: &str, mac: &Mac, name: &str) -> String {
     let line = format!("{} {name}", shieldutl::mac::fmt_mac(mac));

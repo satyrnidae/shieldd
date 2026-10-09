@@ -1,4 +1,4 @@
-//! Standard base64 w/ padding, RFC 4648. Short enough not to need a crate.
+//! Standard base64 with padding, RFC 4648. Short enough not to need a crate.
 
 use anyhow::{Result, bail};
 

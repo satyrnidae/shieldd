@@ -1,5 +1,5 @@
 //! A wpa_supplicant `psk=` value: a quoted passphrase or the PMK itself in 64 hex digits, either
-//! one optionally sealed w/ Windows DPAPI as `dpapi:<base64>`. The one parser for rtlusb and
+//! one optionally sealed with Windows DPAPI as `dpapi:<base64>`. The one parser for rtlusb and
 //! shieldd both.
 
 use anyhow::{Result, ensure};
@@ -83,7 +83,7 @@ fn unseal(sealed: &str) -> Result<Psk> {
 
 #[cfg(not(windows))]
 fn unseal(_: &str) -> Result<Psk> {
-    anyhow::bail!("psk is sealed w/ Windows DPAPI; only the Windows user who sealed it can open it")
+    anyhow::bail!("psk is sealed with Windows DPAPI; only the Windows user who sealed it can open it")
 }
 
 impl Drop for Psk {

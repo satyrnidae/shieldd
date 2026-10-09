@@ -369,8 +369,8 @@ fn mouse(dx: i32, dy: i32, data: u32, flags: MOUSE_EVENT_FLAGS) -> INPUT {
     }
 }
 
-/// A media key the way a keyboard sends it: extended, w/ its E0-prefixed scan code. A bare VK
-/// w/o either gets fewer volume steps out of Windows than it was sent.
+/// A media key the way a keyboard sends it: extended, with its E0-prefixed scan code. A bare VK
+/// without either gets fewer volume steps out of Windows than it was sent.
 fn keyboard(vk: VIRTUAL_KEY, up: bool) -> INPUT {
     let scan = match vk {
         VK_VOLUME_UP => 0x30,

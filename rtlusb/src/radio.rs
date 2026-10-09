@@ -50,7 +50,7 @@ pub enum RadioEvent<'a> {
         ethertype: u16,
         payload: &'a [u8],
     },
-    /// WPS delivered the credential, w/ the model name the station gave; push-button is off again
+    /// WPS delivered the credential, with the model name the station gave; push-button is off again
     Paired(Mac, &'a str),
     PairingFailed(Mac, &'a str),
     /// Nothing received for a short while, or between batches of frames
@@ -298,7 +298,7 @@ impl Drop for Radio {
 }
 
 /// Bulk IN loop. `on_frame(None)` runs every pass, at least every `idle`. C2H packets from the
-/// firmware come through too, w/ `c2h` set.
+/// firmware come through too, with `c2h` set.
 pub fn rx_loop(
     chip: &Chip,
     limit: Option<Duration>,

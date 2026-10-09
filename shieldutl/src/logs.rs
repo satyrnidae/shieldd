@@ -19,7 +19,7 @@ const KEEP: usize = 20;
 const PANIC: &str = "panic";
 
 pub struct Setup<'a> {
-    /// What to log w/o RUST_LOG
+    /// What to log without RUST_LOG
     pub default_filter: &'a str,
     /// Also to the console, colored only on a terminal, never in a file or a redirect
     pub console: bool,
@@ -27,7 +27,7 @@ pub struct Setup<'a> {
     pub file: Option<(PathBuf, bool)>,
 }
 
-/// Sets up tracing. A console carries on w/o the file if it won't open. W/ the file, a panic
+/// Sets up tracing. A console carries on without the file if it won't open. With the file, a panic
 /// goes into it too. Returns whether the file's in use.
 pub fn init(setup: Setup) -> Result<bool> {
     use std::io::IsTerminal;
@@ -57,7 +57,7 @@ pub fn init(setup: Setup) -> Result<bool> {
     if !in_use {
         return Ok(false);
     }
-    // To the file; a console still gets Rust's own report, w/ the thread and any backtrace
+    // To the file; a console still gets Rust's own report, with the thread and any backtrace
     let report = std::panic::take_hook();
     let console = setup.console;
     std::panic::set_hook(Box::new(move |p| {

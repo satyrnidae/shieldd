@@ -1,6 +1,6 @@
 //! The controller's saved group, in wpa_supplicant P2P config form: read for hosting, written
-//! by --pair. The key is sealed w/ DPAPI, `psk=dpapi:<base64>`, so only this Windows user can read
-//! it. A plain `psk=` in the default conf gets sealed the first time it's read; one given w/
+//! by --pair. The key is sealed with DPAPI, `psk=dpapi:<base64>`, so only this Windows user can read
+//! it. A plain `psk=` in the default conf gets sealed the first time it's read; one given with
 //! --conf is left as it is, since something else may read it too.
 
 use std::ops::Range;
@@ -21,7 +21,7 @@ pub struct Group {
     pub channel: u8,
 }
 
-/// The channel the old DIRECT-0S group, and any conf w/o `frequency=`, lives on
+/// The channel the old DIRECT-0S group, and any conf without `frequency=`, lives on
 const DEFAULT_CHANNEL: u8 = 1;
 
 fn channel_of(mhz: u32) -> Option<u8> {
@@ -63,7 +63,7 @@ fn parse(text: &str) -> Result<Found> {
         let block = &body[..end];
         rest = &body[end..];
 
-        // Each field's value, trimmed, w/ its place in text
+        // Each field's value, trimmed, with its place in text
         let field = |key: &str| {
             block.lines().find_map(|l| {
                 let v = l.trim().strip_prefix(key)?.strip_prefix('=')?.trim();
@@ -90,11 +90,11 @@ fn parse(text: &str) -> Result<Found> {
     bail!("no mode=3 network block")
 }
 
-/// Replaces `path` w/ just this group. An existing file is kept, gzipped, in `backup/` next to
+/// Replaces `path` with just this group. An existing file is kept, gzipped, in `backup/` next to
 /// it, named for it and when it was last written, UTC like the log files:
 /// `backup/p2p.<stamp>.conf.gz`. `seal`, as for read: the new file's key is sealed, and a plain
-/// one in the backup too, or kept plain w/ a warning if that fails, rather than cost the save.
-/// W/o it, both are written plain. Returns the backup's path, if one was made.
+/// one in the backup too, or kept plain with a warning if that fails, rather than cost the save.
+/// Without it, both are written plain. Returns the backup's path, if one was made.
 pub fn write(path: &Path, g: &Group, seal: bool) -> Result<Option<PathBuf>> {
     // The old file before it goes, but its backup only once the new one's in: a save that fails
     // leaves no backup, so retrying one doesn't pile them up
@@ -102,7 +102,7 @@ pub fn write(path: &Path, g: &Group, seal: bool) -> Result<Option<PathBuf>> {
         Ok(bytes) => Some((bytes, backup_path(path)?)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => {
-            warn!("reading {} to back it up: {e}; replacing it w/o a backup", path.display());
+            warn!("reading {} to back it up: {e}; replacing it without a backup", path.display());
             None
         }
     };
@@ -155,7 +155,7 @@ fn backup_path(path: &Path) -> Result<PathBuf> {
 fn format(g: &Group, seal: bool) -> Result<String> {
     let (psk, note) = match seal {
         true => {
-            (g.psk.seal()?, "# psk is sealed w/ DPAPI; only the Windows user who paired can read it, on this machine.")
+            (g.psk.seal()?, "# psk is sealed with DPAPI; only the Windows user who paired can read it, on this machine.")
         }
         false => (g.psk.plain(), "# psk is plain, for wpa_supplicant and the like to read too."),
     };

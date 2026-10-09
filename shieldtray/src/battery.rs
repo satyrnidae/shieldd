@@ -74,7 +74,7 @@ pub(crate) fn charging_percent(reading: u16) -> u8 {
     percent(reading.saturating_sub(CHARGE_LIFT))
 }
 
-/// The percent to show, from readings that bounce under load and jump w/ the charger. On
+/// The percent to show, from readings that bounce under load and jump with the charger. On
 /// battery it only goes down, on the charger only up, and each switch starts over.
 #[derive(Debug, Default)]
 pub(crate) struct Gauge {
@@ -88,7 +88,7 @@ pub(crate) struct Gauge {
     plugged: Option<Instant>,
     /// When the reading fell CHARGED_DROP below the peak, if it's still down
     dropped: Option<Instant>,
-    /// When to look again w/o a new reading, since none may come: IDLE_AFTER or CHARGED_DROP_FOR in
+    /// When to look again without a new reading, since none may come: IDLE_AFTER or CHARGED_DROP_FOR in
     look_at: Option<Instant>,
 }
 
@@ -173,7 +173,7 @@ mod tests {
         let mut g = Gauge::default();
         let (p, fresh) = g.feed(&b(false, 0xD0FD), t0);
         assert!(fresh && p == 11);
-        // Plugging in lifts the reading ~0x660; the gauge doesn't jump w/ it
+        // Plugging in lifts the reading ~0x660; the gauge doesn't jump with it
         let (p, _) = g.feed(&b(true, 0xD0FD + 0x660), t0);
         assert_eq!(p, 11);
         assert_eq!(g.feed(&b(true, 0xD600 + 0x660), t0).0, 31);

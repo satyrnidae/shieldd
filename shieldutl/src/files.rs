@@ -1,4 +1,4 @@
-//! Replacing a file w/o ever leaving it half written: stage the new contents next to it, then
+//! Replacing a file without ever leaving it half written: stage the new contents next to it, then
 //! commit them in one rename
 
 use std::ops::Range;
@@ -43,7 +43,7 @@ pub fn stage_gz(path: &Path, contents: &[u8]) -> Result<PathBuf> {
     stage(path, gz.finish()?)
 }
 
-/// `text`, a wpa_supplicant conf, w/ the plain `psk=` value at `at` swapped for `psk` sealed
+/// `text`, a wpa_supplicant conf, with the plain `psk=` value at `at` swapped for `psk` sealed
 #[cfg(windows)]
 pub fn seal_text(text: &str, at: Range<usize>, psk: &crate::psk::Psk) -> Result<String> {
     Ok(format!("{}{}{}", &text[..at.start], psk.seal()?, &text[at.end..]))

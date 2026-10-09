@@ -2,7 +2,7 @@
 //!
 //! Power save: the controller dozes between its own frames, and a frame sent then gets retried
 //! by the hardware until it wakes, blocking its queue meanwhile. With a ps_hold, data for a
-//! dozing station waits until its next frame w/ PM clear, or the hold runs out. No TIM: it
+//! dozing station waits until its next frame with PM clear, or the hold runs out. No TIM: it
 //! wakes on its own often enough. Without one, everything goes out at once, rtw88's
 //! `ap_ignore_ps` behavior. On Linux, input felt the same either way; held downlink is what
 //! hurts, mainly headset audio.
@@ -29,7 +29,7 @@ const EAPOL_TRIES: u32 = 5;
 /// Msg 1 waits this long after the assoc response. They go out on different hardware queues,
 /// so sent back to back, msg 1 can beat the response to the air and get dropped.
 const MSG1_DELAY: Duration = Duration::from_millis(20);
-/// Downlink data. 24 Mbps w/o fallback once failed every frame at 48 retries while uplink was
+/// Downlink data. 24 Mbps without fallback once failed every frame at 48 retries while uplink was
 /// fine: reports came 3 s late, the queue filled, EAPOL couldn't get out and the link dropped.
 /// Ozmo frames are small, so the slowest OFDM rate costs little airtime.
 const DATA_RATE: u8 = RATE_6M;
@@ -59,7 +59,7 @@ pub enum Event {
     Disconnected(Mac),
     /// Ethertype and payload of a data frame from a connected station
     Data(Mac, u16, Vec<u8>),
-    /// WPS handed the credential over, w/ the model name the station gave; it rejoins w/ the
+    /// WPS handed the credential over, with the model name the station gave; it rejoins with the
     /// credential next
     Paired(Mac, String),
     PairingFailed(Mac, String),
@@ -102,7 +102,7 @@ struct Sta {
     last_mgmt_seq: Option<u16>,
     /// PM bit of its last frame: it said it's going to doze
     dozing: bool,
-    /// Encrypted frames held while it dozes, w/ when they were queued
+    /// Encrypted frames held while it dozes, with when they were queued
     held: VecDeque<Held>,
 }
 
@@ -315,7 +315,7 @@ impl Bss {
         sta.wmm = has_wmm(ies);
         let aid = sta.aid;
         let wmm = sta.wmm;
-        // An enrollee joins open, w/ a WPS IE and no RSN IE
+        // An enrollee joins open, with a WPS IE and no RSN IE
         let wps_join = self.cfg.wps.is_some() && wps::has_ie(ies) && !has_ie(ies, 48);
 
         let mut f = self.mgmt_header(if reassoc { 0x0030 } else { 0x0010 }, &sa);
@@ -450,7 +450,7 @@ impl Bss {
     }
 
     /// Sends the delayed msg 1 and resends msg 1 or 3 while the station hasn't answered, each
-    /// time w/ a fresh replay counter. Call every few ms.
+    /// time with a fresh replay counter. Call every few ms.
     pub fn tick(&mut self, chip: &Chip, tx: &mut Tx) -> Result<Vec<Event>> {
         // Just to log the end of a shun on time
         self.is_shunned(&[0; 6]);
@@ -623,7 +623,7 @@ impl Bss {
                 s.dozing = pm;
                 trace!(sta = fmt_mac(&sa), dozing = pm, "power management");
             }
-            // Its frame w/ PM clear: awake right now, so out w/ anything held
+            // Its frame with PM clear: awake right now, so out with anything held
             if !pm && !s.held.is_empty() {
                 let held = std::mem::take(&mut s.held);
                 self.release(chip, tx, held, false)?;

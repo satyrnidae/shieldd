@@ -1,5 +1,5 @@
 //! The Windows tray: an icon for the controller's battery (mailbox 01, shieldd's controller.rs),
-//! w/ a notification when it goes critical and another when it's kicked for being too flat to
+//! with a notification when it goes critical and another when it's kicked for being too flat to
 //! use. Shown as long as shieldd runs, disconnected or not.
 //!
 //! Battery icons are Ikono Bold Line Icons, turned upright; the disconnected and pairing ones
@@ -63,7 +63,7 @@ use windows::core::{BOOL, PCWSTR, PWSTR, w};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Icon {
-    /// On the charger: outline and bolt in the stroke color. Flashes w/ ChargingLit when plugged in.
+    /// On the charger: outline and bolt in the stroke color. Flashes with ChargingLit when plugged in.
     Charging,
     /// The plug-in flash's other frame: the bolt in green
     ChargingLit,
@@ -75,7 +75,7 @@ enum Icon {
     Empty,
     /// Critical: all red
     Critical,
-    /// Critical's other frame: the red outline w/ the exclamation mark in the stroke color, so it
+    /// Critical's other frame: the red outline with the exclamation mark in the stroke color, so it
     /// flashes
     CriticalDim,
     Disconnected,
@@ -148,7 +148,7 @@ impl Icon {
         Icon::FIXED.into_iter().chain((0..SPINNER_FRAMES).map(Icon::Spinner))
     }
 
-    /// For `b`, w/ `pct` the percent shown
+    /// For `b`, with `pct` the percent shown
     fn of(b: &Battery, pct: u8) -> Icon {
         if b.charging && pct >= 100 {
             Icon::Charged
@@ -234,7 +234,7 @@ impl Icon {
             Icon::DisconnectedRed | Icon::Charged | Icon::Critical | Icon::Empty => {
                 svg.replace("#000000", p.accent(accent))
             }
-            // Critical's outline w/ the mark dimmed to the stroke color
+            // Critical's outline with the mark dimmed to the stroke color
             Icon::CriticalDim => paint(svg, p.red, p.stroke),
             _ => colorize(svg, p, accent),
         }
@@ -295,7 +295,7 @@ fn paint(svg: &str, outline: &str, fill: &str) -> String {
     out
 }
 
-/// The wifi icon in the stroke color, which it gets from the root element, w/ element `n` of
+/// The wifi icon in the stroke color, which it gets from the root element, with element `n` of
 /// PAIRING_ORDER, counting from 1, in blue. Frame 0 has none.
 fn pairing_frame(svg: &str, p: &Palette, n: u8) -> String {
     let out = svg.replace("#000000", p.stroke);
@@ -441,7 +441,7 @@ impl Tray {
         }
     }
 
-    /// A notification w/o the alarm, for a menu command that failed
+    /// A notification without the alarm, for a menu command that failed
     pub fn problem(&self, title: &str, text: &str) {
         let _ = self.tx.send(Msg::Problem(title.into(), text.into()));
         wake();
@@ -503,7 +503,7 @@ const WM_TRAY: u32 = WM_APP + 1;
 const WM_SHUTDOWN: u32 = WM_APP + 2;
 /// Something's waiting on the channel, see wake
 const WM_WAKE: u32 = WM_APP + 3;
-/// State::tick's timer, and the longest it waits w/ nothing animating
+/// State::tick's timer, and the longest it waits with nothing animating
 const TICK_TIMER: usize = 1;
 const IDLE_TICK: Duration = Duration::from_millis(100);
 
@@ -526,11 +526,11 @@ mod id {
     pub const RENAME: usize = 7;
 }
 
-/// The menu closed w/ the cursor on the icon: the click that closed it arrives as a tray
+/// The menu closed with the cursor on the icon: the click that closed it arrives as a tray
 /// click within this long, if at all
 const CLOSING_CLICK_WAIT: Duration = Duration::from_secs(1);
 
-// The window procedure flags what happened, or runs tick w/ State at hand. Everything the
+// The window procedure flags what happened, or runs tick with State at hand. Everything the
 // tray does runs off window messages, which an open menu or message box still dispatches.
 thread_local! {
     static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
@@ -547,7 +547,7 @@ thread_local! {
     static MENU_SHOWN: RefCell<Option<Vec<Item>>> = const { RefCell::new(None) };
     /// The open menu was closed to show new items; open it again
     static MENU_REOPEN: Cell<bool> = const { Cell::new(false) };
-    /// The menu closed w/o a pick, w/ the cursor on the icon, at this time
+    /// The menu closed without a pick, with the cursor on the icon, at this time
     static CLOSED_ON_ICON: Cell<Option<Instant>> = const { Cell::new(None) };
     /// In menu(): the menu, or a box it opened, is up
     static MENU_BUSY: Cell<bool> = const { Cell::new(false) };
@@ -593,7 +593,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
         READD_WANTED.set(true);
         with_state(State::tick);
     }
-    // SAFETY: the arguments we were called w/
+    // SAFETY: the arguments we were called with
     unsafe { DefWindowProcW(hwnd, msg, wp, lp) }
 }
 
@@ -879,7 +879,7 @@ fn track(hwnd: HWND, items: &[Item], at: POINT) -> usize {
             let text = wide(text);
             let _ = AppendMenuW(m, *flags, *id, PCWSTR(text.as_ptr()));
         }
-        // W/o the window in front, the menu won't close on a click elsewhere
+        // Without the window in front, the menu won't close on a click elsewhere
         let _ = SetForegroundWindow(hwnd);
         // A menu underlines its shortcut letters only after keyboard input, and the window's UI
         // state doesn't count, so a Shift tap it is. Lands on our window, which is in front.
@@ -930,7 +930,7 @@ fn create_tip(owner: HWND) -> Option<HWND> {
     }
 }
 
-/// The one tool on the tooltip. Sized w/o lpReserved, which comctl32 v5 refuses; there's no
+/// The one tool on the tooltip. Sized without lpReserved, which comctl32 v5 refuses; there's no
 /// manifest asking for v6.
 fn tool(owner: HWND, text: *const u16) -> TTTOOLINFOW {
     TTTOOLINFOW {
@@ -972,7 +972,7 @@ fn show_tip(owner: HWND, on: bool) {
 fn follow_mouse() {
     let Some(tip) = TIP.get().filter(|_| TIP_ON.get()) else { return };
     let mut at = POINT::default();
-    // SAFETY: plain queries and a message w/ no pointers
+    // SAFETY: plain queries and a message with no pointers
     unsafe {
         if GetCursorPos(&mut at).is_err() {
             return;
@@ -1100,7 +1100,7 @@ impl State {
             };
             self.pct = None;
             self.gauge.forget_charger();
-            // Flashing only w/ nothing connected, and only for a bit
+            // Flashing only with nothing connected, and only for a bit
             let icon = if self.flashing(now) { self.animate(Icon::Disconnected, now) } else { Icon::Disconnected };
             self.show(icon, msg, Some(tip));
             return;
@@ -1159,7 +1159,7 @@ impl State {
         }
     }
 
-    /// Until the frame on screen is due to change. A flash's last frame ends w/ the flash.
+    /// Until the frame on screen is due to change. A flash's last frame ends with the flash.
     fn frame_left(&self) -> Duration {
         let Some(i) = self.shown else { return IDLE_TICK };
         let now = Instant::now();
@@ -1330,7 +1330,7 @@ impl State {
         }
         // Up to the next animation frame, at most IDLE_TICK
         let wait = if self.next_frame().is_some() { self.frame_left().min(IDLE_TICK) } else { IDLE_TICK };
-        // SAFETY: our window, on its thread; a new SetTimer w/ the same ID replaces the old
+        // SAFETY: our window, on its thread; a new SetTimer with the same ID replaces the old
         unsafe { SetTimer(Some(self.hwnd), TICK_TIMER, (wait.as_millis() as u32).max(1), None) };
     }
 }
@@ -1363,7 +1363,7 @@ extern "system" fn rename_proc(dlg: HWND, msg: u32, wp: WPARAM, _: LPARAM) -> is
             let _ = SetDlgItemTextW(dlg, RENAME_EDIT, PCWSTR(text.as_ptr()));
             SendDlgItemMessageW(dlg, RENAME_EDIT, EM_LIMITTEXT, WPARAM(MAX_NAME), LPARAM(0));
             let _ = SetForegroundWindow(dlg);
-            // TRUE: focus to the first tab stop, the edit box, w/ its text selected
+            // TRUE: focus to the first tab stop, the edit box, with its text selected
             return 1;
         }
         if msg == WM_COMMAND {
@@ -1447,9 +1447,9 @@ fn about(hwnd: HWND) {
          RTL8812AU/8821AU driver and its halmac layer, (c) Realtek Corporation, and from ozwpan, \
          (c) 2011 Ozmo Inc., all under GPL-2.0. Embeds Realtek's RTL8821A firmware, (c) 2010 Realtek \
          Semiconductor Corporation, unmodified under its own redistribution license, provided AS IS \
-         w/o warranty. Tray icons from Ikono Bold Line Icons, (c) Will Kelly, and Clarity, (c) VMware, \
+         without warranty. Tray icons from Ikono Bold Line Icons, (c) Will Kelly, and Clarity, (c) VMware, \
          Inc., both MIT. Rust crates under MIT, Apache-2.0, BSD and similar licenses.\n\n\
-         Full license texts and copyright notices are in LICENSE and THIRD_PARTY.md, which come w/ \
+         Full license texts and copyright notices are in LICENSE and THIRD_PARTY.md, which come with \
          the source.\n\n\
          Most of shieldd was written by an AI model, Anthropic's Claude, under its maintainer's \
          direction and testing.",

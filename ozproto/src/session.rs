@@ -1,11 +1,11 @@
-//! Host side of an Ozmo session w/ one device (a "PD" in ozwpan terms).
+//! Host side of an Ozmo session with one device (a "PD" in ozwpan terms).
 //!
 //! Sans-I/O: feed received frames to [`Host::on_frame`], call [`Host::poll`]
 //! periodically for timeouts, and send whatever [`Host::take_tx`] hands back.
 //!
 //! The SHIELD controller runs in triggered mode. The host never transmits on
-//! its own: every device frame w/ ACK_REQUESTED is a trigger, and the host
-//! answers it w/ its queued frames, or w/ one empty frame if it has nothing.
+//! its own: every device frame with ACK_REQUESTED is a trigger, and the host
+//! answers it with its queued frames, or with one empty frame if it has nothing.
 //! Frames stay queued until the device acknowledges them, and get resent on
 //! every trigger until then.
 
@@ -50,7 +50,7 @@ pub enum Event {
     Resumed {
         session_id: u8,
     },
-    /// Connect refused, w/ the status that was sent back
+    /// Connect refused, with the status that was sent back
     Rejected {
         peer: Mac,
         status: u8,
@@ -156,8 +156,8 @@ impl Session {
         self.unacked.push_back(TxFrame { pkt_num: self.last_tx_pkt, elements });
     }
 
-    /// Answers a trigger w/ everything unacknowledged, chained w/ MORE_DATA,
-    /// or w/ one empty frame. Same as ozwpan. Every trigger gets an answer:
+    /// Answers a trigger with everything unacknowledged, chained with MORE_DATA,
+    /// or with one empty frame. Same as ozwpan. Every trigger gets an answer:
     /// the controller dozes off when one goes unanswered, and frames sent
     /// while it dozes sit in the GO's power-save buffer until it wakes.
     /// Keeping one frame in flight instead (tried 2026-10-07) took requests
@@ -227,7 +227,7 @@ impl Host {
         self.session.take().map(|_| Event::Stopped)
     }
 
-    /// Frames to put on the wire, w/ their destination.
+    /// Frames to put on the wire, with their destination.
     pub fn take_tx(&mut self) -> Vec<(Mac, Vec<u8>)> {
         std::mem::take(&mut self.tx)
     }
@@ -241,7 +241,7 @@ impl Host {
     }
 
     /// Sends `ms` 1 ms frames of `data` to OUT endpoint `ep` (number only) as one isoc-large
-    /// unit, the way ozwpan does w/ ISOC_NO_ELTS | ISOC_ANYTIME: right away, packet number 0,
+    /// unit, the way ozwpan does with ISOC_NO_ELTS | ISOC_ANYTIME: right away, packet number 0,
     /// never retransmitted. False if there's no session.
     pub fn send_isoc(&mut self, ep: u8, frame_number: u8, ms: u8, data: &[u8]) -> bool {
         let Some(s) = self.session.as_ref() else { return false };
@@ -443,7 +443,7 @@ mod tests {
         assert!(h.all_delivered());
         assert!(h.say_goodbye());
         assert!(!h.all_delivered());
-        // A trigger from the device, w/ ACK_REQUESTED
+        // A trigger from the device, with ACK_REQUESTED
         h.on_frame(t, CTRL, &frame(0x84, 0, 0x9e, &[]));
         let tx = h.take_tx();
         assert_eq!(tx[0].1[6..], hex("0800")[..]);
@@ -496,7 +496,7 @@ mod tests {
         h.on_frame(t, CTRL, &frame(0x94, 1, 101, &[]));
         let tx = h.take_tx();
         assert_eq!(tx[0].1, hex("846502000000310d01000101000008008001000000"));
-        // trigger w/o ack of 2: resent as-is
+        // trigger without ack of 2: resent as-is
         h.on_frame(t, CTRL, &frame(0x94, 1, 102, &[]));
         let tx = h.take_tx();
         assert_eq!(tx.len(), 1);

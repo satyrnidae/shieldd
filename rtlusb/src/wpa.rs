@@ -139,7 +139,7 @@ pub fn build(key_info: u16, replay: u64, nonce: &[u8; 32], data: &[u8], kck: Opt
     f
 }
 
-/// Message 3 key data: our RSN IE and the GTK KDE, padded and AES key wrapped w/ the KEK
+/// Message 3 key data: our RSN IE and the GTK KDE, padded and AES key wrapped with the KEK
 pub fn msg3_key_data(kek: &[u8; 16], rsn_ie: &[u8], gtk: &[u8; 16], gtk_idx: u8) -> Result<Vec<u8>> {
     let mut plain = rsn_ie.to_vec();
     plain.extend_from_slice(&[0xdd, 6 + 16, 0x00, 0x0f, 0xac, 0x01, gtk_idx & 0x3, 0x00]);

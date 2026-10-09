@@ -1,7 +1,7 @@
-//! WPS push-button registrar, as an AP w/ an internal registrar does it (hostapd's
+//! WPS push-button registrar, as an AP with an internal registrar does it (hostapd's
 //! wps_registrar.c), for one enrollee at a time.
 //!
-//! The enrollee associates open w/ a WPS IE, EAP-WSC carries M1-M8 over EAPOL, and M8 hands
+//! The enrollee associates open with a WPS IE, EAP-WSC carries M1-M8 over EAPOL, and M8 hands
 //! over the credential. Push-button means the device password is "00000000". Everything here
 //! is protocol only; bss.rs moves the frames.
 
@@ -207,7 +207,7 @@ fn vendor_ie(attrs: Tlv) -> Vec<u8> {
     ie
 }
 
-/// Beacon WPS IE w/ push-button active
+/// Beacon WPS IE with push-button active
 pub fn beacon_ie() -> Vec<u8> {
     let mut t = Tlv::default();
     t.u8(attr::VERSION, VERSION)
@@ -219,7 +219,7 @@ pub fn beacon_ie() -> Vec<u8> {
     vendor_ie(t)
 }
 
-/// Probe response WPS IE w/ push-button active
+/// Probe response WPS IE with push-button active
 pub fn probe_resp_ie(dev: &Device) -> Vec<u8> {
     let mut t = Tlv::default();
     t.u8(attr::VERSION, VERSION)
@@ -334,7 +334,7 @@ fn psks(auth: &[u8; 32], password: &[u8]) -> ([u8; 16], [u8; 16]) {
     (p1[..16].try_into().unwrap(), p2[..16].try_into().unwrap())
 }
 
-/// Authenticator: first 64 bits of HMAC(AuthKey, previous message | this one w/o the attribute)
+/// Authenticator: first 64 bits of HMAC(AuthKey, previous message | this one without the attribute)
 fn authenticator(auth: &[u8; 32], prev: &[u8], cur: &[u8]) -> [u8; 8] {
     hmac(auth, &[prev, cur])[..8].try_into().unwrap()
 }
@@ -683,7 +683,7 @@ pub fn eap_failure(id: u8) -> Vec<u8> {
 }
 
 impl Eap {
-    /// Starts w/ EAP-Request/Identity
+    /// Starts with EAP-Request/Identity
     pub fn new(reg: Registrar) -> Self {
         let last = eap_packet(EAP_REQUEST, 0, &[EAP_TYPE_IDENTITY]);
         Self { reg, id: 0, last, frags: Vec::new() }
@@ -750,7 +750,7 @@ impl Eap {
                             Ok(reply) => Ok(self.request(op::MSG, &reply)),
                             Err(e) => {
                                 if let Some(nack) = self.reg.nack(0) {
-                                    // The enrollee answers a NACK w/ its own, then we fail
+                                    // The enrollee answers a NACK with its own, then we fail
                                     tracing::warn!("WPS: {e:#}; sending NACK");
                                     return Ok(self.request(op::NACK, &nack));
                                 }

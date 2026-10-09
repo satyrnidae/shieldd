@@ -38,7 +38,7 @@ fn ssid(rng: &mut impl Rng) -> String {
         .expect("generator never ends")
 }
 
-/// A random group w/ a random passphrase. Its channel is CHANNEL until the radio picks one.
+/// A random group with a random passphrase. Its channel is CHANNEL until the radio picks one.
 pub fn new_group() -> Group {
     let mut rng = rand::thread_rng();
     Group { ssid: ssid(&mut rng), psk: Psk::Passphrase(pick(&mut rng, ALNUM, PASSPHRASE_LEN)), channel: CHANNEL }
