@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::chip::Chip;
 use crate::radio::rx_loop;
@@ -56,6 +56,7 @@ fn airtime_us(rate: u8, bytes: usize) -> f64 {
 
 /// Listens on every channel in CHANNELS for DWELL each, timed from when the switch to it is
 /// done. The chip should accept all frames (promiscuous) for this to see other networks' data.
+/// A channel it never got to is left out rather than passed off as idle.
 pub fn survey(chip: &Chip) -> Result<Vec<(u8, Load)>> {
     let mut loads: Vec<(u8, Load)> = CHANNELS.map(|c| (c, Load::default())).collect();
     let mut listened = vec![Duration::ZERO; loads.len()];
@@ -94,15 +95,19 @@ pub fn survey(chip: &Chip) -> Result<Vec<(u8, Load)>> {
     if !quit.load(Ordering::Relaxed) {
         listened[i] = since.elapsed().saturating_sub(SETTLE);
     }
-    for ((c, l), t) in loads.iter_mut().zip(&listened) {
-        if !t.is_zero() {
-            l.busy_us *= LISTEN.as_secs_f64() / t.as_secs_f64();
+    let mut heard = Vec::with_capacity(loads.len());
+    for ((c, mut l), t) in loads.into_iter().zip(listened) {
+        if t.is_zero() {
+            warn!(channel = c, "survey never got to it");
+            continue;
         }
+        l.busy_us *= LISTEN.as_secs_f64() / t.as_secs_f64();
         let busy_pct = format!("{:.1}", l.busy_us / LISTEN.as_micros() as f64 * 100.0);
         let listened_ms = t.as_millis() as u64;
         info!(channel = c, frames = l.frames, max_dbm = l.max_dbm, busy_pct, listened_ms, "survey");
+        heard.push((c, l));
     }
-    Ok(loads)
+    Ok(heard)
 }
 
 /// How much of channel `a`'s 20 MHz lands on channel `b`: channels are 5 MHz apart, so
@@ -116,9 +121,12 @@ pub fn score(loads: &[(u8, Load)], channel: u8) -> f64 {
     loads.iter().map(|(c, l)| l.busy_us * overlap(*c, channel)).sum()
 }
 
-/// The quietest of CANDIDATES. Ties go to the higher channel, since 11 is the default.
+/// The quietest of CANDIDATES the survey heard, or of all of them if it heard none. Ties go to
+/// the higher channel, since 11 is the default.
 pub fn pick(loads: &[(u8, Load)]) -> u8 {
-    let best = CANDIDATES
+    let heard: Vec<u8> = CANDIDATES.into_iter().filter(|c| loads.iter().any(|(h, _)| h == c)).collect();
+    let options = if heard.is_empty() { &CANDIDATES[..] } else { &heard[..] };
+    let best = options
         .iter()
         .copied()
         .min_by(|a, b| score(loads, *a).total_cmp(&score(loads, *b)).then(b.cmp(a)))
@@ -172,6 +180,15 @@ mod tests {
         // 400 frames at -78 on 6 vs 10 at -45 on 1: mW summing would have picked 6
         let l = loads(&[(1, -45, 10), (6, -78, 400), (11, -60, 300)]);
         assert_eq!(pick(&l), 1);
+    }
+
+    #[test]
+    fn unheard_candidate_isnt_picked() {
+        // 11 was never reached; quiet as it'd score, it's unknown
+        let mut l = loads(&[(1, -60, 50), (6, -60, 100)]);
+        l.retain(|(c, _)| *c < 9);
+        assert_eq!(pick(&l), 1);
+        assert_eq!(pick(&[]), 11);
     }
 
     #[test]

@@ -62,8 +62,16 @@ fn parse(text: &str) -> Result<Group> {
 }
 
 /// Replaces `path` w/ just this group. An existing file is kept next to it as
-/// `<name>.<unix time>.bak`; returns that path.
+/// `<name>.<unix time>.bak`; returns that path. Written to `<name>.tmp` first, so a failed write
+/// leaves `path` and the backups as they were.
 pub fn write(path: &Path, g: &Group) -> Result<Option<PathBuf>> {
+    let mut tmp_name = path.file_name().context("conf path has no file name")?.to_owned();
+    tmp_name.push(".tmp");
+    let tmp = path.with_file_name(tmp_name);
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    std::fs::write(&tmp, format(g)).with_context(|| format!("writing {}", tmp.display()))?;
     let backup = if path.exists() {
         let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
         let mut name = path.file_name().context("conf path has no file name")?.to_owned();
@@ -74,10 +82,7 @@ pub fn write(path: &Path, g: &Group) -> Result<Option<PathBuf>> {
     } else {
         None
     };
-    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
-        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    }
-    std::fs::write(path, format(g)).with_context(|| format!("writing {}", path.display()))?;
+    std::fs::rename(&tmp, path).with_context(|| format!("moving {} to {}", tmp.display(), path.display()))?;
     Ok(backup)
 }
 

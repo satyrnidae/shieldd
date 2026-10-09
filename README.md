@@ -75,6 +75,8 @@ Run:
 - Windows 10 or 11, x64. Developed on Windows 11.
 - [ViGEmBus](https://github.com/nefarius/ViGEmBus/releases) for the virtual pad.
 - [Zadig](https://zadig.akeo.ie/), once, to put the adapter on WinUSB.
+- [Voicemeeter](https://vb-audio.com/Voicemeeter/) or another VBAN app, only for controller
+  audio; see [Audio](#audio).
 - [Npcap](https://npcap.com/), only for the legacy `--wifi-direct` and `--receiver` modes.
 
 Build:
@@ -160,7 +162,8 @@ Options worth knowing, the rest in `shieldd --help`:
 The icon shows the controller's battery: a flashing bolt while it charges, an all-green full
 battery once it's charged, an all-red one w/ a warning mark when it's critical. A crossed-out
 signal flashes red while none is connected, a spinner turns while one is joining, and a Wi-Fi
-signal lights up blue, a bar at a time, while pairing.
+signal lights up blue, a bar at a time, while pairing. A controller joining or leaving Wi-Fi
+plays Windows' Device Connect or Device Disconnect sound, as a USB device would.
 
 Click for a menu. Its title shows the version, how many controllers are connected, and the
 group's name and channel. The controller line shows its model, XInput port and battery, and its

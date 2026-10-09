@@ -167,19 +167,26 @@ type Quit = std::sync::Arc<std::sync::atomic::AtomicBool>;
 /// Both binaries' main; `windowless` is shieldw, which logs to `settings_dir()/shieldd.log`
 pub fn run(windowless: bool) -> Result<()> {
     let parsed = Args::try_parse();
-    // shieldw takes the instance before its log rotates, so a second launch quits w/o touching
-    // the running one's log
+    // shieldw takes the instance before it touches the log. Only the instance rotates it; any
+    // other shieldw, a second launch or a one-off like --stop, adds to the end of it.
     #[cfg(windows)]
     let claimed = match &parsed {
-        Ok(a) if windowless && a.hosts() => Some(background::claim(false)?),
+        Ok(a) if windowless && a.hosts() => Some(background::claim(false)),
         _ => None,
     };
     #[cfg(not(windows))]
-    let claimed = None;
-    init_logging(windowless)?;
+    let claimed: Option<Result<Quit>> = None;
+    init_logging(windowless, matches!(claimed, Some(Ok(_))))?;
     if windowless {
         std::panic::set_hook(Box::new(|p| error!("{p}")));
     }
+    let claimed = match claimed.transpose() {
+        Ok(c) => c,
+        Err(e) => {
+            error!("{e:#}");
+            return Err(e);
+        }
+    };
     let args = match parsed {
         Ok(a) => a,
         Err(e) if windowless => {
@@ -195,7 +202,8 @@ pub fn run(windowless: bool) -> Result<()> {
     result
 }
 
-fn init_logging(to_file: bool) -> Result<()> {
+/// `rotate`: start a fresh log, keeping one run back; otherwise add to the current one
+fn init_logging(to_file: bool, rotate: bool) -> Result<()> {
     // rtlusb's info covers the AP, pairing and channel survey; its noisy stats are debug
     let filter =
         tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "shieldd=info,rtlusb=info".into());
@@ -204,9 +212,13 @@ fn init_logging(to_file: bool) -> Result<()> {
         let dir = settings_dir();
         std::fs::create_dir_all(&dir)?;
         let log = dir.join("shieldd.log");
-        // One run back is enough to see why it stopped
-        let _ = std::fs::rename(&log, dir.join("shieldd.old.log"));
-        let file = std::fs::File::create(log)?;
+        let file = if rotate {
+            // One run back is enough to see why it stopped
+            let _ = std::fs::rename(&log, dir.join("shieldd.old.log"));
+            std::fs::File::create(log)?
+        } else {
+            std::fs::OpenOptions::new().create(true).append(true).open(log)?
+        };
         fmt.with_ansi(false).with_writer(std::sync::Mutex::new(file)).init();
     } else {
         fmt.init();

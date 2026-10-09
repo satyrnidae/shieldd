@@ -2,6 +2,7 @@
 //! answer right away. Single-threaded on purpose: a reply goes out on the same thread that
 //! received the trigger, with nothing queued in between.
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -20,7 +21,8 @@ const RX_TRANSFERS: usize = 8;
 const TX_STATS_EVERY: Duration = Duration::from_secs(5);
 /// LED blink half period while nobody's connected
 const LED_BLINK: Duration = Duration::from_millis(500);
-/// rx_loop gives up after this many failures in a row, bulk IN or callback. One success resets it.
+/// rx_loop gives up after this many failures in a row, of bulk IN or of the callback, each
+/// counted on its own. One success resets its count.
 const MAX_STRAIGHT_ERRORS: u32 = 50;
 
 pub struct ApOptions {
@@ -61,7 +63,7 @@ pub struct Link<'a> {
     tx: &'a mut Tx,
     bss: &'a mut Bss,
     /// Events the callback caused, delivered once it returns
-    deferred: &'a mut Vec<Event>,
+    deferred: &'a mut VecDeque<Event>,
 }
 
 impl Link<'_> {
@@ -81,6 +83,11 @@ impl Link<'_> {
         Ok(())
     }
 
+    /// See Bss::is_connected
+    pub fn is_connected(&self, sta: &Mac) -> bool {
+        self.bss.is_connected(sta)
+    }
+
     /// See Bss::shun
     pub fn shun(&mut self, sta: &Mac, d: Duration) {
         self.bss.shun(sta, d)
@@ -91,7 +98,8 @@ pub struct Radio {
     chip: Chip,
     tx: Tx,
     bss: Bss,
-    deferred: Vec<Event>,
+    /// Waiting for the callback, oldest first. One that errors leaves the rest here for next time.
+    deferred: VecDeque<Event>,
 }
 
 /// Power on and tune. The chip is powered off again if anything after power-on fails.
@@ -164,7 +172,7 @@ impl Radio {
             Ok((tx, bss))
         })();
         match setup {
-            Ok((tx, bss)) => Ok(Self { chip, tx, bss, deferred: Vec::new() }),
+            Ok((tx, bss)) => Ok(Self { chip, tx, bss, deferred: VecDeque::new() }),
             Err(e) => Err((chip, e)),
         }
     }
@@ -221,9 +229,8 @@ impl Radio {
                 return Ok(());
             }
             let Some(p) = p else {
-                for e in bss.tick(chip, tx)? {
-                    deliver(e, chip, tx, bss, deferred, f)?;
-                }
+                deferred.extend(bss.tick(chip, tx)?);
+                flush(chip, tx, bss, deferred, f)?;
                 f(RadioEvent::Tick, &mut Link { chip, tx, bss, deferred })?;
                 return flush(chip, tx, bss, deferred, f);
             };
@@ -235,43 +242,28 @@ impl Radio {
                     tx.send(&chip.rtl, TxInfo::mgmt(), &bss.cfg.probe_resp(&sa))?;
                 }
             }
-            if let Some(e) = bss.handle(chip, tx, frame, p.decrypted)? {
-                deliver(e, chip, tx, bss, deferred, f)?;
-            }
-            Ok(())
+            deferred.extend(bss.handle(chip, tx, frame, p.decrypted)?);
+            flush(chip, tx, bss, deferred, f)
         })
     }
 }
 
 type Callback<'f> = dyn FnMut(RadioEvent, &mut Link) -> Result<()> + 'f;
 
-/// Hands `e` to the callback, then whatever that caused
+/// Hands the callback every waiting event, oldest first, including any it causes along the way
+fn flush(chip: &Chip, tx: &mut Tx, bss: &mut Bss, deferred: &mut VecDeque<Event>, f: &mut Callback) -> Result<()> {
+    while let Some(e) = deferred.pop_front() {
+        deliver(e, chip, tx, bss, deferred, f)?;
+    }
+    Ok(())
+}
+
 fn deliver(
     e: Event,
     chip: &Chip,
     tx: &mut Tx,
     bss: &mut Bss,
-    deferred: &mut Vec<Event>,
-    f: &mut Callback,
-) -> Result<()> {
-    deliver_one(e, chip, tx, bss, deferred, f)?;
-    flush(chip, tx, bss, deferred, f)
-}
-
-fn flush(chip: &Chip, tx: &mut Tx, bss: &mut Bss, deferred: &mut Vec<Event>, f: &mut Callback) -> Result<()> {
-    while !deferred.is_empty() {
-        let e = deferred.remove(0);
-        deliver_one(e, chip, tx, bss, deferred, f)?;
-    }
-    Ok(())
-}
-
-fn deliver_one(
-    e: Event,
-    chip: &Chip,
-    tx: &mut Tx,
-    bss: &mut Bss,
-    deferred: &mut Vec<Event>,
+    deferred: &mut VecDeque<Event>,
     f: &mut Callback,
 ) -> Result<()> {
     if let Event::Paired(..) = e {
@@ -318,23 +310,8 @@ pub fn rx_loop(
     let t0 = Instant::now();
     let mut last_report = Instant::now();
     let (mut frames, mut crc_errs, mut c2h) = (0u64, 0u64, 0u64);
-    let mut straight = 0u32;
-    // A failure is logged and survived, unless the adapter's gone or nothing's working anymore
-    let mut check = |r: Result<()>| -> Result<()> {
-        let Err(e) = r else {
-            straight = 0;
-            return Ok(());
-        };
-        if gone(&e) {
-            return Err(e.context("adapter unplugged"));
-        }
-        straight += 1;
-        if straight >= MAX_STRAIGHT_ERRORS {
-            return Err(e.context(format!("{straight} failures in a row")));
-        }
-        warn!("{e:#}");
-        Ok(())
-    };
+    // Apart, so the callback's ticks succeeding can't hide bulk IN failing
+    let (mut bulk_errs, mut callback_errs) = (Streak(0), Streak(0));
     let res = (|| {
         while !quit.load(Ordering::SeqCst) && limit.is_none_or(|l| t0.elapsed() < l) {
             if last_report.elapsed() >= Duration::from_secs(5) {
@@ -342,11 +319,11 @@ pub fn rx_loop(
                 (frames, crc_errs, c2h) = (0, 0, 0);
                 last_report = Instant::now();
             }
-            check(on_frame(None))?;
+            callback_errs.check(on_frame(None))?;
             let Some(done) = ep.wait_next_complete(idle) else {
                 continue;
             };
-            check(done.status.map_err(|e| anyhow::Error::new(e).context("bulk IN")))?;
+            bulk_errs.check(done.status.map_err(|e| anyhow::Error::new(e).context("bulk IN")))?;
             let mut buf = done.buffer;
             for p in rx::split(&buf[..done.actual_len.min(buf.len())]) {
                 if p.c2h {
@@ -357,7 +334,7 @@ pub fn rx_loop(
                     continue;
                 }
                 frames += 1;
-                check(on_frame(Some(&p)))?;
+                callback_errs.check(on_frame(Some(&p)))?;
             }
             buf.clear();
             buf.set_requested_len(RX_BUF);
@@ -367,6 +344,28 @@ pub fn rx_loop(
     })();
     ep.cancel_all();
     res
+}
+
+/// Failures in a row of one kind
+struct Streak(u32);
+
+impl Streak {
+    /// A failure is logged and survived, unless the adapter's gone or nothing's working anymore
+    fn check(&mut self, r: Result<()>) -> Result<()> {
+        let Err(e) = r else {
+            self.0 = 0;
+            return Ok(());
+        };
+        if gone(&e) {
+            return Err(e.context("adapter unplugged"));
+        }
+        self.0 += 1;
+        if self.0 >= MAX_STRAIGHT_ERRORS {
+            return Err(e.context(format!("{} failures in a row", self.0)));
+        }
+        warn!("{e:#}");
+        Ok(())
+    }
 }
 
 /// Whether `e` came from the adapter going away

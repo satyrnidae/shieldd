@@ -20,7 +20,7 @@ use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateBitmap, CreateDIBSection, DIB_RGB_COLORS, DeleteObject,
 };
-use windows::Win32::Media::Audio::{PlaySoundW, SND_ALIAS, SND_ASYNC};
+use windows::Win32::Media::Audio::{PlaySoundW, SND_ALIAS, SND_ASYNC, SND_NODEFAULT, SND_SYSTEM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
 use windows::Win32::System::Threading::GetCurrentThreadId;
@@ -133,10 +133,12 @@ enum Icon {
     Spinner(u8),
 }
 
-/// The spinner turns this far each frame, at SPINNER_FPS: 225 deg/s, a turn every 1.6 s. Each
-/// frame is a call into Explorer, so no faster than it needs to look smooth.
-const SPINNER_STEP: f32 = 15.0;
+/// Spinner speed: a turn every 1.6 s
+const SPINNER_DEG_PER_S: f32 = 225.0;
+/// Each frame is a call into Explorer, so no more than it takes to look smooth
 const SPINNER_FPS: u64 = 15;
+/// How far it turns each frame
+const SPINNER_STEP: f32 = SPINNER_DEG_PER_S / SPINNER_FPS as f32;
 const SPINNER_FRAMES: u8 = (360.0 / SPINNER_STEP) as u8;
 const SPINNER_FRAME: Duration = Duration::from_nanos(1_000_000_000 / SPINNER_FPS);
 /// The spinner's arc, in its 24-unit viewBox: centered, radius 8 plus half its 3.56 stroke.
@@ -517,6 +519,14 @@ impl Tray {
     pub fn commands(&self) -> Vec<Command> {
         self.commands.try_iter().collect()
     }
+}
+
+/// Windows' own Device Connect or Device Disconnect sound, as for a USB device. Follows the sound
+/// scheme: silent if it has none, no fallback ding.
+pub fn device_sound(connected: bool) {
+    let alias = if connected { w!("DeviceConnect") } else { w!("DeviceDisconnect") };
+    // SAFETY: a static alias; async, so nothing of ours is used after it returns
+    let _ = unsafe { PlaySoundW(alias, None, SND_ALIAS | SND_ASYNC | SND_NODEFAULT | SND_SYSTEM) };
 }
 
 /// Has the tray thread look at the channel now, rather than at its next tick

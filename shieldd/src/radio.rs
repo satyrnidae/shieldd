@@ -29,7 +29,7 @@ use crate::adapters::fmt_mac;
 use crate::controller::{Controller, HEADSET_EP, RumbleProbe};
 use crate::host::on_event;
 use crate::outputs::Outputs;
-use crate::tray::{Command, Connected, Status, Tray};
+use crate::tray::{self, Command, Connected, Status, Tray};
 use crate::vban::{self, Vban};
 use crate::{Args, hex, models, p2pconf, pair};
 
@@ -86,10 +86,12 @@ enum Next {
     Host,
 }
 
-/// What outlives a run: the tray, and VBAN w/ its sockets
+/// What outlives a run: the tray, VBAN w/ its sockets, and a paired group --conf wouldn't take
 struct Shared {
     tray: Tray,
     vban: Option<Vban>,
+    /// Hosted in place of --conf's, and saved again each run until it works
+    unsaved: Option<p2pconf::Group>,
 }
 
 impl Shared {
@@ -152,7 +154,7 @@ impl Shared {
 
 pub fn run(args: Args, quit: &AtomicBool) -> Result<()> {
     // Up the whole time, so it also says shieldd is running while there's nothing to host
-    let mut sh = Shared { tray: Tray::start(), vban: None };
+    let mut sh = Shared { tray: Tray::start(), vban: None, unsaved: None };
     if Shared::vban_marker().exists() {
         sh.set_vban(true);
     }
@@ -195,7 +197,11 @@ pub fn run(args: Args, quit: &AtomicBool) -> Result<()> {
 
 fn run_once(args: &Args, pair: bool, pair_bails: bool, quit: &AtomicBool, sh: &mut Shared) -> Result<Next> {
     let mut outputs = Outputs::new(args.scale())?;
-    let mut group = if pair { pair::new_group() } else { p2pconf::read(&args.conf)? };
+    let mut group = match &sh.unsaved {
+        _ if pair => pair::new_group(),
+        Some(g) => g.clone(),
+        None => p2pconf::read(&args.conf)?,
+    };
     let wps = pair.then(|| WpsConfig {
         device: Device::from_seed(group.ssid.as_bytes(), "shieldd"),
         credential: Credential { ssid: group.ssid.clone(), passphrase: group.passphrase.clone() },
@@ -251,7 +257,7 @@ fn run_once(args: &Args, pair: bool, pair_bails: bool, quit: &AtomicBool, sh: &m
     // JOIN_TIMEOUT ran out on the controller there now; no spinner for it again
     let mut join_gave_up = false;
     // Paired, but writing --conf failed: when to try again
-    let mut save_due: Option<Instant> = None;
+    let mut save_due: Option<Instant> = sh.unsaved.is_some().then(Instant::now);
     // Ends this run but not the program, unlike quit
     let stop = AtomicBool::new(false);
     let mut next = Next::Quit;
@@ -270,11 +276,15 @@ fn run_once(args: &Args, pair: bool, pair_bails: bool, quit: &AtomicBool, sh: &m
                 debug!(ethertype = format!("{ethertype:#06x}"), "ignoring data frame")
             }
             RadioEvent::Associated(_) => joining = Some(now),
-            RadioEvent::Connected(sta) => info!(sta = %fmt_mac(&sta), "Wi-Fi link up"),
+            RadioEvent::Connected(sta) => {
+                info!(sta = %fmt_mac(&sta), "Wi-Fi link up");
+                tray::device_sound(true);
+            }
             RadioEvent::Disconnected(sta) => {
                 joining = None;
                 join_gave_up = false;
-                info!(sta = %fmt_mac(&sta), "Wi-Fi link down")
+                info!(sta = %fmt_mac(&sta), "Wi-Fi link down");
+                tray::device_sound(false);
             }
             RadioEvent::Paired(sta, model) => {
                 paired = true;
@@ -294,12 +304,13 @@ fn run_once(args: &Args, pair: bool, pair_bails: bool, quit: &AtomicBool, sh: &m
                         "paired; group saved, waiting for the controller to rejoin"
                     ),
                     Err(e) => {
-                        // Hosting carries on, so it works until shieldd stops
+                        // Hosted until shieldd exits, restarts included
                         warn!("paired, but saving the group failed: {e:#}; retrying every {SAVE_RETRY:?}");
                         sh.tray.problem(
                             "Couldn't save the paired network",
-                            &format!("{e:#}\n\nThe controller works until shieldd stops. Retrying."),
+                            &format!("{e:#}\n\nThe controller works until shieldd exits. Retrying."),
                         );
+                        sh.unsaved = Some(group.clone());
                         save_due = Some(now + SAVE_RETRY);
                     }
                 }
@@ -327,6 +338,7 @@ fn run_once(args: &Args, pair: bool, pair_bails: bool, quit: &AtomicBool, sh: &m
                         match p2pconf::write(&args.conf, &group) {
                             Ok(_) => {
                                 info!(conf = %args.conf.display(), "group saved");
+                                sh.unsaved = None;
                                 save_due = None;
                             }
                             Err(e) => {
@@ -408,6 +420,10 @@ fn run_once(args: &Args, pair: bool, pair_bails: bool, quit: &AtomicBool, sh: &m
                     } else if present && joining.is_none() && !join_gave_up {
                         joining = Some(now);
                     }
+                    // A new session gets its own JOIN_TIMEOUT, Wi-Fi link or not
+                    if !present {
+                        join_gave_up = false;
+                    }
                     sh.tray.update(Status {
                         controller,
                         vban: sh.vban.is_some(),
@@ -468,6 +484,12 @@ fn run_once(args: &Args, pair: bool, pair_bails: bool, quit: &AtomicBool, sh: &m
         }
         outputs.poll(now);
         for (dst, frame) in host.take_tx() {
+            // Kicked for a flat battery, the session's still open and still sending, headset
+            // audio included. Nowhere to go, and not worth an error each tick.
+            if !link.is_connected(&dst) {
+                trace!(dst = %fmt_mac(&dst), "tx dropped, not connected");
+                continue;
+            }
             trace!(dst = %fmt_mac(&dst), frame = %hex(&frame), "tx");
             // Isoc audio is never retransmitted by Ozmo either; a late unit is no use
             if frame.first().is_some_and(|c| c & ozproto::wire::ctl::ISOC != 0) {

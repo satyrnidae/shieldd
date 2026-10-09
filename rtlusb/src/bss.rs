@@ -149,6 +149,11 @@ impl Bss {
         self.stas.values().any(|s| matches!(s.state, State::Connected))
     }
 
+    /// Past the 4-way handshake, so data to it can go out
+    pub fn is_connected(&self, sta: &Mac) -> bool {
+        self.stas.get(sta).is_some_and(|s| matches!(s.state, State::Connected))
+    }
+
     pub fn set_ps_hold(&mut self, hold: Option<Duration>) {
         self.ps_hold = hold;
     }
