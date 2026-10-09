@@ -32,6 +32,9 @@ use windows::Win32::UI::Controls::{
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForSystem, GetSystemMetricsForDpi, SetThreadDpiAwarenessContext,
 };
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VK_SHIFT,
+};
 use windows::Win32::UI::Shell::{
     NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIIF_ERROR, NIIF_NOSOUND, NIIF_WARNING, NIM_ADD, NIM_DELETE,
     NIM_MODIFY, NOTIFY_ICON_MESSAGE, NOTIFYICONDATAW, Shell_NotifyIconW,
@@ -43,9 +46,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     MB_ICONWARNING, MB_OK, MB_OKCANCEL, MB_SETFOREGROUND, MENU_ITEM_FLAGS, MF_DISABLED, MF_GRAYED, MF_SEPARATOR,
     MF_STRING, MSG, MessageBoxW, PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SM_CXSMICON,
     SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SendMessageW, SetForegroundWindow, SetTimer, SetWindowPos, TPM_RETURNCMD,
-    TPM_RIGHTBUTTON, TrackPopupMenu, UIS_CLEAR, UISF_HIDEACCEL, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CONTEXTMENU,
-    WM_ENTERIDLE, WM_LBUTTONUP, WM_MENUSELECT, WM_NULL, WM_QUERYUISTATE, WM_RBUTTONUP, WM_TIMER, WM_UPDATEUISTATE,
-    WNDCLASSW, WS_EX_TOPMOST, WS_POPUP,
+    TPM_RIGHTBUTTON, TrackPopupMenu, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CONTEXTMENU, WM_ENTERIDLE, WM_LBUTTONUP,
+    WM_MENUSELECT, WM_NULL, WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{BOOL, PCWSTR, PWSTR, w};
 
@@ -183,8 +185,8 @@ const PAIRING_FRAME: Duration = Duration::from_millis(400);
 /// How long each half of a flash shows: the charging bolt, the critical mark, the disconnected
 /// icon
 const FLASH_FRAME: Duration = Duration::from_millis(800);
-/// The disconnected icon flashes this long, at startup and each time the last controller goes;
-/// then it holds still
+/// The disconnected icon flashes this long, at startup and each time a controller leaves on its
+/// own, rather than sent away; then it holds still
 const DISCONNECTED_FLASH: Duration = Duration::from_secs(5);
 /// The wifi icon's elements, by class, in the order they light up: the dot, then the arcs
 /// inside out
@@ -336,8 +338,10 @@ struct Palette {
     blue: &'static str,
 }
 
+/// Only the stroke and yellow differ by theme; the darker reds and greens were too close to black
+/// to flash against it
 const LIGHT: Palette =
-    Palette { stroke: "#000000", green: "#225500", yellow: "#D4AA00", red: "#550000", blue: "#0044AA" };
+    Palette { stroke: "#000000", green: "#44AA00", yellow: "#D4AA00", red: "#AA0000", blue: "#0066FF" };
 const DARK: Palette =
     Palette { stroke: "#FFFFFF", green: "#44AA00", yellow: "#FFD42A", red: "#AA0000", blue: "#0066FF" };
 
@@ -663,10 +667,6 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
     } else if msg == WM_MENUSELECT {
         // Item ID in the low word; the menu, or none once it closes
         show_tip(hwnd, wp.0 & 0xFFFF == id::CONTROLLER && lp.0 != 0);
-    } else if msg == WM_QUERYUISTATE {
-        // The menu asks its owner whether to underline shortcut letters, and a mouse-opened one
-        // hides them by default
-        return LRESULT(0);
     } else if msg == WM_ENTERIDLE {
         // The menu loop has caught up, e.g. after a mouse move
         follow_mouse();
@@ -735,6 +735,10 @@ struct State {
     frame_at: Instant,
     /// Last refresh found nothing connected, pairing or joining
     was_disconnected: bool,
+    /// A controller was connected since the last time nothing was
+    had_controller: bool,
+    /// No refresh yet
+    first: bool,
     /// The disconnected icon flashes until then
     flash_until: Option<Instant>,
     commands: Sender<Command>,
@@ -789,6 +793,8 @@ fn run(rx: Receiver<Msg>, commands: Sender<Command>) -> Result<()> {
         must_charge_told: None,
         frame_at: Instant::now(),
         was_disconnected: false,
+        had_controller: false,
+        first: true,
         flash_until: None,
         commands,
     };
@@ -890,13 +896,24 @@ fn track(hwnd: HWND, items: &[Item], at: POINT) -> usize {
         }
         // W/o the window in front, the menu won't close on a click elsewhere
         let _ = SetForegroundWindow(hwnd);
-        // Shortcut letters underlined, as if the menu had been opened from the keyboard
-        SendMessageW(hwnd, WM_UPDATEUISTATE, Some(WPARAM((UISF_HIDEACCEL << 16 | UIS_CLEAR) as usize)), None);
+        // A menu underlines its shortcut letters only after keyboard input, and the window's UI
+        // state doesn't count, so a Shift tap it is. Lands on our window, which is in front.
+        tap_shift();
         let picked = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, at.x, at.y, None, hwnd, None);
         let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
         let _ = DestroyMenu(m);
         picked.0 as usize
     }
+}
+
+/// Shift down and up, as keyboard input
+fn tap_shift() {
+    let key = |flags| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: VK_SHIFT, wScan: 0, dwFlags: flags, time: 0, dwExtraInfo: 0 } },
+    };
+    // SAFETY: two well-formed keyboard inputs
+    let _ = unsafe { SendInput(&[key(KEYBD_EVENT_FLAGS(0)), key(KEYEVENTF_KEYUP)], size_of::<INPUT>() as i32) };
 }
 
 /// A tracking tooltip, owned by the tray window; positioned and shown by show_tip
@@ -1003,10 +1020,14 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain([0]).collect()
 }
 
-/// A model name as menu text. It's whatever the controller said over WPS, and a lone & would
-/// underline the next letter.
+/// `s` as menu text, where a lone & would underline the next letter. For anything we didn't
+/// write: a model name is whatever the controller said over WPS.
+fn menu_text(s: &str) -> String {
+    s.replace('&', "&&")
+}
+
 fn menu_model(model: Option<&str>) -> String {
-    model.unwrap_or("Controller").replace('&', "&&")
+    menu_text(model.unwrap_or("Controller"))
 }
 
 /// The controller line of the menu
@@ -1056,12 +1077,19 @@ impl State {
         let now = Instant::now();
         let msg = if self.shown.is_some() { NIM_MODIFY } else { NIM_ADD };
         let s = self.status.clone();
-        // Startup counts as a change to disconnected, since nothing was before
+        // Not for pairing that timed out, a join that gave up, or a controller we sent away to
+        // sleep, which would otherwise flash every time a flat one came back
         let disconnected = !s.pairing && !s.joining && s.controller.is_none();
-        if disconnected && !self.was_disconnected {
+        self.had_controller |= s.controller.is_some();
+        let left = self.had_controller && s.shunned.is_none();
+        if disconnected && !self.was_disconnected && (self.first || left) {
             self.flash_until = Some(now + DISCONNECTED_FLASH);
         }
+        if disconnected {
+            self.had_controller = false;
+        }
         self.was_disconnected = disconnected;
+        self.first = false;
         if s.pairing {
             self.pct = None;
             let icon = self.animate(Icon::Pairing(0), now);
@@ -1127,6 +1155,15 @@ impl State {
             Some(Icon::DisconnectedRed) if !self.flashing(Instant::now()) => Some(Icon::Disconnected),
             shown => shown.and_then(Icon::next_frame),
         }
+    }
+
+    /// Until the frame on screen is due to change. The flash's red half ends w/ the flash.
+    fn frame_left(&self) -> Duration {
+        let Some(i) = self.shown else { return IDLE_TICK };
+        if i == Icon::DisconnectedRed && !self.flashing(Instant::now()) {
+            return Duration::ZERO;
+        }
+        i.frame_time().saturating_sub(self.frame_at.elapsed())
     }
 
     /// The disconnected icon should be flashing
@@ -1205,8 +1242,7 @@ impl State {
             (title, 0, format!(" > {} connected.", u8::from(connected))),
         ];
         if let Some(ssid) = &s.ssid {
-            // A lone & would underline the next letter
-            let ssid = ssid.replace('&', "&&");
+            let ssid = menu_text(ssid);
             items.push((
                 title,
                 0,
@@ -1268,7 +1304,7 @@ impl State {
             }
         }
         if let Some(next) = self.next_frame()
-            && self.shown.is_some_and(|i| self.frame_at.elapsed() >= i.frame_time())
+            && self.frame_left().is_zero()
         {
             self.frame_at = Instant::now();
             self.show(next, NIM_MODIFY, None);
@@ -1280,11 +1316,7 @@ impl State {
             let _ = unsafe { EndMenu() };
         }
         // Up to the next animation frame, at most IDLE_TICK
-        let wait = self
-            .next_frame()
-            .zip(self.shown)
-            .map_or(IDLE_TICK, |(_, i)| i.frame_time().saturating_sub(self.frame_at.elapsed()))
-            .min(IDLE_TICK);
+        let wait = if self.next_frame().is_some() { self.frame_left().min(IDLE_TICK) } else { IDLE_TICK };
         // SAFETY: our window, on its thread; a new SetTimer w/ the same ID replaces the old
         unsafe { SetTimer(Some(self.hwnd), TICK_TIMER, (wait.as_millis() as u32).max(1), None) };
     }

@@ -61,19 +61,17 @@ const SAVE_RETRY: Duration = Duration::from_secs(5);
 /// Headset audio owed after a stall goes, past this much
 const ISOC_CREDIT_MAX: Duration = Duration::from_millis(40);
 
-/// A controller being sent away: a DISCONNECT goodbye, then a kick and SLEEP_SHUN once it's
-/// acknowledged or GOODBYE_WAIT runs out
+/// A controller being sent away: a DISCONNECT goodbye, then a kick, SLEEP_SHUN and the end of
+/// its session once it's acknowledged or GOODBYE_WAIT runs out
 #[derive(Debug, Clone, Copy)]
 struct Leaving {
+    since: Instant,
     deadline: Instant,
-    /// End the session at the kick, for a tray Disconnect; a flat battery keeps it for the
-    /// tray's notification
-    end: bool,
 }
 
 impl Leaving {
-    fn new(now: Instant, end: bool) -> Self {
-        Leaving { deadline: now + GOODBYE_WAIT, end }
+    fn new(now: Instant) -> Self {
+        Leaving { since: now, deadline: now + GOODBYE_WAIT }
     }
 }
 
@@ -374,7 +372,7 @@ fn run_once(args: &Args, pair: bool, pair_bails: bool, quit: &AtomicBool, sh: &m
                             Command::Disconnect => {
                                 if leaving.is_none() && host.say_goodbye() {
                                     info!("disconnecting from the tray; saying goodbye first");
-                                    leaving = Some(Leaving::new(now, true));
+                                    leaving = Some(Leaving::new(now));
                                 }
                             }
                         }
@@ -389,9 +387,12 @@ fn run_once(args: &Args, pair: bool, pair_bails: bool, quit: &AtomicBool, sh: &m
                     if leaving.is_none() && ctl.must_charge(now) && host.say_goodbye() {
                         warn!("battery too low to use; sending the controller away until it charges");
                         ctl.let_go();
-                        leaving = Some(Leaving::new(now, false));
+                        leaving = Some(Leaving::new(now));
                     }
+                    // Never on the tick it started, so the tray has seen the flat battery and said
+                    // so before the controller's gone
                     if let Some(l) = leaving
+                        && now > l.since
                         && (host.all_delivered() || now >= l.deadline)
                     {
                         leaving = None;
@@ -400,9 +401,7 @@ fn run_once(args: &Args, pair: bool, pair_bails: bool, quit: &AtomicBool, sh: &m
                             link.kick(&peer)?;
                             link.shun(&peer, SLEEP_SHUN);
                             shunned = Some(Shunned { mac: peer, model: models.get(&peer).cloned() });
-                            if l.end
-                                && let Some(ev) = host.end_session()
-                            {
+                            if let Some(ev) = host.end_session() {
                                 on_event(ev, now, &mut host, &mut ctl, &mut outputs);
                             }
                         }
@@ -410,9 +409,7 @@ fn run_once(args: &Args, pair: bool, pair_bails: bool, quit: &AtomicBool, sh: &m
                     if shunned.as_ref().is_some_and(|s| link.shunned() != Some(s.mac)) {
                         shunned = None;
                     }
-                    // Kicked for a flat battery, its session winds down on its own for a few
-                    // seconds more; it's gone as far as the tray's concerned
-                    let controller = host.peer().filter(|&m| link.shunned() != Some(m)).map(|mac| Connected {
+                    let controller = host.peer().map(|mac| Connected {
                         mac,
                         model: models.get(&mac).cloned(),
                         port: outputs.port(),
