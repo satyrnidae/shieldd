@@ -24,6 +24,8 @@ mod civil;
 #[cfg(windows)]
 mod controller;
 #[cfg(windows)]
+mod files;
+#[cfg(windows)]
 mod host;
 #[cfg(windows)]
 mod known_clients;
@@ -100,12 +102,12 @@ pub struct Args {
     /// Vertical scale on its own, overriding --mouse-scale
     #[arg(long)]
     mouse_scale_y: Option<f32>,
-    /// Open the mic stream. Nothing reads it yet; it keeps the controller from dozing between
-    /// inputs, at the cost of a steady stream of frames. Doesn't change the lag.
+    /// Open the mic stream even w/ VBAN off, where it goes nowhere. It keeps the controller from
+    /// dozing between inputs, at the cost of a steady stream of frames. Doesn't change the lag.
     #[arg(long)]
     mic: bool,
-    /// Leave the radio to WSL (ozwpan + shield_tx.py) and only drive the
-    /// outputs from its UDP packets, like shield_rx.py
+    /// Leave the radio to WSL, where ozwpan runs the controller and --transmit sends its
+    /// input, and only drive the outputs from those UDP packets
     #[arg(long)]
     receiver: bool,
     /// Old host path: Windows Wi-Fi Direct + Npcap on the Realtek driver,
@@ -119,7 +121,7 @@ pub struct Args {
     /// usual.
     #[arg(long, conflicts_with_all = ["receiver", "wifi_direct", "transmit"])]
     pair: bool,
-    /// Where shield_tx.py sends to, w/ --receiver
+    /// Where --transmit sends to, w/ --receiver
     #[arg(long, default_value = shdlink::DEFAULT_ADDR, requires = "receiver")]
     listen: SocketAddr,
     /// WSL side (Linux only): read the controller's evdev + hidraw nodes
@@ -183,9 +185,15 @@ pub fn run(windowless: bool) -> Result<()> {
         Some(Ok(_)) => Some(true),
         _ => windowless.then_some(false),
     };
-    init_logging(!windowless, to_file)?;
-    if to_file.is_some() {
-        std::panic::set_hook(Box::new(|p| error!("{p}")));
+    if init_logging(!windowless, to_file)? {
+        // To the file; a console still gets Rust's own report, w/ the thread and any backtrace
+        let report = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |p| {
+            error!(target: PANIC, "{p}");
+            if !windowless {
+                report(p);
+            }
+        }));
     }
     let claimed = match claimed.transpose() {
         Ok(c) => c,
@@ -211,33 +219,41 @@ pub fn run(windowless: bool) -> Result<()> {
     result
 }
 
-/// `to_file`: Some(true) starts a new log file, Some(false) adds to it. Color only goes to a
-/// terminal, never a file or a redirect.
-fn init_logging(console: bool, to_file: Option<bool>) -> Result<()> {
+/// Panics, logged for the file; the console has Rust's own report of them
+const PANIC: &str = "shieldd::panic";
+
+/// `to_file`: Some(true) starts a new log file, Some(false) adds to it. A console carries on
+/// w/o the file if it won't open. Color only goes to a terminal, never a file or a redirect.
+/// Returns whether the file's in use.
+fn init_logging(console: bool, to_file: Option<bool>) -> Result<bool> {
     use std::io::IsTerminal;
     use tracing_subscriber::fmt;
     use tracing_subscriber::prelude::*;
     // rtlusb's info covers the AP, pairing and channel survey; its noisy stats are debug
     let filter =
         tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "shieldd=info,rtlusb=info".into());
-    let console = console.then(|| fmt::layer().with_ansi(std::io::stdout().is_terminal()));
+    let console = console.then(|| {
+        fmt::layer()
+            .with_ansi(std::io::stdout().is_terminal())
+            .with_filter(tracing_subscriber::filter::filter_fn(|m| m.target() != PANIC))
+    });
     // Nothing logs before the new file is in place, or it'd land in the last run's
-    let (file, stuck) = match to_file {
-        Some(rotate) => {
-            let (f, stuck) = logs::open(rotate)?;
-            (Some(fmt::layer().with_ansi(false).with_writer(std::sync::Mutex::new(f))), stuck)
-        }
+    let (file, trouble) = match to_file.map(logs::open) {
+        Some(Ok((f, stuck))) => (Some(fmt::layer().with_ansi(false).with_writer(std::sync::Mutex::new(f))), stuck),
+        Some(Err(e)) if console.is_some() => (None, Some(e.context("logging to the console only"))),
+        Some(Err(e)) => return Err(e),
         None => (None, None),
     };
+    let to_file = to_file.filter(|_| file.is_some());
     tracing_subscriber::registry().with(filter).with(console).with(file).init();
-    if let Some(e) = stuck {
+    if let Some(e) = trouble {
         tracing::warn!("{e:#}");
     }
     if to_file == Some(true) {
         // Packing a long log takes a moment; hosting needn't wait on it
         let _ = std::thread::Builder::new().name("pack logs".into()).spawn(logs::pack);
     }
-    Ok(())
+    Ok(to_file.is_some())
 }
 
 #[cfg_attr(not(windows), expect(unused_mut, reason = "only Windows sets background"))]
@@ -267,10 +283,8 @@ fn dispatch(mut args: Args, windowless: bool, claimed: Option<Quit>) -> Result<(
             );
             args.background = true;
         }
-        let quit = match claimed {
-            Some(q) => q,
-            None => background::claim(!windowless)?,
-        };
+        // run() claims for anything that hosts, before logging starts
+        let quit = anyhow::Context::context(claimed, "hosting w/o the instance")?;
         host::run(args, quit)
     }
 }
