@@ -1,0 +1,9 @@
+[package]
+name = "mac"
+description = "MAC address formatting shared by rtlusb and shieldd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]

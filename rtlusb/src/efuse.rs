@@ -154,7 +154,3 @@ pub fn hexdump(map: &[u8]) {
         println!("  {:03x}: {}", row * 16, bytes.join(" "));
     }
 }
-
-pub fn fmt_mac(mac: &[u8]) -> String {
-    mac.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(":")
-}

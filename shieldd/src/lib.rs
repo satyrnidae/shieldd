@@ -24,7 +24,7 @@ mod controller;
 mod dpapi;
 #[cfg_attr(not(windows), allow(dead_code, reason = "only the Windows host uses it so far"))]
 mod files;
-#[cfg(windows)]
+#[cfg_attr(not(windows), allow(dead_code, reason = "only the Windows host uses it so far"))]
 mod known_clients;
 mod logs;
 #[cfg(windows)]

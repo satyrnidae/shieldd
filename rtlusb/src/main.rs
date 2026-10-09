@@ -108,7 +108,7 @@ fn efuse_cmd(dump: Option<PathBuf>) -> Result<()> {
     efuse::hexdump(&log);
     let e = efuse::Efuse::parse(&log);
     println!("efuse VID:PID {:04x}:{:04x}", e.vid, e.pid);
-    println!("MAC {}", efuse::fmt_mac(&e.mac));
+    println!("MAC {}", mac::fmt_mac(&e.mac));
 
     if let Some(dir) = dump {
         std::fs::create_dir_all(&dir)?;
@@ -184,7 +184,7 @@ fn ap_cmd(
         let mut tx = tx::Tx::new(&chip.rtl)?;
         chip.enable_sec_engine()?;
         chip.start_ap(&mut tx, &cfg)?;
-        info!(ssid = cfg.ssid, bssid = efuse::fmt_mac(&bssid), channel, "beaconing, Ctrl-C to stop");
+        info!(ssid = cfg.ssid, bssid = mac::fmt_mac(&bssid), channel, "beaconing, Ctrl-C to stop");
         let mut bss = bss::Bss::new(cfg, pmk);
         bss.install_gtk(&chip)?;
 
@@ -222,7 +222,7 @@ fn ap_cmd(
                     ozmo_frames += 1;
                     if ozmo_frames <= 20 || ozmo_frames.is_multiple_of(500) {
                         info!(
-                            sta = efuse::fmt_mac(&sta),
+                            sta = mac::fmt_mac(&sta),
                             ethertype = format!("{ethertype:#06x}"),
                             len = payload.len(),
                             head = format!("{:02x?}", &payload[..payload.len().min(16)]),
@@ -271,8 +271,8 @@ fn print_frame(p: &rx::RxPkt, t0: Instant) {
         rx::rate_name(p.rate),
         p.dbm.map_or("?".into(), |d| d.to_string()),
         kind,
-        efuse::fmt_mac(a1),
-        a2.map_or("-".into(), efuse::fmt_mac),
+        mac::fmt_mac(a1),
+        a2.map_or("-".into(), mac::fmt_mac),
     );
     if !flags.is_empty() {
         line += &format!(" [{flags}]");

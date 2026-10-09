@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["ozproto", "rtlusb", "shdlink", "shieldd"]
+members = ["mac", "ozproto", "rtlusb", "shdlink", "shieldd"]
 
 [workspace.package]
 version = "0.2.0+alpha"
@@ -10,6 +10,7 @@ license = "GPL-2.0-only"
 publish = false
 
 [workspace.dependencies]
+mac = { path = "mac" }
 ozproto = { path = "ozproto" }
 rtlusb = { path = "rtlusb" }
 shdlink = { path = "shdlink" }

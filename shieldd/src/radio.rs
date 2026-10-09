@@ -15,10 +15,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
+use mac::fmt_mac;
 use ozproto::wire::ETHERTYPE;
 use ozproto::{Config, Event, Host};
 use rtlusb::ap::WpsConfig;
-use rtlusb::efuse::fmt_mac;
 use rtlusb::wps::{Credential, Device};
 use rtlusb::{ApOptions, Radio, RadioEvent};
 use tracing::{debug, info, trace, warn};

@@ -14,7 +14,7 @@ use crate::ap::{ApConfig, WpsConfig};
 use crate::bss::{Bss, Event, Mac};
 use crate::chip::Chip;
 use crate::tx::{Tx, TxInfo};
-use crate::{efuse, phy, rx, survey, wpa};
+use crate::{phy, rx, survey, wpa};
 
 const RX_BUF: usize = 32768;
 const RX_TRANSFERS: usize = 8;
@@ -170,7 +170,7 @@ impl Radio {
             let mut tx = Tx::new(&chip.rtl)?;
             chip.enable_sec_engine()?;
             chip.start_ap(&mut tx, &cfg)?;
-            info!(ssid = cfg.ssid, bssid = efuse::fmt_mac(&bssid), channel = opts.channel, "AP up");
+            info!(ssid = cfg.ssid, bssid = mac::fmt_mac(&bssid), channel = opts.channel, "AP up");
             let mut bss = Bss::new(cfg, opts.pmk);
             bss.set_ps_hold(opts.ps_hold);
             bss.install_gtk(&chip)?;

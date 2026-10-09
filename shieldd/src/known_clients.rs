@@ -52,7 +52,7 @@ fn parse(text: &str) -> HashMap<Mac, String> {
 /// `text` w/ `mac`'s line saying `name`: the first line for it rewritten, any later ones dropped,
 /// or a new line at the end. Comments and everything else stay as they were.
 fn set_line(text: &str, mac: &Mac, name: &str) -> String {
-    let line = format!("{} {name}", rtlusb::efuse::fmt_mac(mac));
+    let line = format!("{} {name}", mac::fmt_mac(mac));
     let mut out = String::with_capacity(text.len() + line.len() + 1);
     let mut done = false;
     for l in text.lines() {

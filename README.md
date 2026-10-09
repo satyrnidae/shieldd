@@ -220,6 +220,7 @@ An older path, kept because it still works:
 
 | Path | What |
 | --- | --- |
+| `mac/` | MAC address formatting shared by rtlusb and shieldd |
 | `ozproto/` | Ozmo protocol: wire format and host session state machine, no I/O |
 | `rtlusb/` | Userspace RTL8811AU driver over WinUSB: init, firmware, PHY, AP, WPA2, WPS |
 | `shieldd/` | The host: radio, controller setup, outputs, pairing, tray, login start, WSL bridge receiver |

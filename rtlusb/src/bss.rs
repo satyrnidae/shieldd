@@ -11,12 +11,12 @@ use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use mac::fmt_mac;
 use rand::RngCore;
 use tracing::{debug, info, trace, warn};
 
 use crate::ap::{ApConfig, RSN, WMM_PARAM};
 use crate::chip::Chip;
-use crate::efuse::fmt_mac;
 use crate::sec::FIRST_PAIRWISE_ENTRY;
 use crate::tx::{RATE_6M, Tx, TxInfo};
 use crate::wpa::{self, Pmk};
