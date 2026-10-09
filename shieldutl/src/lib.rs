@@ -12,6 +12,12 @@ pub mod names;
 pub mod psk;
 #[cfg(feature = "vban")]
 pub mod vban;
+#[cfg(target_os = "linux")]
+#[cfg(feature = "alsa")]
+pub mod alsa;
+#[cfg(target_os = "linux")]
+#[cfg(feature = "pulse")]
+pub mod pulse;
 
 use std::path::PathBuf;
 use std::sync::atomic::{Ordering, compiler_fence};
