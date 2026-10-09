@@ -12,6 +12,8 @@ use flate2::write::GzEncoder;
 use tracing::warn;
 
 const LATEST: &str = "latest.log";
+/// Packed logs kept; older ones go
+const KEEP: usize = 20;
 
 pub fn dir() -> PathBuf {
     crate::settings_dir().join("logs")
@@ -20,20 +22,28 @@ pub fn dir() -> PathBuf {
 /// Opens latest.log. `rotate` starts a new one, moving the old one aside for `pack`; otherwise
 /// this adds to it. Also returns why the old one couldn't move, in which case this adds to it.
 pub fn open(rotate: bool) -> Result<(File, Option<anyhow::Error>)> {
+    anyhow::ensure!(!crate::settings_dir().as_os_str().is_empty(), "no LOCALAPPDATA to keep logs in");
     let dir = dir();
     fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let latest = dir.join(LATEST);
     let append = || OpenOptions::new().create(true).append(true).open(&latest);
+    // Anything but a clean move aside adds to the old one rather than emptying it
+    let keep = |e: io::Error, doing: &str| -> Result<(File, Option<anyhow::Error>)> {
+        let e = anyhow::Error::new(e).context(format!("{doing} {}; adding to it instead", latest.display()));
+        Ok((append().with_context(|| format!("opening {}", latest.display()))?, Some(e)))
+    };
     if !rotate {
         return Ok((append().with_context(|| format!("opening {}", latest.display()))?, None));
     }
-    if let Ok(meta) = fs::metadata(&latest) {
-        let started = meta.created().or_else(|_| meta.modified()).unwrap_or_else(|_| SystemTime::now());
-        let aside = free_name(&dir, &stamp(started));
-        if let Err(e) = fs::rename(&latest, &aside) {
-            let e = anyhow::Error::new(e).context(format!("moving {} aside; adding to it instead", latest.display()));
-            return Ok((append().with_context(|| format!("opening {}", latest.display()))?, Some(e)));
+    match fs::metadata(&latest) {
+        Ok(meta) => {
+            let started = meta.created().or_else(|_| meta.modified()).unwrap_or_else(|_| SystemTime::now());
+            if let Err(e) = fs::rename(&latest, free_name(&dir, &stamp(started))) {
+                return keep(e, "moving aside");
+            }
         }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return keep(e, "looking at"),
     }
     let file = File::create(&latest).with_context(|| format!("creating {}", latest.display()))?;
     // Windows hands a new file the creation time of one that just left under the same name,
@@ -46,16 +56,29 @@ pub fn open(rotate: bool) -> Result<(File, Option<anyhow::Error>)> {
     Ok((file, None))
 }
 
-/// Gzips every log moved aside, this run's predecessor and any a crash left behind
+/// Gzips every log moved aside, this run's predecessor and any a crash left behind, then drops
+/// all but the newest KEEP
 pub fn pack() {
-    let Ok(entries) = fs::read_dir(dir()) else { return };
-    for path in entries.flatten().map(|e| e.path()) {
+    pack_in(&dir());
+}
+
+fn pack_in(dir: &Path) {
+    let names = || fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path());
+    for path in names() {
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
         if name == LATEST || path.extension().is_none_or(|x| x != "log") {
             continue;
         }
         if let Err(e) = gzip(&path) {
             warn!("packing {}: {e:#}", path.display());
+        }
+    }
+    // Named for when they started, so by name is by age
+    let mut packed: Vec<_> = names().filter(|p| p.to_str().is_some_and(|s| s.ends_with(".log.gz"))).collect();
+    packed.sort();
+    for old in packed.iter().rev().skip(KEEP) {
+        if let Err(e) = fs::remove_file(old) {
+            warn!("removing {}: {e}", old.display());
         }
     }
 }
@@ -113,6 +136,25 @@ mod tests {
         assert_eq!(free_name(&dir, "s"), dir.join("s-2.log"));
         File::create(dir.join("s-2.log")).unwrap();
         assert_eq!(free_name(&dir, "s"), dir.join("s-3.log"));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn packs_and_keeps_the_newest() {
+        let dir = std::env::temp_dir().join(format!("shieldd-pack-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        for day in 1..=KEEP {
+            File::create(dir.join(format!("2026-01-{day:02}T00_00_00.log.gz"))).unwrap();
+        }
+        fs::write(dir.join("2026-02-01T00_00_00.log"), "last run").unwrap();
+        fs::write(dir.join(LATEST), "this run").unwrap();
+        pack_in(&dir);
+        let mut left: Vec<_> = fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+        left.sort();
+        assert_eq!(left.len(), KEEP + 1);
+        assert_eq!(left[0], "2026-01-02T00_00_00.log.gz");
+        assert_eq!(left[KEEP - 1], "2026-02-01T00_00_00.log.gz");
+        assert_eq!(left[KEEP], LATEST);
         fs::remove_dir_all(&dir).unwrap();
     }
 }
