@@ -203,6 +203,20 @@ impl Report {
 
 //endregion
 
+/// The battery, from the controller's status answer
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Battery {
+    pub charging: bool,
+    /// The controller's own level band: 100 (on the charger), 75, 50, 25, 10, 0 seen so far
+    pub band: u8,
+    /// Mailbox 01 bytes 2-3, a voltage reading
+    pub reading: u16,
+    /// Below the rumble cutoff
+    pub critical: bool,
+    /// Kicked until it charges
+    pub must_charge: bool,
+}
+
 pub struct Controller {
     step: usize,
     last_req_id: u8,
@@ -303,17 +317,11 @@ impl Controller {
     }
 
     /// The last status answer, once setup is done
-    pub fn battery(&self) -> Option<crate::tray::Battery> {
+    pub fn battery(&self) -> Option<Battery> {
         let (Some(charging), Some(band), Some(reading)) = (self.charging, self.band, self.reading) else {
             return None;
         };
-        self.ready.then_some(crate::tray::Battery {
-            charging,
-            band,
-            reading,
-            critical: self.rumble_cut,
-            must_charge: self.let_go,
-        })
+        self.ready.then_some(Battery { charging, band, reading, critical: self.rumble_cut, must_charge: self.let_go })
     }
 
     /// Too flat to use and not charging: critical at connect, or for CRITICAL_FOR since.

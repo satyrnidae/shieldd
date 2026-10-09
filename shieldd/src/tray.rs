@@ -54,24 +54,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_CHILD, WS_EX_TOPMOST, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 
+use crate::controller::Battery;
 use crate::known_clients::MAX_NAME;
 use windows::core::{BOOL, PCWSTR, PWSTR, w};
 
 //region Battery
-
-/// What the tray shows, from the controller's status answer
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Battery {
-    pub charging: bool,
-    /// The controller's own level band: 100 (on the charger), 75, 50, 25, 10, 0 seen so far
-    pub band: u8,
-    /// Mailbox 01 bytes 2-3, a voltage reading
-    pub reading: u16,
-    /// Below the rumble cutoff
-    pub critical: bool,
-    /// Kicked until it charges
-    pub must_charge: bool,
-}
 
 /// Reading -> percent on battery, straight between points. The reading is the cell's voltage at
 /// 4.5 V full scale. A Li-ion cell at rest: flat through the middle, steep at both ends. The

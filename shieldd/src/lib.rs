@@ -18,7 +18,7 @@ mod background;
 #[cfg_attr(not(windows), allow(dead_code, reason = "only the Windows host uses it so far"))]
 mod base64;
 mod civil;
-#[cfg(windows)]
+#[cfg_attr(not(windows), allow(dead_code, reason = "only the Windows host uses it so far"))]
 mod controller;
 #[cfg(windows)]
 mod dpapi;
