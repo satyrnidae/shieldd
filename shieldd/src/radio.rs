@@ -29,7 +29,7 @@ use crate::adapters::fmt_mac;
 use crate::controller::{Controller, HEADSET_EP, RumbleProbe};
 use crate::host::on_event;
 use crate::outputs::Outputs;
-use crate::tray::{self, Command, Connected, Status, Tray};
+use crate::tray::{self, Command, Connected, Shunned, Status, Tray};
 use crate::vban::{self, Vban};
 use crate::{Args, hex, models, p2pconf, pair};
 
@@ -146,6 +146,7 @@ impl Shared {
                 ssid: None,
                 channel: None,
                 joining: false,
+                shunned: None,
             });
             std::thread::sleep(Duration::from_millis(100));
         }
@@ -222,6 +223,7 @@ fn run_once(args: &Args, pair: bool, pair_bails: bool, quit: &AtomicBool, sh: &m
         ssid: Some(group.ssid.clone()),
         channel: (group.channel != 0).then_some(group.channel),
         joining: false,
+        shunned: None,
     });
     let mut radio = Radio::start(opts)?;
     // Pairing surveys for its channel; that's the one the controller will remember
@@ -256,6 +258,8 @@ fn run_once(args: &Args, pair: bool, pair_bails: bool, quit: &AtomicBool, sh: &m
     let mut joining: Option<Instant> = None;
     // JOIN_TIMEOUT ran out on the controller there now; no spinner for it again
     let mut join_gave_up = false;
+    // Sent away to sleep, w/ its model looked up once. rtlusb's shun says how long.
+    let mut shunned: Option<Shunned> = None;
     // Paired, but writing --conf failed: when to try again
     let mut save_due: Option<Instant> = sh.unsaved.is_some().then(Instant::now);
     // Ends this run but not the program, unlike quit
@@ -395,6 +399,7 @@ fn run_once(args: &Args, pair: bool, pair_bails: bool, quit: &AtomicBool, sh: &m
                             info!(sta = %fmt_mac(&peer), acked = host.all_delivered(), "goodbye done, kicking");
                             link.kick(&peer)?;
                             link.shun(&peer, SLEEP_SHUN);
+                            shunned = Some(Shunned { mac: peer, model: models.get(&peer).cloned() });
                             if l.end
                                 && let Some(ev) = host.end_session()
                             {
@@ -402,7 +407,12 @@ fn run_once(args: &Args, pair: bool, pair_bails: bool, quit: &AtomicBool, sh: &m
                             }
                         }
                     }
-                    let controller = host.peer().map(|mac| Connected {
+                    if shunned.as_ref().is_some_and(|s| link.shunned() != Some(s.mac)) {
+                        shunned = None;
+                    }
+                    // Kicked for a flat battery, its session winds down on its own for a few
+                    // seconds more; it's gone as far as the tray's concerned
+                    let controller = host.peer().filter(|&m| link.shunned() != Some(m)).map(|mac| Connected {
                         mac,
                         model: models.get(&mac).cloned(),
                         port: outputs.port(),
@@ -431,6 +441,7 @@ fn run_once(args: &Args, pair: bool, pair_bails: bool, quit: &AtomicBool, sh: &m
                         ssid: Some(group.ssid.clone()),
                         channel: Some(channel),
                         joining: joining.is_some(),
+                        shunned: shunned.clone(),
                     });
                     if let Some(t) = last_rx
                         && now.duration_since(t) > STALE

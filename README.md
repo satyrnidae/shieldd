@@ -160,10 +160,11 @@ Options worth knowing, the rest in `shieldd --help`:
 ### Tray
 
 The icon shows the controller's battery: a flashing bolt while it charges, an all-green full
-battery once it's charged, an all-red one w/ a warning mark when it's critical. A crossed-out
-signal flashes red while none is connected, a spinner turns while one is joining, and a Wi-Fi
-signal lights up blue, a bar at a time, while pairing. A controller joining or leaving Wi-Fi
-plays Windows' Device Connect or Device Disconnect sound, as a USB device would.
+battery once it's charged, an all-red one w/ a flashing warning mark when it's critical. A
+crossed-out signal flashes red for 5 s at startup and when the last controller leaves, a spinner
+turns while one is joining, and a Wi-Fi signal lights up blue, a bar at a time, while pairing. A
+controller joining or leaving Wi-Fi plays Windows' Device Connect or Device Disconnect sound, as
+a USB device would.
 
 Click for a menu. Its title shows the version, how many controllers are connected, and the
 group's name and channel. The controller line shows its model, XInput port and battery, and its
@@ -175,6 +176,7 @@ MAC on hover; clicking it buzzes the controller twice, to tell which one it is. 
 - **Enable / Disable VBAN**: controller audio, see below. Remembered between runs.
 - **Disconnect**: says goodbye to the controller over Ozmo, drops it from Wi-Fi, then ignores
   it for 30 s so it gives up and goes to sleep. A controller that connects flat gets the same.
+  Meanwhile it's listed, grayed out, as "(shunned)" when nothing else is connected.
 - **Exit**
 
 ### Audio

@@ -192,6 +192,11 @@ impl Bss {
         info!(sta = fmt_mac(sta), ?d, "shunned");
     }
 
+    /// Who's being ignored right now, if anyone
+    pub fn shunned(&self) -> Option<Mac> {
+        self.shunned.filter(|&(_, until)| Instant::now() < until).map(|(m, _)| m)
+    }
+
     /// `sa` is being ignored. Lifts an expired shun.
     pub fn is_shunned(&mut self, sa: &Mac) -> bool {
         match self.shunned {

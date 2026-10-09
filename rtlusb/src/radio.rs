@@ -92,6 +92,11 @@ impl Link<'_> {
     pub fn shun(&mut self, sta: &Mac, d: Duration) {
         self.bss.shun(sta, d)
     }
+
+    /// See Bss::shunned
+    pub fn shunned(&self) -> Option<Mac> {
+        self.bss.shunned()
+    }
 }
 
 pub struct Radio {

@@ -43,8 +43,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     MB_ICONWARNING, MB_OK, MB_OKCANCEL, MB_SETFOREGROUND, MENU_ITEM_FLAGS, MF_DISABLED, MF_GRAYED, MF_SEPARATOR,
     MF_STRING, MSG, MessageBoxW, PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SM_CXSMICON,
     SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SendMessageW, SetForegroundWindow, SetTimer, SetWindowPos, TPM_RETURNCMD,
-    TPM_RIGHTBUTTON, TrackPopupMenu, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CONTEXTMENU, WM_ENTERIDLE, WM_LBUTTONUP,
-    WM_MENUSELECT, WM_NULL, WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_EX_TOPMOST, WS_POPUP,
+    TPM_RIGHTBUTTON, TrackPopupMenu, UIS_CLEAR, UISF_HIDEACCEL, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CONTEXTMENU,
+    WM_ENTERIDLE, WM_LBUTTONUP, WM_MENUSELECT, WM_NULL, WM_QUERYUISTATE, WM_RBUTTONUP, WM_TIMER, WM_UPDATEUISTATE,
+    WNDCLASSW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{BOOL, PCWSTR, PWSTR, w};
 
@@ -54,7 +55,7 @@ use windows::core::{BOOL, PCWSTR, PWSTR, w};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Battery {
     pub charging: bool,
-    /// The controller's own level band: 50, 25, 10, 0 seen so far
+    /// The controller's own level band: 100 (on the charger), 75, 50, 25, 10, 0 seen so far
     pub band: u8,
     /// Mailbox 01 bytes 2-3, a voltage reading
     pub reading: u16,
@@ -64,20 +65,45 @@ pub struct Battery {
     pub must_charge: bool,
 }
 
-/// Readings for 0% and 100%, a straight line through where the controller's 25 and 10 bands
-/// start (0xD47F, 0xD081). 0% lands right where it gave out on 2026-10-08 (~0xCCFD).
+/// Reading -> percent on battery, straight between points. The reading is the cell's voltage at
+/// 4.5 V full scale. A Li-ion cell at rest: flat through the middle, steep at both ends. The
+/// controller's own bands agree: 25 starts at 0xD47F (3.74 V), 10 at 0xD081 (3.67 V), and 75 was
+/// still showing at 0xEB29 (4.13 V). 0% is where it gave out on 2026-10-08 (~0xCCFD). On the
+/// charger, the same curve after CHARGE_LIFT.
+const CURVE: [(u16, u8); 7] = [
+    (EMPTY, 0),
+    (0xD081, 10),
+    (0xD47F, 25),
+    // 3.84 V
+    (0xDA74, 50),
+    // 3.98 V
+    (0xE26B, 75),
+    // 4.11 V
+    (0xE9D0, 90),
+    // 4.20 V
+    (0xEEEF, 100),
+];
+
 const EMPTY: u16 = 0xCD00;
-const FULL: u16 = 0xE800;
 /// A reading this much above what's shown means it was charged while away
 const RECHARGED_BY: u8 = 10;
 
 /// How far the charger lifts the reading the moment it's plugged in: 0xDCB2 -> 0xE34E and
-/// 0xDD36 -> 0xE374 on 2026-10-08. Left in, charging would read ~23% high.
+/// 0xDD36 -> 0xE374 on 2026-10-08. A straight line from EMPTY to 0xE800 used to stand in for
+/// the curve on the charger and read 100 at 0xF1D3, which was 91% off it on 2026-10-09.
 const CHARGE_LIFT: u16 = 0x0660;
 
+/// On battery, see CURVE
 pub fn percent(reading: u16) -> u8 {
-    let span = u32::from(FULL - EMPTY);
-    (u32::from(reading.saturating_sub(EMPTY)) * 100 / span).min(100) as u8
+    let Some(i) = CURVE.iter().position(|&(r, _)| reading < r) else { return 100 };
+    let Some(&(r0, p0)) = i.checked_sub(1).map(|i| &CURVE[i]) else { return 0 };
+    let (r1, p1) = CURVE[i];
+    p0 + (u32::from(reading - r0) * u32::from(p1 - p0) / u32::from(r1 - r0)) as u8
+}
+
+/// On the charger, see CURVE
+fn charging_percent(reading: u16) -> u8 {
+    percent(reading.saturating_sub(CHARGE_LIFT))
 }
 
 /// The percent to show, from readings that bounce under load and jump w/ the charger. On
@@ -91,7 +117,7 @@ struct Gauge {
 impl Gauge {
     /// Returns the percent to show, and whether a discharge just began (re-arms the critical alert)
     fn feed(&mut self, b: &Battery) -> (u8, bool) {
-        let p = if b.charging { percent(b.reading.saturating_sub(CHARGE_LIFT)) } else { percent(b.reading) };
+        let p = if b.charging { charging_percent(b.reading) } else { percent(b.reading) };
         let switched = self.charging != Some(b.charging);
         let (pct, fresh) = match self.pct {
             None => (p, true),
@@ -123,7 +149,11 @@ enum Icon {
     Medium,
     Low,
     Empty,
+    /// Critical: all red
     Critical,
+    /// Critical's other frame: the red outline w/ the exclamation mark in the stroke color, so it
+    /// flashes
+    CriticalDim,
     Disconnected,
     /// Disconnected's other frame, all in red, so it flashes
     DisconnectedRed,
@@ -150,8 +180,12 @@ const SPINNER_RADIUS: f32 = 8.0 + 3.55556 / 2.0;
 const PAIRING_FRAMES: u8 = 5;
 /// How long each pairing frame shows
 const PAIRING_FRAME: Duration = Duration::from_millis(400);
-/// How long each half of a flash shows: the charging bolt, the disconnected icon
+/// How long each half of a flash shows: the charging bolt, the critical mark, the disconnected
+/// icon
 const FLASH_FRAME: Duration = Duration::from_millis(800);
+/// The disconnected icon flashes this long, at startup and each time the last controller goes;
+/// then it holds still
+const DISCONNECTED_FLASH: Duration = Duration::from_secs(5);
 /// The wifi icon's elements, by class, in the order they light up: the dot, then the arcs
 /// inside out
 const PAIRING_ORDER: [&str; 4] = ["path-1", "path-4", "path-3", "path-2"];
@@ -165,7 +199,7 @@ enum Accent {
 }
 
 impl Icon {
-    const FIXED: [Icon; 15] = [
+    const FIXED: [Icon; 16] = [
         Icon::Charging,
         Icon::ChargingDim,
         Icon::Charged,
@@ -174,6 +208,7 @@ impl Icon {
         Icon::Low,
         Icon::Empty,
         Icon::Critical,
+        Icon::CriticalDim,
         Icon::Disconnected,
         Icon::DisconnectedRed,
         Icon::Pairing(0),
@@ -197,9 +232,10 @@ impl Icon {
         } else if b.critical {
             Icon::Critical
         } else {
+            // The controller's own bands: 100, 75, 50, 25, 10 and 0 seen so far
             match b.band {
-                51.. => Icon::Full,
-                50 => Icon::Medium,
+                75.. => Icon::Full,
+                50..=74 => Icon::Medium,
                 25..=49 => Icon::Low,
                 _ => Icon::Empty,
             }
@@ -220,6 +256,7 @@ impl Icon {
             // Its color is on the root element, before any path; all of it is outline
             Icon::Disconnected => (include_str!("../../res/disconnected-svgrepo-com.svg"), Accent::None),
             Icon::DisconnectedRed => (include_str!("../../res/disconnected-svgrepo-com.svg"), Accent::Red),
+            Icon::CriticalDim => (include_str!("../../res/battery-warning-svgrepo-com.svg"), Accent::None),
             // Colored by pairing_frame instead
             Icon::Pairing(_) => (include_str!("../../res/wifi-svgrepo-com.svg"), Accent::None),
             // Turned by pixmap
@@ -232,6 +269,8 @@ impl Icon {
         match self {
             Icon::Charging => Some(Icon::ChargingDim),
             Icon::ChargingDim => Some(Icon::Charging),
+            Icon::Critical => Some(Icon::CriticalDim),
+            Icon::CriticalDim => Some(Icon::Critical),
             Icon::Disconnected => Some(Icon::DisconnectedRed),
             Icon::DisconnectedRed => Some(Icon::Disconnected),
             Icon::Pairing(n) => Some(Icon::Pairing((n + 1) % PAIRING_FRAMES)),
@@ -253,6 +292,7 @@ impl Icon {
     fn keep_frame(want: Icon, shown: Option<Icon>) -> Icon {
         match (want, shown) {
             (Icon::Charging, Some(Icon::ChargingDim)) => Icon::ChargingDim,
+            (Icon::Critical, Some(Icon::CriticalDim)) => Icon::CriticalDim,
             (Icon::Disconnected, Some(Icon::DisconnectedRed)) => Icon::DisconnectedRed,
             (Icon::Pairing(_), Some(i @ Icon::Pairing(_))) => i,
             (Icon::Spinner(_), Some(i @ Icon::Spinner(_))) => i,
@@ -271,6 +311,8 @@ impl Icon {
             }
             // Charging's outline w/ the bolt dimmed to the stroke color
             Icon::ChargingDim => paint(svg, p.green, p.stroke),
+            // Critical's outline w/ the mark dimmed to the stroke color
+            Icon::CriticalDim => paint(svg, p.red, p.stroke),
             _ => colorize(svg, p, accent),
         }
     }
@@ -444,6 +486,14 @@ pub struct Status {
     pub channel: Option<u8>,
     /// A controller is on its way in: associated, but not yet up w/ a battery reading
     pub joining: bool,
+    /// One sent away to sleep and ignored for now. Listed while no controller's connected.
+    pub shunned: Option<Shunned>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Shunned {
+    pub mac: [u8; 6],
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -613,6 +663,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
     } else if msg == WM_MENUSELECT {
         // Item ID in the low word; the menu, or none once it closes
         show_tip(hwnd, wp.0 & 0xFFFF == id::CONTROLLER && lp.0 != 0);
+    } else if msg == WM_QUERYUISTATE {
+        // The menu asks its owner whether to underline shortcut letters, and a mouse-opened one
+        // hides them by default
+        return LRESULT(0);
     } else if msg == WM_ENTERIDLE {
         // The menu loop has caught up, e.g. after a mouse move
         follow_mouse();
@@ -679,6 +733,10 @@ struct State {
     must_charge_told: Option<Instant>,
     /// When the animation on screen last moved
     frame_at: Instant,
+    /// Last refresh found nothing connected, pairing or joining
+    was_disconnected: bool,
+    /// The disconnected icon flashes until then
+    flash_until: Option<Instant>,
     commands: Sender<Command>,
 }
 
@@ -730,6 +788,8 @@ fn run(rx: Receiver<Msg>, commands: Sender<Command>) -> Result<()> {
         critical_alerted: false,
         must_charge_told: None,
         frame_at: Instant::now(),
+        was_disconnected: false,
+        flash_until: None,
         commands,
     };
     st.load_icons()?;
@@ -830,6 +890,8 @@ fn track(hwnd: HWND, items: &[Item], at: POINT) -> usize {
         }
         // W/o the window in front, the menu won't close on a click elsewhere
         let _ = SetForegroundWindow(hwnd);
+        // Shortcut letters underlined, as if the menu had been opened from the keyboard
+        SendMessageW(hwnd, WM_UPDATEUISTATE, Some(WPARAM((UISF_HIDEACCEL << 16 | UIS_CLEAR) as usize)), None);
         let picked = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, at.x, at.y, None, hwnd, None);
         let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
         let _ = DestroyMenu(m);
@@ -941,10 +1003,21 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain([0]).collect()
 }
 
+/// A model name as menu text. It's whatever the controller said over WPS, and a lone & would
+/// underline the next letter.
+fn menu_model(model: Option<&str>) -> String {
+    model.unwrap_or("Controller").replace('&', "&&")
+}
+
 /// The controller line of the menu
-fn controller_line(c: Option<&Connected>, pct: Option<u8>) -> String {
-    let Some(c) = c else { return "No controllers connected".into() };
-    let model = c.model.as_deref().unwrap_or("Controller");
+fn controller_line(c: Option<&Connected>, pct: Option<u8>, shunned: Option<&Shunned>) -> String {
+    let Some(c) = c else {
+        return match shunned {
+            Some(s) => format!("{} (shunned)", menu_model(s.model.as_deref())),
+            None => "No controllers connected".into(),
+        };
+    };
+    let model = menu_model(c.model.as_deref());
     let port = c.port.map_or_else(|| "?".into(), |p| p.to_string());
     match (c.battery, pct) {
         (Some(b), Some(p)) if b.charging && p >= 100 => format!("{model}: Port #{port} ({p}%) (charged)"),
@@ -983,6 +1056,12 @@ impl State {
         let now = Instant::now();
         let msg = if self.shown.is_some() { NIM_MODIFY } else { NIM_ADD };
         let s = self.status.clone();
+        // Startup counts as a change to disconnected, since nothing was before
+        let disconnected = !s.pairing && !s.joining && s.controller.is_none();
+        if disconnected && !self.was_disconnected {
+            self.flash_until = Some(now + DISCONNECTED_FLASH);
+        }
+        self.was_disconnected = disconnected;
         if s.pairing {
             self.pct = None;
             let icon = self.animate(Icon::Pairing(0), now);
@@ -1001,8 +1080,8 @@ impl State {
                 None => "SHIELD controller: not connected",
             };
             self.pct = None;
-            // Flashing only w/ nothing connected
-            let icon = if s.controller.is_some() { Icon::Disconnected } else { self.animate(Icon::Disconnected, now) };
+            // Flashing only w/ nothing connected, and only for a bit
+            let icon = if self.flashing(now) { self.animate(Icon::Disconnected, now) } else { Icon::Disconnected };
             self.show(icon, msg, Some(tip));
             return;
         };
@@ -1042,8 +1121,17 @@ impl State {
 
     /// The animation's next frame, if what's on screen is animated
     fn next_frame(&self) -> Option<Icon> {
-        let still = matches!(self.shown, Some(Icon::Disconnected)) && self.status.controller.is_some();
-        if still { None } else { self.shown.and_then(Icon::next_frame) }
+        match self.shown {
+            // Once the flash is over, back to the plain frame and stay there
+            Some(Icon::Disconnected) if !self.flashing(Instant::now()) => None,
+            Some(Icon::DisconnectedRed) if !self.flashing(Instant::now()) => Some(Icon::Disconnected),
+            shown => shown.and_then(Icon::next_frame),
+        }
+    }
+
+    /// The disconnected icon should be flashing
+    fn flashing(&self, now: Instant) -> bool {
+        self.was_disconnected && self.flash_until.is_some_and(|t| now < t)
     }
 
     /// The frame of `icon` to show; a new animation starts its clock. The run loop steps it
@@ -1105,7 +1193,12 @@ impl State {
         let s = &self.status;
         let connected = s.controller.is_some();
         let gray = |on: bool| if on { MF_STRING } else { MF_STRING | MF_GRAYED };
-        let tip = s.controller.as_ref().map(|c| format!("MAC {}\nClick to identify", crate::adapters::fmt_mac(&c.mac)));
+        let tip = match (&s.controller, &s.shunned) {
+            (Some(c), _) => Some(format!("MAC {}\nClick to identify", crate::adapters::fmt_mac(&c.mac))),
+            // Grayed, so nothing to click
+            (None, Some(sh)) => Some(format!("MAC {}", crate::adapters::fmt_mac(&sh.mac))),
+            (None, None) => None,
+        };
         let title = MF_STRING | MF_DISABLED;
         let mut items: Vec<Item> = vec![
             (title, 0, concat!("shieldd (v", env!("CARGO_PKG_VERSION"), ")").into()),
@@ -1126,7 +1219,7 @@ impl State {
         items.extend([
             (MF_SEPARATOR, 0, String::new()),
             // Click to identify
-            (gray(connected), id::CONTROLLER, controller_line(s.controller.as_ref(), self.pct)),
+            (gray(connected), id::CONTROLLER, controller_line(s.controller.as_ref(), self.pct, s.shunned.as_ref())),
             (MF_SEPARATOR, 0, String::new()),
             (
                 gray(!s.pairing),
@@ -1244,12 +1337,18 @@ mod tests {
     #[test]
     fn percent_scale() {
         assert_eq!(percent(0xCCFD), 0);
-        assert_eq!(percent(EMPTY), 0);
-        assert_eq!(percent(FULL), 100);
+        assert_eq!(percent(0xCD00), 0);
+        assert_eq!(percent(0xEEEF), 100);
         assert_eq!(percent(0xF000), 100);
         // Where the controller's bands start
-        assert_eq!(percent(0xD47F), 27);
-        assert_eq!(percent(0xD081), 12);
+        assert_eq!(percent(0xD47F), 25);
+        assert_eq!(percent(0xD081), 10);
+        // Band 75, fresh off the charger; the old straight line said 100
+        assert_eq!(percent(0xEB29), 92);
+        // On the charger
+        assert_eq!(charging_percent(EMPTY + CHARGE_LIFT), 0);
+        // Band 100 on the charger, 91% off it; the old straight line said 100 and "charged"
+        assert_eq!(charging_percent(0xF1D3), 93);
     }
 
     #[test]
@@ -1257,21 +1356,21 @@ mod tests {
         let b = |charging, reading| Battery { charging, band: 10, reading, critical: false, must_charge: false };
         let mut g = Gauge::default();
         let (p, fresh) = g.feed(&b(false, 0xD0FD));
-        assert!(fresh && p == 14);
+        assert!(fresh && p == 11);
         // Plugging in lifts the reading ~0x660; the gauge doesn't jump w/ it
         let (p, _) = g.feed(&b(true, 0xD0FD + 0x660));
-        assert_eq!(p, 14);
-        assert_eq!(g.feed(&b(true, 0xD600 + 0x660)).0, 33);
+        assert_eq!(p, 11);
+        assert_eq!(g.feed(&b(true, 0xD600 + 0x660)).0, 31);
         // A dip while charging doesn't take it back down
-        assert_eq!(g.feed(&b(true, 0xD500 + 0x660)).0, 33);
+        assert_eq!(g.feed(&b(true, 0xD500 + 0x660)).0, 31);
         // Unplugged: starts over from the resting reading, then only goes down
         let (p, fresh) = g.feed(&b(false, 0xD580));
-        assert!(fresh && p == 31);
-        assert_eq!(g.feed(&b(false, 0xD700)).0, 31);
-        assert_eq!(g.feed(&b(false, 0xD400)).0, 25);
+        assert!(fresh && p == 29);
+        assert_eq!(g.feed(&b(false, 0xD700)).0, 29);
+        assert_eq!(g.feed(&b(false, 0xD400)).0, 23);
         // Back after charging elsewhere
         let (p, fresh) = g.feed(&b(false, 0xE000));
-        assert!(fresh && p == 70);
+        assert!(fresh && p == 67);
     }
 
     #[test]
@@ -1371,6 +1470,13 @@ mod tests {
         assert!(lit.contains(DARK.green) && !lit.contains(DARK.stroke));
         let dim = Icon::ChargingDim.svg(&DARK);
         assert!(dim.contains(DARK.green) && dim.contains(DARK.stroke));
+        // Same for the critical mark, on a red outline
+        assert_eq!(Icon::Critical.next_frame(), Some(Icon::CriticalDim));
+        assert_eq!(Icon::CriticalDim.next_frame(), Some(Icon::Critical));
+        assert_eq!(Icon::keep_frame(Icon::Critical, Some(Icon::CriticalDim)), Icon::CriticalDim);
+        let dim = Icon::CriticalDim.svg(&LIGHT);
+        assert_eq!(dim.matches(LIGHT.red).count(), 1);
+        assert_eq!(dim.matches(LIGHT.stroke).count(), 2);
     }
 
     #[test]
@@ -1390,12 +1496,26 @@ mod tests {
     }
 
     #[test]
+    fn shunned_line() {
+        assert_eq!(controller_line(None, None, None), "No controllers connected");
+        let sh = |model: Option<&str>| Shunned { mac: [0; 6], model: model.map(Into::into) };
+        assert_eq!(controller_line(None, None, Some(&sh(Some("nVidiaBlake")))), "nVidiaBlake (shunned)");
+        assert_eq!(controller_line(None, None, Some(&sh(None))), "Controller (shunned)");
+        assert_eq!(controller_line(None, None, Some(&sh(Some("Pad&Co")))), "Pad&&Co (shunned)");
+        // A connected one wins
+        let c = Connected { model: Some("Pad&Co".into()), port: Some(4), ..Default::default() };
+        assert_eq!(controller_line(Some(&c), None, Some(&sh(None))), "Pad&&Co: Port #4");
+    }
+
+    #[test]
     fn icon_choice() {
         let b = |band, charging, critical| Battery { charging, band, reading: 0xD500, critical, must_charge: false };
         assert_eq!(Icon::of(&b(100, false, false), 80), Icon::Full);
+        assert_eq!(Icon::of(&b(75, false, false), 92), Icon::Full);
         assert_eq!(Icon::of(&b(50, false, false), 50), Icon::Medium);
         assert_eq!(Icon::of(&b(25, false, false), 30), Icon::Low);
         assert_eq!(Icon::of(&b(10, false, false), 12), Icon::Empty);
+        assert_eq!(Icon::of(&b(0, false, false), 3), Icon::Empty);
         assert_eq!(Icon::of(&b(10, false, true), 2), Icon::Critical);
         assert_eq!(Icon::of(&b(10, true, true), 2), Icon::Charging);
         assert_eq!(Icon::of(&b(100, true, false), 99), Icon::Charging);
