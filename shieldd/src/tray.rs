@@ -107,6 +107,8 @@ const CHARGE_LIFT: u16 = 0x0660;
 const CHARGED_DROP: u16 = 0x0180;
 /// Only from this high; lower down, a dip under load isn't the charger stopping
 const CHARGED_PEAK: u16 = 0xF200;
+/// And only once it's stayed down this long; a rumble or audio burst comes back up
+const CHARGED_DROP_FOR: Duration = Duration::from_secs(10);
 /// Plugged in already full, the charger may not top it off at all: 0xF0A8 at rest -> 0xF2C0 and
 /// flat, light green, on 2026-10-09. A top-up starts ~10 s in and lifts it ~0x410 over rest;
 /// one that isn't full, ~0x660. So full at rest and still under this lift this long after
@@ -135,10 +137,14 @@ struct Gauge {
     charging: Option<bool>,
     /// Highest reading on the charger since it was plugged in, 0 off it
     peak: u16,
-    /// Last reading off the charger, 0 if none
+    /// Last reading off the charger this connection, 0 if none
     rest: u16,
-    /// When it was plugged in, and whether the IDLE_AFTER look has been asked for
-    plugged: Option<(Instant, bool)>,
+    /// When it was plugged in this connection
+    plugged: Option<Instant>,
+    /// When the reading fell CHARGED_DROP below the peak, if it's still down
+    dropped: Option<Instant>,
+    /// When to look again w/o a new reading, since none may come: IDLE_AFTER or CHARGED_DROP_FOR in
+    look_at: Option<Instant>,
 }
 
 impl Gauge {
@@ -148,14 +154,18 @@ impl Gauge {
         if !b.charging {
             (self.peak, self.rest, self.plugged) = (0, b.reading, None);
         } else if switched {
-            (self.peak, self.plugged) = (b.reading, Some((now, false)));
+            (self.peak, self.plugged) = (b.reading, Some(now));
         } else {
             self.peak = self.peak.max(b.reading);
         }
-        let let_go = self.peak >= CHARGED_PEAK && self.peak - b.reading >= CHARGED_DROP;
+        let down = b.charging && self.peak >= CHARGED_PEAK && self.peak - b.reading >= CHARGED_DROP;
+        self.dropped = if down { self.dropped.or(Some(now)) } else { None };
+        let let_go = self.dropped.is_some_and(|t| now >= t + CHARGED_DROP_FOR);
         let idle = self.rest >= CURVE[CURVE.len() - 1].0
-            && self.plugged.is_some_and(|(t, _)| now >= t + IDLE_AFTER)
+            && self.plugged.is_some_and(|t| now >= t + IDLE_AFTER)
             && self.peak < self.rest.saturating_add(IDLE_LIFT);
+        let due = [self.plugged.map(|t| t + IDLE_AFTER), self.dropped.map(|t| t + CHARGED_DROP_FOR)];
+        self.look_at = due.into_iter().flatten().filter(|&t| t > now).min();
         let p = match b.charging {
             true if let_go || idle => 100,
             true => charging_percent(b.reading),
@@ -174,15 +184,19 @@ impl Gauge {
         (pct, fresh)
     }
 
-    /// Once per plug-in, IDLE_AFTER in: time for another look, since no new reading may come
+    /// Time for another look, once per look_at
     fn look_due(&mut self, now: Instant) -> bool {
-        match &mut self.plugged {
-            Some((t, looked)) if !*looked && now >= *t + IDLE_AFTER => {
-                *looked = true;
-                true
-            }
-            _ => false,
+        let due = self.look_at.is_some_and(|t| now >= t);
+        if due {
+            self.look_at = None;
         }
+        due
+    }
+
+    /// The controller's gone: what the charger did belongs to that connection. The percent
+    /// stays, to tell a charge elsewhere.
+    fn forget_charger(&mut self) {
+        (self.peak, self.rest, self.plugged, self.dropped, self.look_at) = (0, 0, None, None, None);
     }
 }
 
@@ -363,8 +377,6 @@ impl Icon {
             Icon::DisconnectedRed | Icon::Charged | Icon::Critical | Icon::Empty => {
                 svg.replace("#000000", p.accent(accent))
             }
-            // Charging's outline w/ the bolt lit green
-            Icon::ChargingLit => paint(svg, p.stroke, p.green),
             // Critical's outline w/ the mark dimmed to the stroke color
             Icon::CriticalDim => paint(svg, p.red, p.stroke),
             _ => colorize(svg, p, accent),
@@ -1269,6 +1281,7 @@ impl State {
                 None => "SHIELD controller: not connected",
             };
             self.pct = None;
+            self.gauge.forget_charger();
             // Flashing only w/ nothing connected, and only for a bit
             let icon = if self.flashing(now) { self.animate(Icon::Disconnected, now) } else { Icon::Disconnected };
             self.show(icon, msg, Some(tip));
@@ -1611,8 +1624,9 @@ fn about(hwnd: HWND) {
          Native Windows host for the 2015 NVIDIA SHIELD controller.\n\n\
          shieldd comes with ABSOLUTELY NO WARRANTY. It is free software, and you are welcome to \
          redistribute it under the terms of the GNU General Public License, version 2 only.\n\n\
-         Includes code derived from rtw88, (c) 2018-2024 Realtek Corporation, and from ozwpan, \
-         (c) 2011 Ozmo Inc., both under GPL-2.0. Embeds Realtek's RTL8821A firmware, (c) 2010 Realtek \
+         Includes code derived from rtw88, (c) 2018-2024 Realtek Corporation, from Realtek's \
+         RTL8812AU/8821AU driver and its halmac layer, (c) Realtek Corporation, and from ozwpan, \
+         (c) 2011 Ozmo Inc., all under GPL-2.0. Embeds Realtek's RTL8821A firmware, (c) 2010 Realtek \
          Semiconductor Corporation, unmodified under its own redistribution license, provided AS IS \
          w/o warranty. Tray icons from Ikono Bold Line Icons, (c) Will Kelly, and Clarity, (c) VMware, \
          Inc., both MIT. Rust crates under MIT, Apache-2.0, BSD and similar licenses.\n\n\
@@ -1728,9 +1742,19 @@ mod tests {
         g.feed(&b(false, 0xF042), t0);
         assert_eq!(g.feed(&b(true, 0xF248), t0).0, 94);
         assert_eq!(g.feed(&b(true, 0xF43D), t0).0, 97);
-        assert_eq!(g.feed(&b(true, 0xF23B), t0).0, 100);
+        // Down, but not for long enough yet
+        assert_eq!(g.feed(&b(true, 0xF23B), t0).0, 97);
+        let later = t0 + CHARGED_DROP_FOR;
+        assert!(g.look_due(later));
+        assert_eq!(g.feed(&b(true, 0xF23B), later).0, 100);
         // And stays there
-        assert_eq!(g.feed(&b(true, 0xF2A0), t0).0, 100);
+        assert_eq!(g.feed(&b(true, 0xF2A0), later).0, 100);
+        // Up again before CHARGED_DROP_FOR: a dip under load
+        let mut g = Gauge::default();
+        g.feed(&b(true, 0xF43D), t0);
+        g.feed(&b(true, 0xF23B), t0);
+        g.feed(&b(true, 0xF430), t0 + Duration::from_secs(3));
+        assert!(g.feed(&b(true, 0xF23B), t0 + Duration::from_secs(11)).0 < 100);
         // A dip under load lower down is just a dip
         let mut g = Gauge::default();
         g.feed(&b(true, 0xF100), t0);
@@ -1770,6 +1794,12 @@ mod tests {
         let mut g = Gauge::default();
         g.feed(&b(true, 0xF2C0), t0);
         assert!(g.feed(&b(true, 0xF2C0), later).0 < 100);
+        // Full at rest, gone, drained elsewhere, back on the charger: that rest was another time
+        let mut g = Gauge::default();
+        g.feed(&b(false, 0xF0A8), t0);
+        g.forget_charger();
+        g.feed(&b(true, 0xDE00), t0);
+        assert!(g.feed(&b(true, 0xDE00), later).0 < 100);
     }
 
     #[test]
