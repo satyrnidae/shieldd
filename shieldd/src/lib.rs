@@ -15,12 +15,14 @@
 
 #[cfg(windows)]
 mod background;
+#[cfg_attr(not(windows), allow(dead_code, reason = "only the Windows host uses it so far"))]
+mod base64;
 mod civil;
 #[cfg(windows)]
 mod controller;
 #[cfg(windows)]
 mod dpapi;
-#[cfg(windows)]
+#[cfg_attr(not(windows), allow(dead_code, reason = "only the Windows host uses it so far"))]
 mod files;
 #[cfg(windows)]
 mod known_clients;
@@ -39,7 +41,7 @@ mod receiver;
 mod transmit;
 #[cfg(windows)]
 mod tray;
-#[cfg(windows)]
+#[cfg_attr(not(windows), allow(dead_code, reason = "only the Windows host uses it so far"))]
 mod vban;
 
 use std::net::SocketAddr;

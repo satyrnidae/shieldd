@@ -126,7 +126,7 @@ The group is saved to `--conf`, which defaults to the user's settings folder:
 
 A previous file is kept next to it as `p2p.conf.<unix time>.bak`. The file is in
 wpa_supplicant's P2P format, except that the key is sealed w/ Windows DPAPI as
-`psk=dpapi:<hex>`: only the Windows user who saved it can read it, and only on that machine. A
+`psk=dpapi:<base64>`: only the Windows user who saved it can read it, and only on that machine. A
 plain `psk=`, a quoted passphrase or 64 hex digits, is sealed in place the first time it's read.
 Moving to another machine or user means pairing again. The key is never logged.
 

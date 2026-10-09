@@ -1,5 +1,5 @@
 //! The controller's saved group, in wpa_supplicant P2P config form: read for hosting, written
-//! by --pair. The key is sealed w/ DPAPI, `psk=dpapi:<hex>`, so only this Windows user can read
+//! by --pair. The key is sealed w/ DPAPI, `psk=dpapi:<base64>`, so only this Windows user can read
 //! it; a plain `psk=` from an older or hand-made file gets sealed the first time it's read.
 
 use std::ops::Range;
@@ -28,6 +28,9 @@ pub enum Psk {
 }
 
 const SEALED: &str = "dpapi:";
+/// Every DPAPI blob opens w/ its version and provider GUID; in hex, it's a seal from before
+/// base64, read and then sealed again
+const SEALED_HEX: &str = "01000000d08c9ddf";
 
 impl Psk {
     pub fn pmk(&self, ssid: &str) -> rtlusb::wpa::Pmk {
@@ -48,7 +51,11 @@ impl Psk {
     /// A `psk=` value, sealed or not
     fn parse(s: &str) -> Result<Psk> {
         let Some(sealed) = s.strip_prefix(SEALED) else { return Psk::parse_plain(s) };
-        let plain = dpapi::unprotect(&unhex(sealed).context("sealed psk isn't hex")?)?;
+        let blob = match sealed.starts_with(SEALED_HEX) {
+            true => unhex(sealed).context("sealed psk isn't hex")?,
+            false => crate::base64::decode(sealed).context("sealed psk isn't base64")?,
+        };
+        let plain = dpapi::unprotect(&blob)?;
         Psk::parse_plain(std::str::from_utf8(&plain).context("sealed psk isn't text")?)
     }
 
@@ -68,7 +75,7 @@ impl Psk {
             Psk::Passphrase(p) => format!("\"{p}\""),
             Psk::Pmk(k) => crate::hex(k),
         };
-        Ok(format!("{SEALED}{}", crate::hex(&dpapi::protect(plain.as_bytes())?)))
+        Ok(format!("{SEALED}{}", crate::base64::encode(&dpapi::protect(plain.as_bytes())?)))
     }
 }
 
@@ -153,7 +160,8 @@ fn parse(text: &str) -> Result<Found> {
             None => DEFAULT_CHANNEL,
         };
         let group = Group { ssid: ssid.trim_matches('"').to_owned(), psk: Psk::parse(psk)?, channel };
-        return Ok(Found { group, psk_at, sealed: psk.starts_with(SEALED) });
+        let sealed = psk.strip_prefix(SEALED).is_some_and(|s| !s.starts_with(SEALED_HEX));
+        return Ok(Found { group, psk_at, sealed });
     }
     bail!("no mode=3 network block")
 }
@@ -237,6 +245,20 @@ mod tests {
         assert_eq!(format!("{g:?}").matches(hex).count(), 0);
         // Too short to be either
         assert!(parse("network={\nssid=\"DIRECT-0S\"\npsk=0123abcd\nmode=3\n}\n").is_err());
+    }
+
+    #[test]
+    fn a_hex_seal_is_read_and_sealed_again() {
+        let psk = Psk::Passphrase("pass1234".into());
+        let blob = dpapi::protect(b"\"pass1234\"").unwrap();
+        assert!(crate::hex(&blob).starts_with(SEALED_HEX));
+        let conf = format!("network={{\nssid=\"DIRECT-0S\"\npsk={SEALED}{}\nmode=3\n}}\n", crate::hex(&blob));
+        let f = parse(&conf).unwrap();
+        assert_eq!(f.group.psk, psk);
+        assert!(!f.sealed);
+        // And base64 seals count as sealed
+        let f = parse(&format!("network={{\nssid=\"DIRECT-0S\"\npsk={}\nmode=3\n}}\n", psk.seal().unwrap())).unwrap();
+        assert!(f.sealed && f.group.psk == psk);
     }
 
     #[test]
