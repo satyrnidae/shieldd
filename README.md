@@ -43,7 +43,7 @@ Works:
 - Battery in the tray, colored for the taskbar theme, w/ a notification when it goes critical;
   a short rumble when charging starts. Rumble cuts out near empty, and a controller that
   connects flat is sent away until it's plugged in.
-- Tray menu: pair, identify, disconnect, VBAN audio on/off
+- Tray menu: pair, identify, rename, disconnect, VBAN audio on/off, about
 - Runs at login, windowless, and picks the adapter back up after a replug
 
 Not yet, or untested:
@@ -131,8 +131,10 @@ The group is saved to `--conf`, which defaults to the user's settings folder:
 
 A previous file is kept next to it as `p2p.conf.<unix time>.bak`. The file is in
 wpa_supplicant's P2P format and holds the passphrase in plain text; the passphrase is never
-logged. The model name each controller gives while pairing goes in `p2p.models` alongside,
-for the tray.
+logged. Controller names go in `known-clients` alongside, for the tray: one a line, the MAC,
+whitespace, then the name, like a hosts file, w/ `#` lines as comments. A controller starts out
+named for the model it gives while pairing, `nVidiaBlake` for this one. An older `p2p.models` is
+moved over on first run.
 
 Before pairing, shieldd spends ~4.5 s listening to channels 1-11 and hosts the new group on
 the quietest of 1, 6 and 11, counting both how loud and how busy each channel and its
@@ -159,16 +161,19 @@ Options worth knowing, the rest in `shieldd --help`:
 
 ### Tray
 
-The icon shows the controller's battery: a flashing bolt while it charges, an all-green full
-battery once it's charged, an all-red one w/ a flashing warning mark when it's critical. A
-crossed-out signal flashes red for 5 s at startup and when a controller drops off on its own
-rather than sent away. A spinner turns while one is joining, and a Wi-Fi signal lights up blue,
-a bar at a time, while pairing. A controller joining or leaving Wi-Fi plays Windows' Device
-Connect or Device Disconnect sound, as a USB device would.
+The icon shows the controller's battery: a green bolt while it charges, flashing for 5 s when
+it's plugged in; an all-green full battery once it's charged; and an all-red one w/ a flashing
+warning mark when it's critical. A crossed-out signal flashes red for 5 s at startup and when a
+controller drops off on its own rather than sent away. A spinner turns while one is joining, and
+a Wi-Fi signal lights up blue, a bar at a time, while pairing. A controller joining or leaving
+Wi-Fi plays Windows' Device Connect or Device Disconnect sound, as a USB device would.
 
 Click for a menu. Its title shows the version, how many controllers are connected, and the
-group's name and channel. The controller line shows its model, XInput port and battery, and its
-MAC on hover; clicking it buzzes the controller twice, to tell which one it is. The rest:
+group's name and channel; clicking the version opens an About box w/ the build date, license and
+notices. The controller line shows its name, XInput port and battery, and its MAC on hover.
+Clicking it buzzes the controller twice, to tell which one it is; right-clicking it renames it,
+up to 15 characters, saved to `known-clients`. Clicking the tray icon again closes the menu. The
+rest:
 - **Pair controller...**, **Re-pair controller...** while one is connected: drops the current
   controller and pairs a new one on a new group, as `--pair` does, after a confirmation, since
   every controller paired to the old group has to pair again. Back to the saved group if nothing

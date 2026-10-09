@@ -24,6 +24,7 @@ use windows::Win32::Media::Audio::{PlaySoundW, SND_ALIAS, SND_ASYNC, SND_NODEFAU
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
 use windows::Win32::System::Threading::GetCurrentThreadId;
+use windows::Win32::UI::Controls::EM_LIMITTEXT;
 use windows::Win32::UI::Controls::{
     ICC_BAR_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, TOOLTIPS_CLASSW, TTF_ABSOLUTE, TTF_TRACK,
     TTM_ADDTOOLW, TTM_SETMAXTIPWIDTH, TTM_TRACKACTIVATE, TTM_TRACKPOSITION, TTM_UPDATETIPTEXTW, TTS_ALWAYSTIP,
@@ -40,15 +41,20 @@ use windows::Win32::UI::Shell::{
     NIM_MODIFY, NOTIFY_ICON_MESSAGE, NOTIFYICONDATAW, Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CW_USEDEFAULT, CreateIconIndirect, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon,
-    DestroyMenu, DestroyWindow, DispatchMessageW, EndDialog, EndMenu, EnumThreadWindows, GetClassNameW, GetCursorPos,
-    GetMessageW, HICON, HWND_TOPMOST, ICONINFO, IDCANCEL, IDOK, KillTimer, MB_DEFBUTTON2, MB_ICONINFORMATION,
-    MB_ICONWARNING, MB_OK, MB_OKCANCEL, MB_SETFOREGROUND, MENU_ITEM_FLAGS, MF_DISABLED, MF_GRAYED, MF_SEPARATOR,
-    MF_STRING, MSG, MessageBoxW, PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SM_CXSMICON,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SendMessageW, SetForegroundWindow, SetTimer, SetWindowPos, TPM_RETURNCMD,
-    TPM_RIGHTBUTTON, TrackPopupMenu, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CONTEXTMENU, WM_ENTERIDLE, WM_LBUTTONUP,
-    WM_MENUSELECT, WM_NULL, WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_EX_TOPMOST, WS_POPUP,
+    AppendMenuW, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, CW_USEDEFAULT, CreateIconIndirect, CreatePopupMenu, CreateWindowExW,
+    DS_CENTER, DS_MODALFRAME, DS_SETFONT, DefWindowProcW, DestroyIcon, DestroyMenu, DestroyWindow,
+    DialogBoxIndirectParamW, DispatchMessageW, ES_AUTOHSCROLL, EndDialog, EndMenu, EnumThreadWindows, GetClassNameW,
+    GetCursorPos, GetDlgItemTextW, GetMenuItemID, GetMenuState, GetMessageW, HICON, HMENU, HWND_TOPMOST, ICONINFO,
+    IDCANCEL, IDOK, KillTimer, MB_DEFBUTTON2, MB_ICONINFORMATION, MB_ICONWARNING, MB_OK, MB_OKCANCEL, MB_SETFOREGROUND,
+    MENU_ITEM_FLAGS, MF_BYPOSITION, MF_DISABLED, MF_GRAYED, MF_SEPARATOR, MF_STRING, MSG, MessageBoxW, PostMessageW,
+    PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SM_CXSMICON, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SendDlgItemMessageW, SendMessageW, SetDlgItemTextW, SetForegroundWindow, SetTimer, SetWindowPos, TPM_RETURNCMD,
+    TrackPopupMenu, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_COMMAND, WM_CONTEXTMENU, WM_ENTERIDLE, WM_INITDIALOG,
+    WM_LBUTTONUP, WM_MENURBUTTONUP, WM_MENUSELECT, WM_NULL, WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_BORDER, WS_CAPTION,
+    WS_CHILD, WS_EX_TOPMOST, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
+
+use crate::known_clients::MAX_NAME;
 use windows::core::{BOOL, PCWSTR, PWSTR, w};
 
 //region Battery
@@ -185,9 +191,10 @@ const PAIRING_FRAME: Duration = Duration::from_millis(400);
 /// How long each half of a flash shows: the charging bolt, the critical mark, the disconnected
 /// icon
 const FLASH_FRAME: Duration = Duration::from_millis(800);
-/// The disconnected icon flashes this long, at startup and each time a controller leaves on its
-/// own, rather than sent away; then it holds still
-const DISCONNECTED_FLASH: Duration = Duration::from_secs(5);
+/// How long a flash runs before the icon holds still: the disconnected one at startup and each
+/// time a controller leaves on its own, rather than sent away; the charging bolt each time
+/// charging starts
+const FLASH_FOR: Duration = Duration::from_secs(5);
 /// The wifi icon's elements, by class, in the order they light up: the dot, then the arcs
 /// inside out
 const PAIRING_ORDER: [&str; 4] = ["path-1", "path-4", "path-3", "path-2"];
@@ -497,14 +504,15 @@ pub struct Status {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Shunned {
     pub mac: [u8; 6],
-    pub model: Option<String>,
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Connected {
     pub mac: [u8; 6],
-    /// From WPS when it paired; unknown for one paired before shieldd kept track
-    pub model: Option<String>,
+    /// From known-clients: its model at pairing, or what it was renamed to. Unknown for one
+    /// paired before shieldd kept track.
+    pub name: Option<String>,
     /// XInput port, 1-4, once Windows has assigned one
     pub port: Option<u8>,
     /// Once the first status answer is in
@@ -512,12 +520,14 @@ pub struct Connected {
 }
 
 /// Picked from the menu
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Pair,
     /// On or off
     Vban(bool),
     Identify,
+    /// The controller w/ this MAC goes by this name now, already cleaned up
+    Rename([u8; 6], String),
     Disconnect,
     Exit,
 }
@@ -635,7 +645,14 @@ mod id {
     pub const CONTROLLER: usize = 3;
     pub const DISCONNECT: usize = 4;
     pub const EXIT: usize = 5;
+    /// The title line
+    pub const ABOUT: usize = 6;
+    /// Not an item: the controller line, right-clicked
+    pub const RENAME: usize = 7;
 }
+
+/// A tray click this soon after the menu closed w/o a pick is the click that closed it
+const MENU_CLOSE_GRACE: Duration = Duration::from_millis(300);
 
 // The window procedure flags what happened, or runs tick w/ State at hand. Everything the
 // tray does runs off window messages, which an open menu or message box still dispatches.
@@ -654,6 +671,12 @@ thread_local! {
     static MENU_SHOWN: RefCell<Option<Vec<Item>>> = const { RefCell::new(None) };
     /// The open menu was closed to show new items; open it again
     static MENU_REOPEN: Cell<bool> = const { Cell::new(false) };
+    /// When the menu last closed w/o a pick
+    static MENU_DISMISSED: Cell<Option<Instant>> = const { Cell::new(None) };
+    /// What a right-click in the open menu picked
+    static RIGHT_PICK: Cell<Option<usize>> = const { Cell::new(None) };
+    /// The rename dialog's text, in and out
+    static RENAME_TEXT: RefCell<Vec<u16>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Runs `f` on the tray's state, unless it's already in use further up the stack
@@ -663,7 +686,14 @@ fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> {
 
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     if msg == WM_TRAY && matches!(lp.0 as u32 & 0xFFFF, WM_LBUTTONUP | WM_RBUTTONUP | WM_CONTEXTMENU) {
-        MENU_WANTED.set(true);
+        // The click that closed the menu, arriving after it: that's all it was for
+        let closing = MENU_SHOWN.with_borrow(Option::is_some)
+            || MENU_DISMISSED.get().is_some_and(|t| t.elapsed() < MENU_CLOSE_GRACE);
+        if !closing {
+            MENU_WANTED.set(true);
+        }
+    } else if msg == WM_MENURBUTTONUP {
+        right_click(HMENU(lp.0 as *mut _), wp.0 as i32);
     } else if msg == WM_MENUSELECT {
         // Item ID in the low word; the menu, or none once it closes
         show_tip(hwnd, wp.0 & 0xFFFF == id::CONTROLLER && lp.0 != 0);
@@ -685,6 +715,19 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
     }
     // SAFETY: the arguments we were called w/
     unsafe { DefWindowProcW(hwnd, msg, wp, lp) }
+}
+
+/// A right-click on item `pos` of the open menu: renames on the controller line, and picks
+/// anything else as a left-click would
+fn right_click(m: HMENU, pos: i32) {
+    // SAFETY: the open menu, from WM_MENURBUTTONUP
+    let (id, state) = unsafe { (GetMenuItemID(m, pos) as usize, GetMenuState(m, pos as u32, MF_BYPOSITION)) };
+    if state & (MF_GRAYED.0 | MF_DISABLED.0 | MF_SEPARATOR.0) != 0 || id == 0 {
+        return;
+    }
+    RIGHT_PICK.set(Some(if id == id::CONTROLLER { id::RENAME } else { id }));
+    // SAFETY: plain call; closes the menu this thread has open
+    let _ = unsafe { EndMenu() };
 }
 
 /// Cancels any message box and closes any menu open on this thread
@@ -741,6 +784,10 @@ struct State {
     first: bool,
     /// The disconnected icon flashes until then
     flash_until: Option<Instant>,
+    /// Last refresh found the controller on the charger
+    was_charging: bool,
+    /// The charging bolt flashes until then
+    charge_flash_until: Option<Instant>,
     commands: Sender<Command>,
 }
 
@@ -796,6 +843,8 @@ fn run(rx: Receiver<Msg>, commands: Sender<Command>) -> Result<()> {
         had_controller: false,
         first: true,
         flash_until: None,
+        was_charging: false,
+        charge_flash_until: None,
         commands,
     };
     st.load_icons()?;
@@ -839,11 +888,16 @@ fn menu(hwnd: HWND) {
         };
         TIP_TEXT.set(tip.as_deref().map(wide).unwrap_or_default());
         MENU_REOPEN.set(false);
+        RIGHT_PICK.set(None);
         MENU_SHOWN.set(Some(items.clone()));
         let picked = track(hwnd, &items, at);
         MENU_SHOWN.set(None);
         if picked == 0 && MENU_REOPEN.replace(false) && !QUITTING.get() {
             continue;
+        }
+        let picked = RIGHT_PICK.take().filter(|_| picked == 0).unwrap_or(picked);
+        if picked == 0 {
+            MENU_DISMISSED.set(Some(Instant::now()));
         }
         break (picked, s, commands);
     };
@@ -854,13 +908,20 @@ fn menu(hwnd: HWND) {
         id::PAIR if confirm_pair(hwnd, connected) => Command::Pair,
         id::VBAN => Command::Vban(!s.vban),
         id::CONTROLLER => Command::Identify,
+        id::RENAME => {
+            let Some(c) = &s.controller else { return };
+            let Some(name) = rename(hwnd, c) else { return };
+            Command::Rename(c.mac, name)
+        }
         id::DISCONNECT => Command::Disconnect,
         id::EXIT => Command::Exit,
+        id::ABOUT => return about(hwnd),
         _ => return,
     };
     debug!(?cmd, "tray menu");
+    let vban_on = cmd == Command::Vban(true);
     let _ = commands.send(cmd);
-    if cmd == Command::Vban(true) && !QUITTING.get() {
+    if vban_on && !QUITTING.get() {
         let text = format!(
             "Controller audio over VBAN, for Voicemeeter:\n\n\
              Mic: stream {}, sent to 127.0.0.1 port {}\n\
@@ -899,7 +960,7 @@ fn track(hwnd: HWND, items: &[Item], at: POINT) -> usize {
         // A menu underlines its shortcut letters only after keyboard input, and the window's UI
         // state doesn't count, so a Shift tap it is. Lands on our window, which is in front.
         tap_shift();
-        let picked = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, at.x, at.y, None, hwnd, None);
+        let picked = TrackPopupMenu(m, TPM_RETURNCMD, at.x, at.y, None, hwnd, None);
         let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
         let _ = DestroyMenu(m);
         picked.0 as usize
@@ -1021,30 +1082,30 @@ fn wide(s: &str) -> Vec<u16> {
 }
 
 /// `s` as menu text, where a lone & would underline the next letter. For anything we didn't
-/// write: a model name is whatever the controller said over WPS.
+/// write: a controller's name starts out as whatever it said over WPS.
 fn menu_text(s: &str) -> String {
     s.replace('&', "&&")
 }
 
-fn menu_model(model: Option<&str>) -> String {
-    menu_text(model.unwrap_or("Controller"))
+fn menu_name(name: Option<&str>) -> String {
+    menu_text(name.unwrap_or("Controller"))
 }
 
 /// The controller line of the menu
 fn controller_line(c: Option<&Connected>, pct: Option<u8>, shunned: Option<&Shunned>) -> String {
     let Some(c) = c else {
         return match shunned {
-            Some(s) => format!("{} (shunned)", menu_model(s.model.as_deref())),
+            Some(s) => format!("{} (shunned)", menu_name(s.name.as_deref())),
             None => "No controllers connected".into(),
         };
     };
-    let model = menu_model(c.model.as_deref());
+    let name = menu_name(c.name.as_deref());
     let port = c.port.map_or_else(|| "?".into(), |p| p.to_string());
     match (c.battery, pct) {
-        (Some(b), Some(p)) if b.charging && p >= 100 => format!("{model}: Port #{port} ({p}%) (charged)"),
-        (Some(b), Some(p)) if b.charging => format!("{model}: Port #{port} ({p}%) (charging)"),
-        (Some(_), Some(p)) => format!("{model}: Port #{port} ({p}%)"),
-        _ => format!("{model}: Port #{port}"),
+        (Some(b), Some(p)) if b.charging && p >= 100 => format!("{name}: Port #{port} ({p}%) (charged)"),
+        (Some(b), Some(p)) if b.charging => format!("{name}: Port #{port} ({p}%) (charging)"),
+        (Some(_), Some(p)) => format!("{name}: Port #{port} ({p}%)"),
+        _ => format!("{name}: Port #{port}"),
     }
 }
 
@@ -1083,13 +1144,19 @@ impl State {
         self.had_controller |= s.controller.is_some();
         let left = self.had_controller && s.shunned.is_none();
         if disconnected && !self.was_disconnected && (self.first || left) {
-            self.flash_until = Some(now + DISCONNECTED_FLASH);
+            self.flash_until = Some(now + FLASH_FOR);
         }
         if disconnected {
             self.had_controller = false;
         }
         self.was_disconnected = disconnected;
         self.first = false;
+        let charging =
+            !s.pairing && !s.joining && s.controller.as_ref().and_then(|c| c.battery).is_some_and(|b| b.charging);
+        if charging && !self.was_charging {
+            self.charge_flash_until = Some(now + FLASH_FOR);
+        }
+        self.was_charging = charging;
         if s.pairing {
             self.pct = None;
             let icon = self.animate(Icon::Pairing(0), now);
@@ -1132,8 +1199,13 @@ impl State {
         if alert {
             self.critical_alerted = true;
         }
-        let icon = self.animate(Icon::of(&b, shown), now);
-        let tip = match icon {
+        // Plugged in: the bolt flashes for a bit, already charged or not, then the icon settles
+        let settled = Icon::of(&b, shown);
+        let icon = match settled {
+            Icon::Charging | Icon::Charged if self.charge_flashing(now) => self.animate(Icon::Charging, now),
+            _ => settled,
+        };
+        let tip = match settled {
             Icon::Charged => format!("SHIELD controller: {shown}% (charged)"),
             _ if b.charging => format!("SHIELD controller: {shown}% (charging)"),
             _ => format!("SHIELD controller: {shown}%"),
@@ -1153,6 +1225,9 @@ impl State {
             // Once the flash is over, back to the plain frame and stay there
             Some(Icon::Disconnected) if !self.flashing(Instant::now()) => None,
             Some(Icon::DisconnectedRed) if !self.flashing(Instant::now()) => Some(Icon::Disconnected),
+            // Likewise the bolt, back to green and still; refresh swaps in Charged if it's full
+            Some(Icon::Charging) if !self.charge_flashing(Instant::now()) => None,
+            Some(Icon::ChargingDim) if !self.charge_flashing(Instant::now()) => Some(Icon::Charging),
             shown => shown.and_then(Icon::next_frame),
         }
     }
@@ -1160,7 +1235,9 @@ impl State {
     /// Until the frame on screen is due to change. The flash's red half ends w/ the flash.
     fn frame_left(&self) -> Duration {
         let Some(i) = self.shown else { return IDLE_TICK };
-        if i == Icon::DisconnectedRed && !self.flashing(Instant::now()) {
+        let now = Instant::now();
+        if (i == Icon::DisconnectedRed && !self.flashing(now)) || (i == Icon::ChargingDim && !self.charge_flashing(now))
+        {
             return Duration::ZERO;
         }
         i.frame_time().saturating_sub(self.frame_at.elapsed())
@@ -1169,6 +1246,11 @@ impl State {
     /// The disconnected icon should be flashing
     fn flashing(&self, now: Instant) -> bool {
         self.was_disconnected && self.flash_until.is_some_and(|t| now < t)
+    }
+
+    /// The charging bolt should be flashing
+    fn charge_flashing(&self, now: Instant) -> bool {
+        self.was_charging && self.charge_flash_until.is_some_and(|t| now < t)
     }
 
     /// The frame of `icon` to show; a new animation starts its clock. The run loop steps it
@@ -1231,14 +1313,16 @@ impl State {
         let connected = s.controller.is_some();
         let gray = |on: bool| if on { MF_STRING } else { MF_STRING | MF_GRAYED };
         let tip = match (&s.controller, &s.shunned) {
-            (Some(c), _) => Some(format!("MAC {}\nClick to identify", crate::adapters::fmt_mac(&c.mac))),
+            (Some(c), _) => {
+                Some(format!("MAC {}\nClick to identify, right-click to rename", crate::adapters::fmt_mac(&c.mac)))
+            }
             // Grayed, so nothing to click
             (None, Some(sh)) => Some(format!("MAC {}", crate::adapters::fmt_mac(&sh.mac))),
             (None, None) => None,
         };
         let title = MF_STRING | MF_DISABLED;
         let mut items: Vec<Item> = vec![
-            (title, 0, concat!("shieldd (v", env!("CARGO_PKG_VERSION"), ")").into()),
+            (MF_STRING, id::ABOUT, concat!("shieldd (v", env!("CARGO_PKG_VERSION"), ")").into()),
             (title, 0, format!(" > {} connected.", u8::from(connected))),
         ];
         if let Some(ssid) = &s.ssid {
@@ -1303,6 +1387,11 @@ impl State {
                 }
             }
         }
+        // The charging flash is over: settle on Charging or Charged, which only refresh knows
+        if self.charge_flash_until.is_some_and(|t| Instant::now() >= t) {
+            self.charge_flash_until = None;
+            self.refresh();
+        }
         if let Some(next) = self.next_frame()
             && self.frame_left().is_zero()
         {
@@ -1320,6 +1409,137 @@ impl State {
         // SAFETY: our window, on its thread; a new SetTimer w/ the same ID replaces the old
         unsafe { SetTimer(Some(self.hwnd), TICK_TIMER, (wait.as_millis() as u32).max(1), None) };
     }
+}
+
+/// The rename dialog's edit box
+const RENAME_EDIT: i32 = 100;
+
+/// Asks for a new name for `c`. Returns it cleaned up, or None if cancelled or left blank.
+fn rename(hwnd: HWND, c: &Connected) -> Option<String> {
+    RENAME_TEXT.set(wide(c.name.as_deref().unwrap_or("")));
+    let prompt = format!("Name for {}, up to {MAX_NAME} characters:", crate::adapters::fmt_mac(&c.mac));
+    let template = rename_template(&prompt);
+    // SAFETY: a complete template, DWORD-aligned, that outlives the call; rename_proc is 'static
+    let r = unsafe {
+        let instance = GetModuleHandleW(None).ok().map(Into::into);
+        DialogBoxIndirectParamW(instance, template.as_ptr().cast(), Some(hwnd), Some(rename_proc), LPARAM(0))
+    };
+    if r != IDOK.0 as isize {
+        return None;
+    }
+    let text = RENAME_TEXT.take();
+    crate::known_clients::clean(&String::from_utf16_lossy(&text))
+}
+
+extern "system" fn rename_proc(dlg: HWND, msg: u32, wp: WPARAM, _: LPARAM) -> isize {
+    // SAFETY: dlg is the dialog, on this thread; the buffers outlive each call
+    unsafe {
+        if msg == WM_INITDIALOG {
+            let text = RENAME_TEXT.with_borrow(Clone::clone);
+            let _ = SetDlgItemTextW(dlg, RENAME_EDIT, PCWSTR(text.as_ptr()));
+            SendDlgItemMessageW(dlg, RENAME_EDIT, EM_LIMITTEXT, WPARAM(MAX_NAME), LPARAM(0));
+            let _ = SetForegroundWindow(dlg);
+            // TRUE: focus to the first tab stop, the edit box, w/ its text selected
+            return 1;
+        }
+        if msg == WM_COMMAND {
+            let id = (wp.0 & 0xFFFF) as i32;
+            if id == IDOK.0 {
+                let mut buf = [0u16; 64];
+                let n = GetDlgItemTextW(dlg, RENAME_EDIT, &mut buf) as usize;
+                RENAME_TEXT.set(buf[..n].to_vec());
+                let _ = EndDialog(dlg, IDOK.0 as isize);
+                return 1;
+            }
+            if id == IDCANCEL.0 {
+                let _ = EndDialog(dlg, IDCANCEL.0 as isize);
+                return 1;
+            }
+        }
+        0
+    }
+}
+
+/// The rename dialog, in dialog units: a prompt, the edit box, then OK and Cancel. Words, as
+/// DialogBoxIndirect reads them, packed into a DWORD-aligned buffer.
+fn rename_template(prompt: &str) -> Vec<u32> {
+    fn dword(w: &mut Vec<u16>, v: u32) {
+        w.extend([v as u16, (v >> 16) as u16]);
+    }
+    fn text(w: &mut Vec<u16>, s: &str) {
+        w.extend(s.encode_utf16().chain([0]));
+    }
+    fn item(w: &mut Vec<u16>, style: u32, rect: [i16; 4], id: u16, class: u16, title: &str) {
+        // Each item starts on a DWORD
+        if w.len() % 2 == 1 {
+            w.push(0);
+        }
+        dword(w, (WS_CHILD | WS_VISIBLE).0 | style);
+        dword(w, 0);
+        w.extend(rect.map(|v| v as u16));
+        w.push(id);
+        // A predefined class, by atom
+        w.extend([0xFFFF, class]);
+        text(w, title);
+        // No creation data
+        w.push(0);
+    }
+    const BUTTON: u16 = 0x80;
+    const EDIT: u16 = 0x81;
+    const STATIC: u16 = 0x82;
+    let mut w = Vec::new();
+    dword(&mut w, (WS_POPUP | WS_CAPTION | WS_SYSMENU).0 | (DS_MODALFRAME | DS_SETFONT | DS_CENTER) as u32);
+    dword(&mut w, 0);
+    // Items, then x, y, width, height
+    w.extend([4, 0, 0, 220, 62]);
+    // No menu, the default class
+    w.extend([0, 0]);
+    text(&mut w, "shieldd: rename controller");
+    w.push(9);
+    text(&mut w, "Segoe UI");
+    item(&mut w, 0, [7, 7, 206, 9], 0xFFFF, STATIC, prompt);
+    let edit = (WS_BORDER | WS_TABSTOP).0 | ES_AUTOHSCROLL as u32;
+    item(&mut w, edit, [7, 19, 206, 14], RENAME_EDIT as u16, EDIT, "");
+    item(&mut w, WS_TABSTOP.0 | BS_DEFPUSHBUTTON as u32, [109, 41, 50, 14], IDOK.0 as u16, BUTTON, "OK");
+    item(&mut w, WS_TABSTOP.0 | BS_PUSHBUTTON as u32, [163, 41, 50, 14], IDCANCEL.0 as u16, BUTTON, "Cancel");
+    if w.len() % 2 == 1 {
+        w.push(0);
+    }
+    w.chunks(2).map(|c| u32::from(c[0]) | u32::from(c[1]) << 16).collect()
+}
+
+/// Version, build, author, and the notices the GPL and the bundled works' licenses ask for
+fn about(hwnd: HWND) {
+    let author = env!("CARGO_PKG_AUTHORS").replace(':', ", ");
+    let text = format!(
+        "shieldd v{version}\n\
+         Built {built}\n\
+         Copyright (C) 2026 {author}\n\n\
+         Native Windows host for the 2015 NVIDIA SHIELD controller.\n\n\
+         shieldd comes with ABSOLUTELY NO WARRANTY. It is free software, and you are welcome to \
+         redistribute it under the terms of the GNU General Public License, version 2 only.\n\n\
+         Includes code derived from rtw88, (c) 2018-2024 Realtek Corporation, and from ozwpan, \
+         (c) 2011 Ozmo Inc., both under GPL-2.0. Embeds Realtek's RTL8821A firmware, (c) 2010 Realtek \
+         Semiconductor Corporation, unmodified under its own redistribution license, provided AS IS \
+         w/o warranty. Tray icons from Ikono Bold Line Icons, (c) Will Kelly, and Clarity, (c) VMware, \
+         Inc., both MIT. Rust crates under MIT, Apache-2.0, BSD and similar licenses.\n\n\
+         Full license texts and copyright notices are in LICENSE and THIRD_PARTY.md, which come w/ \
+         the source.\n\n\
+         Most of shieldd was written by an AI model, Anthropic's Claude, under its maintainer's \
+         direction and testing.",
+        version = env!("CARGO_PKG_VERSION"),
+        built = env!("SHIELDD_BUILD_DATE"),
+    );
+    let text = wide(&text);
+    // SAFETY: text outlives the call
+    unsafe {
+        MessageBoxW(
+            Some(hwnd),
+            PCWSTR(text.as_ptr()),
+            w!("About shieldd"),
+            MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND,
+        )
+    };
 }
 
 /// Pairing throws the current group away, so ask first
@@ -1530,12 +1750,12 @@ mod tests {
     #[test]
     fn shunned_line() {
         assert_eq!(controller_line(None, None, None), "No controllers connected");
-        let sh = |model: Option<&str>| Shunned { mac: [0; 6], model: model.map(Into::into) };
+        let sh = |name: Option<&str>| Shunned { mac: [0; 6], name: name.map(Into::into) };
         assert_eq!(controller_line(None, None, Some(&sh(Some("nVidiaBlake")))), "nVidiaBlake (shunned)");
         assert_eq!(controller_line(None, None, Some(&sh(None))), "Controller (shunned)");
         assert_eq!(controller_line(None, None, Some(&sh(Some("Pad&Co")))), "Pad&&Co (shunned)");
         // A connected one wins
-        let c = Connected { model: Some("Pad&Co".into()), port: Some(4), ..Default::default() };
+        let c = Connected { name: Some("Pad&Co".into()), port: Some(4), ..Default::default() };
         assert_eq!(controller_line(Some(&c), None, Some(&sh(None))), "Pad&&Co: Port #4");
     }
 

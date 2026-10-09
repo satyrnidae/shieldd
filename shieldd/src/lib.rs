@@ -25,7 +25,7 @@ mod controller;
 #[cfg(windows)]
 mod host;
 #[cfg(windows)]
-mod models;
+mod known_clients;
 #[cfg(windows)]
 mod npcap;
 #[cfg(windows)]

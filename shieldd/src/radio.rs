@@ -31,7 +31,7 @@ use crate::host::on_event;
 use crate::outputs::Outputs;
 use crate::tray::{self, Command, Connected, Shunned, Status, Tray};
 use crate::vban::{self, Vban};
-use crate::{Args, hex, models, p2pconf, pair};
+use crate::{Args, hex, known_clients, p2pconf, pair};
 
 /// WPS walk time: how long push-button stays on
 const PAIR_WINDOW: Duration = Duration::from_secs(120);
@@ -134,7 +134,7 @@ impl Shared {
                     Command::Exit => quit.store(true, Ordering::Relaxed),
                     Command::Vban(on) => self.set_vban(on),
                     Command::Pair => self.tray.problem("Can't pair yet", "Plug in the adapter first."),
-                    Command::Identify | Command::Disconnect => {}
+                    Command::Identify | Command::Disconnect | Command::Rename(..) => {}
                 }
             }
             self.tray.update(Status {
@@ -251,12 +251,12 @@ fn run_once(args: &Args, pair: bool, pair_bails: bool, quit: &AtomicBool, sh: &m
     let mut isoc_at: Option<Instant> = None;
     let mut isoc_frame: u8 = 0;
     let mut leaving: Option<Leaving> = None;
-    let mut models = models::load(&args.conf);
+    let mut names = known_clients::load(&args.conf);
     // Since a controller associated, until it's up w/ a battery reading
     let mut joining: Option<Instant> = None;
     // JOIN_TIMEOUT ran out on the controller there now; no spinner for it again
     let mut join_gave_up = false;
-    // Sent away to sleep, w/ its model looked up once. rtlusb's shun says how long.
+    // Sent away to sleep, w/ its name looked up once. rtlusb's shun says how long.
     let mut shunned: Option<Shunned> = None;
     // Paired, but writing --conf failed: when to try again
     let mut save_due: Option<Instant> = sh.unsaved.is_some().then(Instant::now);
@@ -290,11 +290,14 @@ fn run_once(args: &Args, pair: bool, pair_bails: bool, quit: &AtomicBool, sh: &m
             }
             RadioEvent::Paired(sta, model) => {
                 paired = true;
-                if !model.is_empty() {
-                    models.insert(sta, model.to_owned());
-                    if let Err(e) = models::save(&args.conf, &models) {
-                        warn!("couldn't save the controller's model: {e:#}");
+                // Named after its model the first time; a rename, or an earlier pairing, wins
+                if !names.contains_key(&sta)
+                    && let Some(name) = known_clients::clean(model)
+                {
+                    if let Err(e) = known_clients::save(&args.conf, &sta, &name) {
+                        warn!("couldn't save the controller's name: {e:#}");
                     }
+                    names.insert(sta, name);
                 }
                 // The controller has the credential now, so this group is the one it remembers
                 match p2pconf::write(&args.conf, &group) {
@@ -369,6 +372,16 @@ fn run_once(args: &Args, pair: bool, pair_bails: bool, quit: &AtomicBool, sh: &m
                                 ctl.set_streams(args.mic || on, on);
                             }
                             Command::Identify => ctl.identify(),
+                            Command::Rename(mac, name) => match known_clients::save(&args.conf, &mac, &name) {
+                                Ok(()) => {
+                                    info!(sta = %fmt_mac(&mac), name, "renamed");
+                                    names.insert(mac, name);
+                                }
+                                Err(e) => {
+                                    warn!("renaming the controller: {e:#}");
+                                    sh.tray.problem("Couldn't rename the controller", &format!("{e:#}"));
+                                }
+                            },
                             Command::Disconnect => {
                                 if leaving.is_none() && host.say_goodbye() {
                                     info!("disconnecting from the tray; saying goodbye first");
@@ -400,7 +413,7 @@ fn run_once(args: &Args, pair: bool, pair_bails: bool, quit: &AtomicBool, sh: &m
                             info!(sta = %fmt_mac(&peer), acked = host.all_delivered(), "goodbye done, kicking");
                             link.kick(&peer)?;
                             link.shun(&peer, SLEEP_SHUN);
-                            shunned = Some(Shunned { mac: peer, model: models.get(&peer).cloned() });
+                            shunned = Some(Shunned { mac: peer, name: names.get(&peer).cloned() });
                             if let Some(ev) = host.end_session() {
                                 on_event(ev, now, &mut host, &mut ctl, &mut outputs);
                             }
@@ -411,7 +424,7 @@ fn run_once(args: &Args, pair: bool, pair_bails: bool, quit: &AtomicBool, sh: &m
                     }
                     let controller = host.peer().map(|mac| Connected {
                         mac,
-                        model: models.get(&mac).cloned(),
+                        name: names.get(&mac).cloned(),
                         port: outputs.port(),
                         battery: ctl.battery(),
                     });

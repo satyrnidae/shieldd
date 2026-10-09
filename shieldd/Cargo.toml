@@ -2,6 +2,7 @@
 name = "shieldd"
 description = "Windows host for the 2015 NVIDIA SHIELD controller over Wi-Fi Direct + Ozmo, plus the WSL bridge (--transmit / --receiver)"
 version.workspace = true
+authors.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
