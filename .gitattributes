@@ -1,0 +1,2 @@
+# The tree is LF everywhere, whatever core.autocrlf says
+* text=auto eol=lf
