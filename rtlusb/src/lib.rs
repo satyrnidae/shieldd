@@ -1,4 +1,5 @@
-//! Userspace RTL8811AU driver over WinUSB (plan B, HANDOFF §9f).
+//! Userspace RTL8811AU driver over WinUSB. The Windows Wi-Fi Direct stack holds frames for the
+//! dozing controller, ~330 ms of input lag; here a reply goes out as soon as it's made.
 //!
 //! Register access, init and tables follow rtw88 (usb.c, mac.c, rtw88xxa.c, rtw8821a*.c)
 //! and the Realtek 8812/8821 vendor driver. [`radio::Radio`] is the entry point for hosts.

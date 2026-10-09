@@ -1,7 +1,7 @@
-//! `--radio`: the controller on our own RTL8811AU driver (rtlusb, HANDOFF §9f) instead of
-//! Windows Wi-Fi Direct + Npcap. A frame from the controller and our reply to it are handled
-//! on one thread with no driver queue in between, which is what the Windows stack's ~330 ms
-//! of downlink lag (§9d) comes from.
+//! `--radio`: the controller on our own RTL8811AU driver (rtlusb) instead of Windows Wi-Fi
+//! Direct + Npcap. A frame from the controller and our reply to it are handled on one thread
+//! with no driver queue in between, which is what the Windows stack's ~330 ms of downlink lag
+//! comes from.
 //!
 //! Same session, controller and outputs path as host.rs; only the link differs.
 //!
@@ -53,8 +53,11 @@ const GOODBYE_WAIT: Duration = Duration::from_secs(1);
 /// A controller sent away is ignored this long, so it gives up and sleeps: its sleep timer is
 /// 30 s, plus some slack. Kicked w/o this, it rejoins within ~130 ms.
 const SLEEP_SHUN: Duration = Duration::from_millis(30_250);
-/// A controller that associated shows as joining until it's up, or this long
+/// A controller that associated, or is connected w/o a battery reading, shows as joining until
+/// it's up, or this long
 const JOIN_TIMEOUT: Duration = Duration::from_secs(15);
+/// Retry saving a just-paired group this often until it works
+const SAVE_RETRY: Duration = Duration::from_secs(5);
 /// Headset audio owed after a stall goes, past this much
 const ISOC_CREDIT_MAX: Duration = Duration::from_millis(40);
 
@@ -139,6 +142,7 @@ impl Shared {
                 vban: self.vban.is_some(),
                 pairing: false,
                 ssid: None,
+                channel: None,
                 joining: false,
             });
             std::thread::sleep(Duration::from_millis(100));
@@ -176,11 +180,11 @@ pub fn run(args: Args, quit: &AtomicBool) -> Result<()> {
             Ok(Next::Host) => pair = false,
             Err(e) if !args.background => return Err(e),
             Err(e) => {
-                warn!("{e:#}; starting over in {backoff:?}");
-                pair = false;
                 if started.elapsed() > RETRY_MAX {
                     backoff = RETRY_MIN;
                 }
+                warn!("{e:#}; starting over in {backoff:?}");
+                pair = false;
                 sh.idle(quit, backoff);
                 backoff = (backoff * 2).min(RETRY_MAX);
             }
@@ -210,6 +214,7 @@ fn run_once(args: &Args, pair: bool, pair_bails: bool, quit: &AtomicBool, sh: &m
         vban: sh.vban.is_some(),
         pairing: pair,
         ssid: Some(group.ssid.clone()),
+        channel: (group.channel != 0).then_some(group.channel),
         joining: false,
     });
     let mut radio = Radio::start(opts)?;
@@ -243,6 +248,10 @@ fn run_once(args: &Args, pair: bool, pair_bails: bool, quit: &AtomicBool, sh: &m
     let mut models = models::load(&args.conf);
     // Since a controller associated, until it's up w/ a battery reading
     let mut joining: Option<Instant> = None;
+    // JOIN_TIMEOUT ran out on the controller there now; no spinner for it again
+    let mut join_gave_up = false;
+    // Paired, but writing --conf failed: when to try again
+    let mut save_due: Option<Instant> = None;
     // Ends this run but not the program, unlike quit
     let stop = AtomicBool::new(false);
     let mut next = Next::Quit;
@@ -264,6 +273,7 @@ fn run_once(args: &Args, pair: bool, pair_bails: bool, quit: &AtomicBool, sh: &m
             RadioEvent::Connected(sta) => info!(sta = %fmt_mac(&sta), "Wi-Fi link up"),
             RadioEvent::Disconnected(sta) => {
                 joining = None;
+                join_gave_up = false;
                 info!(sta = %fmt_mac(&sta), "Wi-Fi link down")
             }
             RadioEvent::Paired(sta, model) => {
@@ -275,14 +285,24 @@ fn run_once(args: &Args, pair: bool, pair_bails: bool, quit: &AtomicBool, sh: &m
                     }
                 }
                 // The controller has the credential now, so this group is the one it remembers
-                let backup = p2pconf::write(&args.conf, &group)?;
-                info!(
-                    sta = %fmt_mac(&sta),
-                    ssid = group.ssid,
-                    conf = %args.conf.display(),
-                    backup = ?backup,
-                    "paired; group saved, waiting for the controller to rejoin"
-                );
+                match p2pconf::write(&args.conf, &group) {
+                    Ok(backup) => info!(
+                        sta = %fmt_mac(&sta),
+                        ssid = group.ssid,
+                        conf = %args.conf.display(),
+                        backup = ?backup,
+                        "paired; group saved, waiting for the controller to rejoin"
+                    ),
+                    Err(e) => {
+                        // Hosting carries on, so it works until shieldd stops
+                        warn!("paired, but saving the group failed: {e:#}; retrying every {SAVE_RETRY:?}");
+                        sh.tray.problem(
+                            "Couldn't save the paired network",
+                            &format!("{e:#}\n\nThe controller works until shieldd stops. Retrying."),
+                        );
+                        save_due = Some(now + SAVE_RETRY);
+                    }
+                }
             }
             RadioEvent::PairingFailed(sta, why) => {
                 warn!(sta = %fmt_mac(&sta), "pairing failed: {why}; still listening, hold the button again")
@@ -301,6 +321,20 @@ fn run_once(args: &Args, pair: bool, pair_bails: bool, quit: &AtomicBool, sh: &m
                 }
                 if now.duration_since(last_slow) >= SLOW_POLL {
                     last_slow = now;
+                    if let Some(t) = save_due
+                        && now >= t
+                    {
+                        match p2pconf::write(&args.conf, &group) {
+                            Ok(_) => {
+                                info!(conf = %args.conf.display(), "group saved");
+                                save_due = None;
+                            }
+                            Err(e) => {
+                                debug!("saving the group: {e:#}");
+                                save_due = Some(now + SAVE_RETRY);
+                            }
+                        }
+                    }
                     for ev in host.poll(now) {
                         on_event(ev, now, &mut host, &mut ctl, &mut outputs);
                     }
@@ -364,15 +398,23 @@ fn run_once(args: &Args, pair: bool, pair_bails: bool, quit: &AtomicBool, sh: &m
                     });
                     let up = controller.as_ref().is_some_and(|c| c.battery.is_some());
                     let present = controller.is_some();
-                    if up || joining.is_some_and(|t| now.duration_since(t) >= JOIN_TIMEOUT) {
+                    if up {
                         joining = None;
+                        join_gave_up = false;
+                    } else if joining.is_some_and(|t| now.duration_since(t) >= JOIN_TIMEOUT) {
+                        warn!("controller hasn't come up in {JOIN_TIMEOUT:?}");
+                        joining = None;
+                        join_gave_up = present;
+                    } else if present && joining.is_none() && !join_gave_up {
+                        joining = Some(now);
                     }
                     sh.tray.update(Status {
                         controller,
                         vban: sh.vban.is_some(),
                         pairing: pair && !paired,
                         ssid: Some(group.ssid.clone()),
-                        joining: joining.is_some() || (present && !up),
+                        channel: Some(channel),
+                        joining: joining.is_some(),
                     });
                     if let Some(t) = last_rx
                         && now.duration_since(t) > STALE

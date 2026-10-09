@@ -1,7 +1,9 @@
 //! AP mode: beacon/probe response frames, port setup and the hardware beacon.
 //!
-//! What the controller needs (HANDOFF §1, §8a): SSID DIRECT-0S on channel 1, OFDM rates only,
-//! WPA2-PSK/CCMP and WMM. It probes w/ only SSID and rates, no P2P or WPS IEs.
+//! What the controller needs: its paired group's SSID on the channel it paired on, OFDM rates
+//! only, WPA2-PSK/CCMP and WMM. It ignores 1 Mbps CCK frames, so EAPOL sent at that rate never
+//! gets an ACK. Rejoining, it sends plain directed probes, broadcast BSSID, w/ only SSID and
+//! rates 6-24 Mbps, no P2P or WPS IEs.
 
 use std::time::Duration;
 

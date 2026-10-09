@@ -28,7 +28,7 @@ const MAX_BUFFERED_REPORTS: usize = 32;
 /// ~250 ms of mic audio at 1 unit per ms
 const MAX_BUFFERED_ISO: usize = 256;
 
-/// What the tablet sends after SET_IDLE (HANDOFF §4). W/o it the controller
+/// What the tablet sends after SET_IDLE. W/o it the controller
 /// enumerates but never reports input.
 const INIT: [(&str, InitReq); 6] = [
     ("GET_REPORT input 0x01", InitReq::Get(usb::REPORT_INPUT, 0x01)),
@@ -221,7 +221,7 @@ impl Bridge {
         // send SET_CONFIGURATION to a new session; w/o it and the HID init the
         // controller never reports.
         let set_config = Setup { request_type: 0x00, request: REQ_SET_CONFIGURATION, value: 1, index: 0, length: 0 };
-        // Step 1 of HANDOFF §4. On Linux usbhid sends it; here nobody else will.
+        // Step 1 of the HID init. On Linux usbhid sends it; here nobody else will.
         let set_idle = Setup { request_type: usb::RT_OUT_CLASS_INTERFACE, request: usb::HID_SET_IDLE, value: 0, index: HID_INTERFACE, length: 0 };
         for setup in [
             Setup::get_descriptor(usb::RT_IN_STD_DEVICE, usb::DESC_DEVICE, 0, 0, 18),

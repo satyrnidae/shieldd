@@ -1,5 +1,4 @@
-//! --pair: a fresh group for the controller, handed over by WPS push-button (rtlusb wps.rs,
-//! HANDOFF §9f M4).
+//! --pair: a fresh group for the controller, handed over by WPS push-button (see rtlusb wps.rs).
 
 use rand::Rng;
 use rand::seq::SliceRandom;

@@ -133,10 +133,12 @@ enum Icon {
     Spinner(u8),
 }
 
-/// The spinner turns this far each frame, at 30 fps: 225 deg/s, a turn every 1.6 s
-const SPINNER_STEP: f32 = 7.5;
+/// The spinner turns this far each frame, at SPINNER_FPS: 225 deg/s, a turn every 1.6 s. Each
+/// frame is a call into Explorer, so no faster than it needs to look smooth.
+const SPINNER_STEP: f32 = 15.0;
+const SPINNER_FPS: u64 = 15;
 const SPINNER_FRAMES: u8 = (360.0 / SPINNER_STEP) as u8;
-const SPINNER_FRAME: Duration = Duration::from_nanos(1_000_000_000 / 30);
+const SPINNER_FRAME: Duration = Duration::from_nanos(1_000_000_000 / SPINNER_FPS);
 /// The spinner's arc, in its 24-unit viewBox: centered, radius 8 plus half its 3.56 stroke.
 /// It's fit by this circle rather than by the arc, which would wobble as it turns.
 const SPINNER_RADIUS: f32 = 8.0 + 3.55556 / 2.0;
@@ -436,6 +438,8 @@ pub struct Status {
     pub pairing: bool,
     /// The group being hosted, None w/o an adapter
     pub ssid: Option<String>,
+    /// Its channel, None until a survey picks one
+    pub channel: Option<u8>,
     /// A controller is on its way in: associated, but not yet up w/ a battery reading
     pub joining: bool,
 }
@@ -912,7 +916,6 @@ fn raise(tip: HWND) {
     let _ = unsafe { SetWindowPos(tip, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE) };
 }
 
-/// Runs the window procedure for whatever's queued
 /// Copies `s` into a fixed UTF-16 field, truncated, NUL-terminated
 fn put(dst: &mut [u16], s: &str) {
     let n = dst.len() - 1;
@@ -984,11 +987,11 @@ impl State {
         }
         let Some(b) = s.controller.as_ref().and_then(|c| c.battery) else {
             let tip = match s.controller {
-                Some(_) => "SHIELD controller: connected",
+                Some(_) => "SHIELD controller: connected, no battery reading",
                 None => "SHIELD controller: not connected",
             };
             self.pct = None;
-            // Flashing only w/ nothing connected; one that is has its battery in a moment
+            // Flashing only w/ nothing connected
             let icon = if s.controller.is_some() { Icon::Disconnected } else { self.animate(Icon::Disconnected, now) };
             self.show(icon, msg, Some(tip));
             return;
@@ -1094,11 +1097,21 @@ impl State {
         let gray = |on: bool| if on { MF_STRING } else { MF_STRING | MF_GRAYED };
         let tip = s.controller.as_ref().map(|c| format!("MAC {}\nClick to identify", crate::adapters::fmt_mac(&c.mac)));
         let title = MF_STRING | MF_DISABLED;
-        let mut items: Vec<Item> =
-            vec![(title, 0, "shieldd".into()), (title, 0, format!(" > {} connected", u8::from(connected)))];
+        let mut items: Vec<Item> = vec![
+            (title, 0, concat!("shieldd (v", env!("CARGO_PKG_VERSION"), ")").into()),
+            (title, 0, format!(" > {} connected.", u8::from(connected))),
+        ];
         if let Some(ssid) = &s.ssid {
             // A lone & would underline the next letter
-            items.push((title, 0, format!(" > {}", ssid.replace('&', "&&"))));
+            let ssid = ssid.replace('&', "&&");
+            items.push((
+                title,
+                0,
+                match s.channel {
+                    Some(c) => format!(" > {ssid}, ch.{c}"),
+                    None => format!(" > {ssid}"),
+                },
+            ));
         }
         items.extend([
             (MF_SEPARATOR, 0, String::new()),
@@ -1352,7 +1365,7 @@ mod tests {
 
     #[test]
     fn spinner_turns_in_place() {
-        assert_eq!(SPINNER_FRAMES, 48);
+        assert_eq!(SPINNER_FRAMES, 24);
         assert_eq!(Icon::Spinner(SPINNER_FRAMES - 1).next_frame(), Some(Icon::Spinner(0)));
         assert_eq!(Icon::keep_frame(Icon::Spinner(0), Some(Icon::Spinner(9))), Icon::Spinner(9));
         // Half a turn on is the same drawing upside down, so it stays put rather than drifting

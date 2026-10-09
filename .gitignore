@@ -1,8 +1,9 @@
+# Linux handoff
 reference/
 HANDOFF.md
 
 # Rust
-/target/
+target/
 debug/
 **/*.rs.bk
 *.pdb

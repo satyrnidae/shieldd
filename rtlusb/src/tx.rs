@@ -125,8 +125,11 @@ pub fn endpoint_for(rtl: &Rtl, qsel: u8) -> u8 {
 
 /// C2H_CCX_TX_RPT
 const C2H_CCX_TX_RPT: u8 = 0x03;
-/// Frames waiting for a report; past this, the oldest counts as unreported
-const MAX_PENDING: usize = 64;
+/// Report sequence numbers: SW_DEFINE bits 7:2
+const SNS: usize = 64;
+/// Frames waiting for a report; past this, the oldest counts as unreported. No more than SNS,
+/// so a free sn's always left and no two pending frames share one.
+const MAX_PENDING: usize = SNS;
 /// A report later than this isn't coming
 const REPORT_TIMEOUT: Duration = Duration::from_secs(3);
 /// Log frames that needed at least this many retries
@@ -172,14 +175,7 @@ impl Tx {
     pub fn send(&mut self, rtl: &Rtl, mut info: TxInfo, frame: &[u8]) -> Result<()> {
         // Unicast only: nothing ACKs a broadcast
         if info.track && info.qsel != QSEL_BEACON && frame.len() >= 10 && frame[4] & 1 == 0 {
-            self.next_sn = self.next_sn.wrapping_add(4) & 0xfc;
-            info.report = Some(self.next_sn);
-            if self.pending.len() >= MAX_PENDING {
-                self.pending.pop_front();
-                self.stats.unreported += 1;
-            }
-            let fc = u16::from_le_bytes([frame[0], frame[1]]);
-            self.pending.push_back(Pending { sn: self.next_sn, sent: Instant::now(), fc });
+            info.report = Some(self.track(u16::from_le_bytes([frame[0], frame[1]])));
         }
         let mut buf = Buffer::new(DESC_SIZE + frame.len());
         buf.extend_from_slice(&desc(info, frame));
@@ -203,6 +199,22 @@ impl Tx {
 }
 
 impl Tx {
+    /// Counts a frame w/ control field `fc` in flight and returns its sn. Skips any sn still
+    /// pending: a frame whose report got lost would otherwise take the next one's report.
+    fn track(&mut self, fc: u16) -> u8 {
+        if self.pending.len() >= MAX_PENDING {
+            self.pending.pop_front();
+            self.stats.unreported += 1;
+        }
+        let sn = (1..=SNS)
+            .map(|k| self.next_sn.wrapping_add((k * 4) as u8) & 0xfc)
+            .find(|&sn| self.pending.iter().all(|p| p.sn != sn))
+            .expect("fewer than SNS pending");
+        self.next_sn = sn;
+        self.pending.push_back(Pending { sn, sent: Instant::now(), fc });
+        sn
+    }
+
     /// A C2H packet from the RX path, id byte first. Returns false if it isn't a TX report.
     pub fn on_c2h(&mut self, c2h: &[u8]) -> bool {
         if c2h.first() != Some(&C2H_CCX_TX_RPT) || c2h.len() < 2 + 7 {
@@ -285,6 +297,39 @@ mod tests {
         assert_ne!(w2 & 1 << 19, 0);
         assert_eq!(w6 & 0xfff, 0x24);
         assert_eq!(desc(TxInfo::data(0, RATE_24M, true), &frame)[8..12], [0; 4]);
+    }
+
+    /// A C2H TX report for `sn`, acked
+    fn report(sn: u8) -> [u8; 9] {
+        [C2H_CCX_TX_RPT, 0, 0, 0, 0, 0, 0, 0, sn]
+    }
+
+    #[test]
+    fn lost_reports_dont_share_an_sn() {
+        let mut tx = Tx { eps: Vec::new(), next_sn: 0, pending: VecDeque::new(), stats: TxStats::default() };
+        let lost = tx.track(0x0088);
+        // A full lap of sns later, the lost one's still pending and gets skipped
+        let sns: Vec<u8> = (0..SNS - 1).map(|_| tx.track(0x0088)).collect();
+        assert!(!sns.contains(&lost));
+        for &sn in &sns {
+            assert!(tx.on_c2h(&report(sn)));
+        }
+        assert_eq!(tx.pending.len(), 1);
+        assert_eq!(tx.pending[0].sn, lost);
+        let next = tx.track(0x0088);
+        assert_ne!(next, lost);
+        assert!(tx.on_c2h(&report(next)));
+        assert_eq!(tx.pending.iter().map(|p| p.sn).collect::<Vec<_>>(), [lost]);
+        // Full: the oldest goes as unreported and its sn's free again
+        for _ in 0..SNS {
+            tx.track(0x0088);
+        }
+        assert_eq!(tx.pending.len(), MAX_PENDING);
+        assert_eq!(tx.stats.unreported, 1);
+        let mut sns: Vec<u8> = tx.pending.iter().map(|p| p.sn).collect();
+        sns.sort();
+        sns.dedup();
+        assert_eq!(sns.len(), MAX_PENDING);
     }
 
     #[test]

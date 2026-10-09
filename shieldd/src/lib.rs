@@ -99,7 +99,7 @@ pub struct Args {
     #[arg(long)]
     mouse_scale_y: Option<f32>,
     /// Open the mic stream. Nothing reads it yet; it keeps the controller from dozing between
-    /// inputs (HANDOFF §9d), at the cost of a steady stream of frames.
+    /// inputs, at the cost of a steady stream of frames. Doesn't change the lag.
     #[arg(long)]
     mic: bool,
     /// Leave the radio to WSL (ozwpan + shield_tx.py) and only drive the
@@ -107,8 +107,8 @@ pub struct Args {
     #[arg(long)]
     receiver: bool,
     /// Old host path: Windows Wi-Fi Direct + Npcap on the Realtek driver,
-    /// ~330 ms of input lag (HANDOFF §9d). The default drives the RTL8811AU
-    /// ourselves over WinUSB (rtlusb, §9f), which needs the adapter on WinUSB.
+    /// ~330 ms of input lag, since the stack holds frames for the dozing controller. The
+    /// default drives the RTL8811AU ourselves (rtlusb), which needs the adapter on WinUSB.
     #[arg(long, conflicts_with = "receiver")]
     wifi_direct: bool,
     /// Pair a controller: hold its NVIDIA button until the light flashes. Makes a new
@@ -151,18 +151,36 @@ pub struct Args {
 
 #[cfg(windows)]
 impl Args {
+    /// Not a one-off like --install or --stop
+    fn hosts(&self) -> bool {
+        !(self.install || self.uninstall || self.stop || self.transmit)
+    }
+
     fn scale(&self) -> (f32, f32) {
         (self.mouse_scale_x.unwrap_or(self.mouse_scale), self.mouse_scale_y.unwrap_or(self.mouse_scale * 1.5))
     }
 }
 
+/// From background::claim
+type Quit = std::sync::Arc<std::sync::atomic::AtomicBool>;
+
 /// Both binaries' main; `windowless` is shieldw, which logs to `settings_dir()/shieldd.log`
 pub fn run(windowless: bool) -> Result<()> {
+    let parsed = Args::try_parse();
+    // shieldw takes the instance before its log rotates, so a second launch quits w/o touching
+    // the running one's log
+    #[cfg(windows)]
+    let claimed = match &parsed {
+        Ok(a) if windowless && a.hosts() => Some(background::claim(false)?),
+        _ => None,
+    };
+    #[cfg(not(windows))]
+    let claimed = None;
     init_logging(windowless)?;
     if windowless {
         std::panic::set_hook(Box::new(|p| error!("{p}")));
     }
-    let args = match Args::try_parse() {
+    let args = match parsed {
         Ok(a) => a,
         Err(e) if windowless => {
             error!("{e}");
@@ -170,7 +188,7 @@ pub fn run(windowless: bool) -> Result<()> {
         }
         Err(e) => e.exit(),
     };
-    let result = dispatch(args, windowless);
+    let result = dispatch(args, windowless, claimed);
     if windowless && let Err(e) = &result {
         error!("{e:#}");
     }
@@ -197,10 +215,10 @@ fn init_logging(to_file: bool) -> Result<()> {
 }
 
 #[cfg_attr(not(windows), expect(unused_mut, reason = "only Windows sets background"))]
-fn dispatch(mut args: Args, windowless: bool) -> Result<()> {
+fn dispatch(mut args: Args, windowless: bool, claimed: Option<Quit>) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
-        let _ = windowless;
+        let _ = (windowless, claimed);
         anyhow::ensure!(args.transmit, "on Linux only --transmit is supported (the WSL side of the bridge)");
         transmit::run(args.dest, args.hidraw.as_deref(), args.dump)
     }
@@ -223,7 +241,10 @@ fn dispatch(mut args: Args, windowless: bool) -> Result<()> {
             );
             args.background = true;
         }
-        let quit = background::claim(!windowless)?;
+        let quit = match claimed {
+            Some(q) => q,
+            None => background::claim(!windowless)?,
+        };
         host::run(args, quit)
     }
 }

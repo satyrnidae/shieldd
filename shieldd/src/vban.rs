@@ -138,7 +138,7 @@ impl Mic {
 
 //region Headset
 
-/// What the headset plays: 32 kHz stereo s16le (HANDOFF §3)
+/// What the headset plays: 32 kHz stereo s16le, per its audio streaming descriptors
 const PAD_RATE: u32 = 32000;
 /// The controller's isoc unit: 4 ms (ms_per_isoc), 32 frames each
 pub const UNIT_MS: u8 = 4;

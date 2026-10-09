@@ -46,7 +46,7 @@ pub fn run(args: Args, quit: Arc<AtomicBool>) -> Result<()> {
 
     // Join the MTA explicitly rather than relying on the implicit one.
     //todo: --anchor-ssid hangs in WiFiAdapter.ConnectAsync().join() after the link
-    //  is up, w/ or w/o this. Anchoring is a stopgap anyway (HANDOFF §9b).
+    //  is up, w/ or w/o this. Anchoring is a stopgap anyway: it only pins the GO to channel 1.
     // SAFETY: first thing on this thread; never uninitialized, the process owns it
     unsafe { RoInitialize(RO_INIT_MULTITHREADED) }.context("RoInitialize")?;
     npcap::init_dll_path()?;

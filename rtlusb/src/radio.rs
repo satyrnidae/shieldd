@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use nusb::transfer::{Bulk, In};
+use nusb::transfer::{Bulk, In, TransferError};
 use tracing::{debug, info, trace, warn};
 
 use crate::ap::{ApConfig, WpsConfig};
@@ -20,6 +20,8 @@ const RX_TRANSFERS: usize = 8;
 const TX_STATS_EVERY: Duration = Duration::from_secs(5);
 /// LED blink half period while nobody's connected
 const LED_BLINK: Duration = Duration::from_millis(500);
+/// rx_loop gives up after this many failures in a row, bulk IN or callback. One success resets it.
+const MAX_STRAIGHT_ERRORS: u32 = 50;
 
 pub struct ApOptions {
     pub ssid: String,
@@ -46,8 +48,7 @@ pub enum RadioEvent<'a> {
         ethertype: u16,
         payload: &'a [u8],
     },
-    /// WPS delivered the credential; push-button is off again
-    /// W/ the model name it gave
+    /// WPS delivered the credential, w/ the model name the station gave; push-button is off again
     Paired(Mac, &'a str),
     PairingFailed(Mac, &'a str),
     /// Nothing received for a short while, or between batches of frames
@@ -59,6 +60,8 @@ pub struct Link<'a> {
     chip: &'a Chip,
     tx: &'a mut Tx,
     bss: &'a mut Bss,
+    /// Events the callback caused, delivered once it returns
+    deferred: &'a mut Vec<Event>,
 }
 
 impl Link<'_> {
@@ -71,9 +74,10 @@ impl Link<'_> {
         self.bss.send_stream(self.chip, self.tx, dst, ethertype, payload)
     }
 
-    /// Disconnects `sta`. Deauth only; see shieldd's goodbye for the Ozmo side.
+    /// Disconnects `sta`. Deauth only; see shieldd's goodbye for the Ozmo side. The callback
+    /// gets the Disconnected right after it returns.
     pub fn kick(&mut self, sta: &Mac) -> Result<()> {
-        self.bss.kick(self.chip, self.tx, sta)?;
+        self.deferred.extend(self.bss.kick(self.chip, self.tx, sta)?);
         Ok(())
     }
 
@@ -87,6 +91,7 @@ pub struct Radio {
     chip: Chip,
     tx: Tx,
     bss: Bss,
+    deferred: Vec<Event>,
 }
 
 /// Power on and tune. The chip is powered off again if anything after power-on fails.
@@ -159,7 +164,7 @@ impl Radio {
             Ok((tx, bss))
         })();
         match setup {
-            Ok((tx, bss)) => Ok(Self { chip, tx, bss }),
+            Ok((tx, bss)) => Ok(Self { chip, tx, bss, deferred: Vec::new() }),
             Err(e) => Err((chip, e)),
         }
     }
@@ -176,7 +181,7 @@ impl Radio {
     /// Runs until `quit` or an error. Probe requests, auth, association and EAPOL are handled
     /// here; the callback sees connections, data frames and ticks.
     pub fn run(&mut self, quit: &AtomicBool, f: &mut dyn FnMut(RadioEvent, &mut Link) -> Result<()>) -> Result<()> {
-        let Radio { chip, tx, bss } = self;
+        let Radio { chip, tx, bss, deferred } = self;
         let mut last_stats = Instant::now();
         let t0 = Instant::now();
         let mut led: Option<bool> = None;
@@ -217,9 +222,10 @@ impl Radio {
             }
             let Some(p) = p else {
                 for e in bss.tick(chip, tx)? {
-                    deliver(e, chip, tx, bss, f)?;
+                    deliver(e, chip, tx, bss, deferred, f)?;
                 }
-                return f(RadioEvent::Tick, &mut Link { chip, tx, bss });
+                f(RadioEvent::Tick, &mut Link { chip, tx, bss, deferred })?;
+                return flush(chip, tx, bss, deferred, f);
             };
             let frame = p.frame;
             if frame.len() >= 16 {
@@ -230,19 +236,43 @@ impl Radio {
                 }
             }
             if let Some(e) = bss.handle(chip, tx, frame, p.decrypted)? {
-                deliver(e, chip, tx, bss, f)?;
+                deliver(e, chip, tx, bss, deferred, f)?;
             }
             Ok(())
         })
     }
 }
 
+type Callback<'f> = dyn FnMut(RadioEvent, &mut Link) -> Result<()> + 'f;
+
+/// Hands `e` to the callback, then whatever that caused
 fn deliver(
     e: Event,
     chip: &Chip,
     tx: &mut Tx,
     bss: &mut Bss,
-    f: &mut dyn FnMut(RadioEvent, &mut Link) -> Result<()>,
+    deferred: &mut Vec<Event>,
+    f: &mut Callback,
+) -> Result<()> {
+    deliver_one(e, chip, tx, bss, deferred, f)?;
+    flush(chip, tx, bss, deferred, f)
+}
+
+fn flush(chip: &Chip, tx: &mut Tx, bss: &mut Bss, deferred: &mut Vec<Event>, f: &mut Callback) -> Result<()> {
+    while !deferred.is_empty() {
+        let e = deferred.remove(0);
+        deliver_one(e, chip, tx, bss, deferred, f)?;
+    }
+    Ok(())
+}
+
+fn deliver_one(
+    e: Event,
+    chip: &Chip,
+    tx: &mut Tx,
+    bss: &mut Bss,
+    deferred: &mut Vec<Event>,
+    f: &mut Callback,
 ) -> Result<()> {
     if let Event::Paired(..) = e {
         // One controller per pairing: drop the WPS IE, and hide the SSID again if asked to
@@ -257,7 +287,7 @@ fn deliver(
         Event::Paired(m, model) => RadioEvent::Paired(*m, model),
         Event::PairingFailed(m, why) => RadioEvent::PairingFailed(*m, why),
     };
-    f(ev, &mut Link { chip, tx, bss })
+    f(ev, &mut Link { chip, tx, bss, deferred })
 }
 
 impl Drop for Radio {
@@ -288,6 +318,23 @@ pub fn rx_loop(
     let t0 = Instant::now();
     let mut last_report = Instant::now();
     let (mut frames, mut crc_errs, mut c2h) = (0u64, 0u64, 0u64);
+    let mut straight = 0u32;
+    // A failure is logged and survived, unless the adapter's gone or nothing's working anymore
+    let mut check = |r: Result<()>| -> Result<()> {
+        let Err(e) = r else {
+            straight = 0;
+            return Ok(());
+        };
+        if gone(&e) {
+            return Err(e.context("adapter unplugged"));
+        }
+        straight += 1;
+        if straight >= MAX_STRAIGHT_ERRORS {
+            return Err(e.context(format!("{straight} failures in a row")));
+        }
+        warn!("{e:#}");
+        Ok(())
+    };
     let res = (|| {
         while !quit.load(Ordering::SeqCst) && limit.is_none_or(|l| t0.elapsed() < l) {
             if last_report.elapsed() >= Duration::from_secs(5) {
@@ -295,19 +342,12 @@ pub fn rx_loop(
                 (frames, crc_errs, c2h) = (0, 0, 0);
                 last_report = Instant::now();
             }
-            if let Err(e) = on_frame(None) {
-                warn!("{e:#}");
-            }
+            check(on_frame(None))?;
             let Some(done) = ep.wait_next_complete(idle) else {
                 continue;
             };
-            let mut buf = match done.status {
-                Ok(()) => done.buffer,
-                Err(e) => {
-                    warn!("bulk IN: {e}");
-                    done.buffer
-                }
-            };
+            check(done.status.map_err(|e| anyhow::Error::new(e).context("bulk IN")))?;
+            let mut buf = done.buffer;
             for p in rx::split(&buf[..done.actual_len.min(buf.len())]) {
                 if p.c2h {
                     c2h += 1;
@@ -317,9 +357,7 @@ pub fn rx_loop(
                     continue;
                 }
                 frames += 1;
-                if let Err(e) = on_frame(Some(&p)) {
-                    warn!("{e:#}");
-                }
+                check(on_frame(Some(&p)))?;
             }
             buf.clear();
             buf.set_requested_len(RX_BUF);
@@ -329,4 +367,12 @@ pub fn rx_loop(
     })();
     ep.cancel_all();
     res
+}
+
+/// Whether `e` came from the adapter going away
+fn gone(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        matches!(c.downcast_ref::<TransferError>(), Some(TransferError::Disconnected))
+            || c.downcast_ref::<nusb::Error>().is_some_and(|e| e.kind() == nusb::ErrorKind::Disconnected)
+    })
 }

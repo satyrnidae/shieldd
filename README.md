@@ -162,9 +162,9 @@ battery once it's charged, an all-red one w/ a warning mark when it's critical. 
 signal flashes red while none is connected, a spinner turns while one is joining, and a Wi-Fi
 signal lights up blue, a bar at a time, while pairing.
 
-Click for a menu. Its title shows how many controllers are connected and the group's name. The
-controller line shows its model, XInput port and battery, and its MAC on hover; clicking it
-buzzes the controller twice, to tell which one it is. The rest:
+Click for a menu. Its title shows the version, how many controllers are connected, and the
+group's name and channel. The controller line shows its model, XInput port and battery, and its
+MAC on hover; clicking it buzzes the controller twice, to tell which one it is. The rest:
 - **Pair controller...**, **Re-pair controller...** while one is connected: drops the current
   controller and pairs a new one on a new group, as `--pair` does, after a confirmation, since
   every controller paired to the old group has to pair again. Back to the saved group if nothing

@@ -1,6 +1,6 @@
 //! Channel survey: how much 2.4 GHz traffic each channel carries, to host on the quietest.
 
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -16,6 +16,8 @@ pub const CANDIDATES: [u8; 3] = [1, 6, 11];
 const DWELL: Duration = Duration::from_millis(400);
 /// Frames still in flight from the last channel after a switch
 const SETTLE: Duration = Duration::from_millis(20);
+/// What each channel's counted for, after SETTLE
+const LISTEN: Duration = DWELL.saturating_sub(SETTLE);
 
 /// Frames this quiet or quieter don't count; at this level and up they all do in full
 const FLOOR_DBM: f64 = -95.0;
@@ -27,7 +29,8 @@ pub struct Load {
     pub frames: u32,
     /// Weighted airtime, us: each frame's time on air times its weight(). Busy matters as much
     /// as loud, since our own signal is modest and every frame is air we wait out or collide
-    /// w/; summing mW instead let one loud network drown out everything else.
+    /// w/; summing mW instead let one loud network drown out everything else. Scaled to a full
+    /// LISTEN, so a channel that got less time to itself isn't any quieter for it.
     pub busy_us: f64,
     pub max_dbm: Option<i8>,
 }
@@ -51,16 +54,27 @@ fn airtime_us(rate: u8, bytes: usize) -> f64 {
     preamble + bytes as f64 * 8.0 / mbps
 }
 
-/// Listens on every channel in CHANNELS for DWELL each. The chip should accept all frames
-/// (promiscuous) for this to see other networks' data.
+/// Listens on every channel in CHANNELS for DWELL each, timed from when the switch to it is
+/// done. The chip should accept all frames (promiscuous) for this to see other networks' data.
 pub fn survey(chip: &Chip) -> Result<Vec<(u8, Load)>> {
     let mut loads: Vec<(u8, Load)> = CHANNELS.map(|c| (c, Load::default())).collect();
+    let mut listened = vec![Duration::ZERO; loads.len()];
     let mut i = 0;
     chip.set_channel(loads[0].0)?;
     let mut since = Instant::now();
     let quit = AtomicBool::new(false);
-    rx_loop(chip, Some(DWELL * loads.len() as u32 + SETTLE), Duration::from_millis(5), &quit, &mut |p| {
-        if since.elapsed() >= DWELL && i + 1 < loads.len() {
+    // Only a backstop; the last channel's dwell ends it
+    let limit = DWELL * loads.len() as u32 * 2;
+    rx_loop(chip, Some(limit), Duration::from_millis(5), &quit, &mut |p| {
+        if quit.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        if since.elapsed() >= DWELL {
+            listened[i] = since.elapsed().saturating_sub(SETTLE);
+            if i + 1 == loads.len() {
+                quit.store(true, Ordering::Relaxed);
+                return Ok(());
+            }
             i += 1;
             chip.set_channel(loads[i].0)?;
             since = Instant::now();
@@ -77,9 +91,16 @@ pub fn survey(chip: &Chip) -> Result<Vec<(u8, Load)>> {
         }
         Ok(())
     })?;
-    for (c, l) in &loads {
-        let busy_pct = format!("{:.1}", l.busy_us / DWELL.as_micros() as f64 * 100.0);
-        info!(channel = c, frames = l.frames, max_dbm = l.max_dbm, busy_pct, "survey");
+    if !quit.load(Ordering::Relaxed) {
+        listened[i] = since.elapsed().saturating_sub(SETTLE);
+    }
+    for ((c, l), t) in loads.iter_mut().zip(&listened) {
+        if !t.is_zero() {
+            l.busy_us *= LISTEN.as_secs_f64() / t.as_secs_f64();
+        }
+        let busy_pct = format!("{:.1}", l.busy_us / LISTEN.as_micros() as f64 * 100.0);
+        let listened_ms = t.as_millis() as u64;
+        info!(channel = c, frames = l.frames, max_dbm = l.max_dbm, busy_pct, listened_ms, "survey");
     }
     Ok(loads)
 }

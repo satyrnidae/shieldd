@@ -1,5 +1,6 @@
 //! The controller at the USB level, over Ozmo: configures it after each
-//! connect, runs the HID init (HANDOFF §4), and parses its HID reports.
+//! connect, runs the HID init, and parses its HID reports. W/o the init, which replays what the
+//! SHIELD Tablet sends, it sends a keepalive a second and ignores every button.
 //!
 //! Report layouts come from the controller's HID report descriptor
 //! (`reference/hid_report_descriptor.bin`).
@@ -35,7 +36,7 @@ const SETUP: [&str; 14] = [
     "SET_REPORT feature 0xFD=0D",
     "GET_REPORT feature 0xFD (0D)",
 ];
-/// Audio streaming interfaces, alt 1 streaming and alt 0 idle (HANDOFF §3)
+/// Audio streaming interfaces, alt 1 streaming and alt 0 idle
 const HEADSET_INTERFACE: u8 = 2;
 const MIC_INTERFACE: u8 = 3;
 /// Isoc OUT endpoint number of the headset: 32 kHz stereo s16le
@@ -248,7 +249,7 @@ pub struct Controller {
 
 impl Controller {
     /// `mic` opens the mic stream after setup. A streaming controller never dozes off: w/o
-    /// it, it idles between inputs and goes silent for up to ~2 s at a time (HANDOFF §2a).
+    /// it, it idles between inputs and goes silent for up to ~2 s at a time.
     pub fn new(mic: bool) -> Self {
         Controller {
             step: 0,
@@ -667,7 +668,7 @@ mod tests {
         (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
     }
 
-    // Units below are from the first live run (HANDOFF §9b)
+    // Units below are from the first live run
 
     #[test]
     fn pad_report() {

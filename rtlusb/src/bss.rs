@@ -4,7 +4,8 @@
 //! by the hardware until it wakes, blocking its queue meanwhile. With a ps_hold, data for a
 //! dozing station waits until its next frame w/ PM clear, or the hold runs out. No TIM: it
 //! wakes on its own often enough. Without one, everything goes out at once, rtw88's
-//! `ap_ignore_ps` behavior (HANDOFF §9d).
+//! `ap_ignore_ps` behavior. On Linux, input felt the same either way; held downlink is what
+//! hurts, mainly headset audio.
 
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
@@ -28,7 +29,8 @@ const EAPOL_TRIES: u32 = 5;
 /// Msg 1 waits this long after the assoc response. They go out on different hardware queues,
 /// so sent back to back, msg 1 can beat the response to the air and get dropped.
 const MSG1_DELAY: Duration = Duration::from_millis(20);
-/// Downlink data. 24 Mbps w/o fallback piled up retries until the queue jammed (HANDOFF §9f);
+/// Downlink data. 24 Mbps w/o fallback once failed every frame at 48 retries while uplink was
+/// fine: reports came 3 s late, the queue filled, EAPOL couldn't get out and the link dropped.
 /// Ozmo frames are small, so the slowest OFDM rate costs little airtime.
 const DATA_RATE: u8 = RATE_6M;
 /// Per-frame retry cap, so one dead frame can't block its queue for long
@@ -57,8 +59,8 @@ pub enum Event {
     Disconnected(Mac),
     /// Ethertype and payload of a data frame from a connected station
     Data(Mac, u16, Vec<u8>),
-    /// WPS handed the credential over; the station rejoins w/ it next
-    /// W/ the model name it gave
+    /// WPS handed the credential over, w/ the model name the station gave; it rejoins w/ the
+    /// credential next
     Paired(Mac, String),
     PairingFailed(Mac, String),
 }
