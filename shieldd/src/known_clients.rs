@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use tracing::{info, warn};
 
-use crate::p2pconf;
+use crate::files;
 
 type Mac = [u8; 6];
 
@@ -103,8 +103,8 @@ pub fn save(conf: &Path, mac: &Mac, name: &str) -> Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(e).with_context(|| format!("reading {}", p.display())),
     };
-    let tmp = p2pconf::stage(&p, &set_line(&text, mac, name))?;
-    p2pconf::commit(&tmp, &p)
+    let tmp = files::stage(&p, &set_line(&text, mac, name))?;
+    files::commit(&tmp, &p)
 }
 
 #[cfg(test)]

@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
+use crate::files::{commit, stage};
+
 #[derive(Debug, Clone)]
 pub struct Group {
     pub ssid: String,
@@ -78,24 +80,6 @@ pub fn write(path: &Path, g: &Group) -> Result<Option<PathBuf>> {
     };
     commit(&tmp, path)?;
     Ok(backup)
-}
-
-/// The first half of replacing `path` w/o ever leaving it half written: `contents` to
-/// `<name>.tmp` next to it, its folder made if need be. Returns the temp file for commit.
-pub fn stage(path: &Path, contents: &str) -> Result<PathBuf> {
-    let mut tmp_name = path.file_name().with_context(|| format!("{} has no file name", path.display()))?.to_owned();
-    tmp_name.push(".tmp");
-    let tmp = path.with_file_name(tmp_name);
-    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
-        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    }
-    std::fs::write(&tmp, contents).with_context(|| format!("writing {}", tmp.display()))?;
-    Ok(tmp)
-}
-
-/// The second half: the staged file takes `path`'s place
-pub fn commit(tmp: &Path, path: &Path) -> Result<()> {
-    std::fs::rename(tmp, path).with_context(|| format!("moving {} to {}", tmp.display(), path.display()))
 }
 
 fn format(g: &Group) -> String {
