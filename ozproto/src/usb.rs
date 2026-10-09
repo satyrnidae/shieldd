@@ -323,7 +323,7 @@ mod tests {
     use super::*;
     use crate::wire::tests::hex;
 
-    // Expected bytes are APP_DATA elements from reference/pcaps/handshake/01_handshake.pcap
+    // Expected bytes are APP_DATA elements from a SHIELD Tablet handshake capture
 
     #[test]
     fn get_desc_request() {

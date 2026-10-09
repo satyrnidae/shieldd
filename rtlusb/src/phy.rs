@@ -397,8 +397,9 @@ mod tests {
 
     #[test]
     fn tx_power_from_adapter1_efuse() {
-        let log = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../reference/efuse/adapter1/efuse-logical.bin"))
-            .unwrap();
+        // The first adapter's logical efuse: path A's 2.4 GHz power bytes at 0x10-0x1b, the rest blank
+        let mut log = [0xffu8; 512];
+        log[0x10..0x1c].copy_from_slice(&[0x31, 0x31, 0x31, 0x30, 0x30, 0x30, 0x29, 0x29, 0x29, 0x29, 0x29, 0x02]);
         let e = Efuse::parse(&log);
         assert_eq!(tx_power_2g(&e, 1), (0x31, 0x2b, 0x29));
         assert_eq!(tx_power_2g(&e, 11), (0x30, 0x2b, 0x29));

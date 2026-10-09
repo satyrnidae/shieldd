@@ -2,8 +2,7 @@
 //! connect, runs the HID init, and parses its HID reports. W/o the init, which replays what the
 //! SHIELD Tablet sends, it sends a keepalive a second and ignores every button.
 //!
-//! Report layouts come from the controller's HID report descriptor
-//! (`reference/hid_report_descriptor.bin`).
+//! Report layouts come from the controller's HID report descriptor, as it hands it over.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -45,7 +44,7 @@ pub const HEADSET_EP: u8 = 0x02;
 const MIC_EP: u8 = 0x83;
 
 /// Feature 0xFD is a mailbox: SET writes a command byte, GET reads back the command and its
-/// answer. The tablet sends 0A, 01, 08 and 0D on every connect (reference/pcaps/handshake).
+/// answer. The tablet sends 0A, 01, 08 and 0D on every connect in its handshake capture.
 const MAILBOX: u8 = 0xFD;
 /// Command whose answer is the best battery candidate: `01 32 d7 xx` in every tablet capture
 const STATUS_CMD: u8 = 0x01;
@@ -712,7 +711,7 @@ mod tests {
     fn setup_matches_tablet_bytes() {
         assert_eq!(setup_request(1, 0x0a).encode(0x09), hex("310a0109070a210a00000000"));
         assert_eq!(setup_request(6, 0x1b).encode(0x1b), hex("310c011b071b2109fd030000fd0a"));
-        // Mailbox 01, as at offset 8402 of reference/pcaps/handshake/01_handshake.pcap
+        // Mailbox 01, as at offset 8402 of a SHIELD Tablet handshake capture
         assert_eq!(setup_request(8, 0x1f).encode(0x1f), hex("310c011f071f2109fd030000fd01"));
         // The mic SET_INTERFACE from the same capture, now sent by poll_streams
         let mic = Request::SetInterface { req_id: 0x13, interface: MIC_INTERFACE, alt: 1 };

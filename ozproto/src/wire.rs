@@ -1,6 +1,6 @@
 //! Frame header, element framing and the connect handshake.
 //!
-//! Layouts follow `reference/ozprotocol.h`. Everything is packed and little endian.
+//! Layouts follow ozwpan's `ozprotocol.h`. Everything is packed and little endian.
 
 use std::time::Duration;
 
@@ -302,7 +302,7 @@ impl UpdateParam {
 pub(crate) mod tests {
     use super::*;
 
-    // Tablet capture, reference/pcaps/handshake/01_handshake.pcap frame 5
+    // SHIELD Tablet handshake capture, frame 5
     pub(crate) fn tablet_connect_req_frame() -> Vec<u8> {
         let req = ConnectReq {
             mode: 0xC1,
