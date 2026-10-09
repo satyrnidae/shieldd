@@ -1,9 +1,6 @@
-//! `--radio`: the controller on our own RTL8811AU driver (rtlusb) instead of Windows Wi-Fi
-//! Direct + Npcap. A frame from the controller and our reply to it are handled on one thread
-//! with no driver queue in between, which is what the Windows stack's ~330 ms of downlink lag
-//! comes from.
-//!
-//! Same session, controller and outputs path as host.rs; only the link differs.
+//! The host: the controller on our own RTL8811AU driver (rtlusb). A frame from the controller
+//! and our reply to it are handled on one thread w/ no driver queue in between; the Windows
+//! Wi-Fi Direct stack's queue held replies for the dozing controller, ~330 ms of input lag.
 //!
 //! `--pair`: the same, but on a fresh group (pair.rs) w/ WPS push-button on. The group goes
 //! to --conf once the controller has it, and hosting carries on when it rejoins.
@@ -19,15 +16,14 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 use ozproto::wire::ETHERTYPE;
-use ozproto::{Config, Host};
+use ozproto::{Config, Event, Host};
 use rtlusb::ap::WpsConfig;
+use rtlusb::efuse::fmt_mac;
 use rtlusb::wps::{Credential, Device};
 use rtlusb::{ApOptions, Radio, RadioEvent};
 use tracing::{debug, info, trace, warn};
 
-use crate::adapters::fmt_mac;
-use crate::controller::{Controller, HEADSET_EP, RumbleProbe};
-use crate::host::on_event;
+use crate::controller::{Controller, HEADSET_EP, Report, RumbleProbe};
 use crate::outputs::Outputs;
 use crate::tray::{self, Command, Connected, Shunned, Status, Tray};
 use crate::vban::{self, Vban};
@@ -544,4 +540,53 @@ fn run_once(args: &Args, pair: bool, pair_bails: bool, quit: &AtomicBool, sh: &m
         sh.tray.problem("No controller paired", "Nothing paired in 2 minutes; back to the saved one.");
     }
     Ok(next)
+}
+
+fn on_event(ev: Event, now: Instant, host: &mut Host, ctl: &mut Controller, outputs: &mut Outputs) {
+    match ev {
+        Event::Connected { peer, session_id, .. } => {
+            info!(peer = %fmt_mac(&peer), session_id, "controller connected");
+            outputs.release_all();
+            ctl.start(now, host);
+        }
+        Event::Resumed { session_id } => info!(session_id, "controller resumed session"),
+        Event::Rejected { peer, status } => {
+            warn!(peer = %fmt_mac(&peer), status, "connect rejected")
+        }
+        Event::Usb(msg) => {
+            let was_ready = ctl.ready();
+            for report in ctl.on_usb(now, &msg, host) {
+                trace!(?report, "report");
+                match report {
+                    Report::Pad(p) => outputs.pad(&p),
+                    Report::Trackpad(t) => outputs.trackpad(&t),
+                }
+            }
+            if ctl.ready()
+                && !was_ready
+                && let Err(e) = outputs.plug()
+            {
+                warn!("{e:#}");
+            }
+        }
+        Event::Serial(data) => debug!(data = %hex(&data), "serial app data"),
+        Event::Farewell { ep, index, report } => {
+            debug!(ep, index, report = %hex(&report), "farewell report")
+        }
+        Event::UpdateParam(p) => debug!(?p, "update param"),
+        Event::Disconnect => {
+            info!("controller going to sleep");
+            outputs.release_all();
+        }
+        // The controller asks for a 300 ms presleep and then routinely goes
+        // quiet that long, so this fires every second or so. Releasing here
+        // snapped held sticks to neutral; the STALE check covers real dropouts instead.
+        Event::Asleep => trace!("controller idle"),
+        // The pad stays plugged in until shieldd exits, so a dropout doesn't
+        // make it vanish from Windows and come back as a new device
+        Event::Stopped => {
+            info!("controller session ended");
+            outputs.release_all();
+        }
+    }
 }

@@ -1423,10 +1423,10 @@ impl State {
         let gray = |on: bool| if on { MF_STRING } else { MF_STRING | MF_GRAYED };
         let tip = match (&s.controller, &s.shunned) {
             (Some(c), _) => {
-                Some(format!("MAC {}\nClick to identify, right-click to rename", crate::adapters::fmt_mac(&c.mac)))
+                Some(format!("MAC {}\nClick to identify, right-click to rename", rtlusb::efuse::fmt_mac(&c.mac)))
             }
             // Grayed, so nothing to click
-            (None, Some(sh)) => Some(format!("MAC {}", crate::adapters::fmt_mac(&sh.mac))),
+            (None, Some(sh)) => Some(format!("MAC {}", rtlusb::efuse::fmt_mac(&sh.mac))),
             (None, None) => None,
         };
         let title = MF_STRING | MF_DISABLED;
@@ -1523,7 +1523,7 @@ const RENAME_EDIT: i32 = 100;
 /// Asks for a new name for `c`. Returns it cleaned up, or None if cancelled or left blank.
 fn rename(hwnd: HWND, c: &Connected) -> Option<String> {
     RENAME_TEXT.set(wide(c.name.as_deref().unwrap_or("")));
-    let prompt = format!("Name for {}, up to {MAX_NAME} characters:", crate::adapters::fmt_mac(&c.mac));
+    let prompt = format!("Name for {}, up to {MAX_NAME} characters:", rtlusb::efuse::fmt_mac(&c.mac));
     let template = rename_template(&prompt);
     // SAFETY: a complete template, DWORD-aligned, that outlives the call; rename_proc is 'static
     let r = unsafe {

@@ -4,9 +4,6 @@
 //! raw Ozmo frames -> ozproto session -> controller setup + HID reports ->
 //! virtual Xbox 360 pad (ViGEm), mouse and media keys (SendInput). See radio.rs.
 //!
-//! `--wifi-direct`: the older path on the Realtek Windows driver, Wi-Fi Direct
-//! GO (WinRT) + Npcap. Works, w/ ~330 ms of input lag. See host.rs.
-//!
 //! The WSL bridge, for when the radio stays in Linux (ozwpan):
 //! - `--transmit` (Linux): controller evdev/hidraw -> SHD2 UDP packets (transmit.rs)
 //! - `--receiver` (Windows): SHD2 packets -> the same outputs (receiver.rs)
@@ -17,8 +14,6 @@
 //! running at login (`--install`). Hosting, both log to a file too. See background.rs and logs.rs.
 
 #[cfg(windows)]
-mod adapters;
-#[cfg(windows)]
 mod background;
 mod civil;
 #[cfg(windows)]
@@ -26,12 +21,8 @@ mod controller;
 #[cfg(windows)]
 mod files;
 #[cfg(windows)]
-mod host;
-#[cfg(windows)]
 mod known_clients;
 mod logs;
-#[cfg(windows)]
-mod npcap;
 #[cfg(windows)]
 mod outputs;
 #[cfg(windows)]
@@ -48,8 +39,6 @@ mod transmit;
 mod tray;
 #[cfg(windows)]
 mod vban;
-#[cfg(windows)]
-mod wifi;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -83,15 +72,6 @@ pub struct Args {
     /// wpa_supplicant P2P config holding the controller's saved group
     #[arg(long, default_value_os_t = default_conf())]
     conf: PathBuf,
-    /// Adapter (and radio) that hosts the group, by its Windows name, w/ --wifi-direct
-    #[arg(long, default_value = "Wi-Fi 2")]
-    adapter: String,
-    /// Connect the adapter to this saved network first, to pin the GO's channel
-    #[arg(long, requires = "wifi_direct")]
-    anchor_ssid: Option<String>,
-    /// Frequency of the anchor network; the controller only searches channel 1
-    #[arg(long, default_value_t = 2412)]
-    anchor_mhz: u32,
     /// Trackpad counts -> screen pixels. Sets X to this and Y to 1.5x it,
     /// since the pad's Y resolution is coarser.
     #[arg(long, default_value_t = 6.0)]
@@ -110,16 +90,11 @@ pub struct Args {
     /// input, and only drive the outputs from those UDP packets
     #[arg(long)]
     receiver: bool,
-    /// Old host path: Windows Wi-Fi Direct + Npcap on the Realtek driver,
-    /// ~330 ms of input lag, since the stack holds frames for the dozing controller. The
-    /// default drives the RTL8811AU ourselves (rtlusb), which needs the adapter on WinUSB.
-    #[arg(long, conflicts_with = "receiver")]
-    wifi_direct: bool,
     /// Pair a controller: hold its NVIDIA button until the light flashes. Makes a new
     /// group (random DIRECT-xx-name, on the quietest of channels 1, 6 and 11) and writes it
     /// to --conf once the controller has it, keeping the old file as a .bak. Then hosts as
     /// usual.
-    #[arg(long, conflicts_with_all = ["receiver", "wifi_direct", "transmit"])]
+    #[arg(long, conflicts_with_all = ["receiver", "transmit"])]
     pair: bool,
     /// Where --transmit sends to, w/ --receiver
     #[arg(long, default_value = shdlink::DEFAULT_ADDR, requires = "receiver")]
@@ -139,11 +114,11 @@ pub struct Args {
     hidraw: Option<PathBuf>,
     /// Keep running: wait for the adapter, and start over when it's unplugged or fails.
     /// shieldw always runs this way.
-    #[arg(long, conflicts_with_all = ["receiver", "wifi_direct", "transmit", "pair"])]
+    #[arg(long, conflicts_with_all = ["receiver", "transmit", "pair"])]
     background: bool,
     /// Start shieldw at login for this user, w/ the rest of this command line. Doesn't start
     /// it now.
-    #[arg(long, conflicts_with_all = ["receiver", "wifi_direct", "transmit", "pair", "uninstall", "stop"])]
+    #[arg(long, conflicts_with_all = ["receiver", "transmit", "pair", "uninstall", "stop"])]
     install: bool,
     /// Don't start shieldw at login anymore. Doesn't stop it either; see --stop.
     #[arg(long, exclusive = true)]
@@ -277,15 +252,16 @@ fn dispatch(mut args: Args, windowless: bool, claimed: Option<Quit>) -> Result<(
             return background::stop();
         }
         if windowless {
-            anyhow::ensure!(
-                !(args.pair || args.receiver || args.wifi_direct),
-                "shieldw only hosts in the background; pair w/ shieldd"
-            );
+            anyhow::ensure!(!(args.pair || args.receiver), "shieldw only hosts in the background; pair w/ shieldd");
             args.background = true;
         }
         // run() claims for anything that hosts, before logging starts
         let quit = anyhow::Context::context(claimed, "hosting w/o the instance")?;
-        host::run(args, quit)
+        if args.receiver {
+            let mut outputs = outputs::Outputs::new(args.scale())?;
+            return receiver::run(args.listen, &mut outputs, &quit);
+        }
+        radio::run(args, &quit)
     }
 }
 

@@ -25,7 +25,6 @@ rand = "0.8"
 names = { version = "0.14", default-features = false }
 # Tray icons from res/*.svg; no text or raster images in them
 resvg = { version = "0.48", default-features = false }
-pcap.workspace = true
 vigem-client.workspace = true
 
 # --transmit: the WSL side
@@ -35,26 +34,14 @@ libc.workspace = true
 [target.'cfg(windows)'.dependencies.windows]
 workspace = true
 features = [
-    "Devices_Radios",
-    "Devices_WiFi",
-    "Devices_WiFiDirect",
-    "Foundation",
-    "Foundation_Collections",
-    "Networking_Connectivity",
-    "Security_Credentials",
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_Media_Audio",
-    "Win32_NetworkManagement_IpHelper",
-    "Win32_NetworkManagement_Ndis",
-    "Win32_Networking_WinSock",
     "Win32_Security",
     "Win32_System_LibraryLoader",
     "Win32_System_Registry",
-    "Win32_System_SystemInformation",
     "Win32_System_Threading",
     "Win32_UI_Controls",
-    "Win32_System_WinRT",
     "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",

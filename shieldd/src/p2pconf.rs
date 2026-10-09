@@ -26,7 +26,7 @@ fn mhz_of(channel: u8) -> u32 {
     2407 + 5 * channel as u32
 }
 
-/// First `mode=3` (GO) network block. The WinRT GO only takes a passphrase,
+/// First `mode=3` (GO) network block. Hosting only takes a passphrase,
 /// so a raw hex PSK is an error.
 pub fn read(path: &Path) -> Result<Group> {
     let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
@@ -49,7 +49,7 @@ fn parse(text: &str) -> Result<Group> {
         let ssid = field("ssid").context("GO block has no ssid")?;
         let psk = field("psk").context("GO block has no psk")?;
         let Some(passphrase) = psk.strip_prefix('"').and_then(|p| p.strip_suffix('"')) else {
-            bail!("psk is a raw hex key; the WinRT GO only takes a passphrase");
+            bail!("psk is a raw hex key; hosting only takes a passphrase");
         };
         let channel = match field("frequency") {
             Some(f) => {

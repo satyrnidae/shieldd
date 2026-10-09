@@ -77,19 +77,14 @@ Run:
 - [Zadig](https://zadig.akeo.ie/), once, to put the adapter on WinUSB.
 - [Voicemeeter](https://vb-audio.com/Voicemeeter/) or another VBAN app, only for controller
   audio; see [Audio](#audio).
-- [Npcap](https://npcap.com/), only for the legacy `--wifi-direct` mode.
 
 Build:
 - Rust 1.88 or newer, `x86_64-pc-windows-msvc` toolchain (edition 2024, let chains).
 - Visual Studio Build Tools w/ the "Desktop development with C++" workload, for the MSVC linker.
-- [Npcap SDK](https://npcap.com/#download), unpacked anywhere, w/ `NPCAP_SDK_DIR` pointing at its
-  root. The build links its `wpcap.lib` import library even though the default mode never loads
-  Npcap.
 
 ## Build
 
 ```powershell
-$env:NPCAP_SDK_DIR = "C:\path\to\npcap-sdk"
 cargo build --release
 cargo test --release
 ```
@@ -212,10 +207,7 @@ Task Manager's startup apps, where it can be turned off too.
 
 ## Other modes
 
-Older paths, kept because they still work:
-- `--wifi-direct`: Windows Wi-Fi Direct group owner on the stock Realtek driver, w/ Npcap for
-  the Ozmo frames. Needs the adapter on its normal driver and a group paired elsewhere.
-  Carries ~330 ms of input lag from the Windows driver's TX queue.
+An older path, kept because it still works:
 - `--receiver` (Windows) + `--transmit` (Linux): the WSL bridge. The adapter is attached to WSL,
   Linux's ozwpan driver enumerates the controller, and `--transmit` forwards its input to
   `--receiver` over UDP.
@@ -226,7 +218,7 @@ Older paths, kept because they still work:
 | --- | --- |
 | `ozproto/` | Ozmo protocol: wire format and host session state machine, no I/O |
 | `rtlusb/` | Userspace RTL8811AU driver over WinUSB: init, firmware, PHY, AP, WPA2, WPS |
-| `shieldd/` | The host: radio, controller setup, outputs, pairing, tray, login start, legacy modes |
+| `shieldd/` | The host: radio, controller setup, outputs, pairing, tray, login start, WSL bridge receiver |
 | `shdlink/` | Packet format shared by `--transmit` and `--receiver` |
 | `res/` | Tray icon SVGs, embedded in shieldd |
 | `tools/` | rtw88 table generator, Python |
