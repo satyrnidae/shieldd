@@ -125,8 +125,12 @@ The group is saved to `--conf`, which defaults to the user's settings folder:
 - Linux: `$XDG_CONFIG_HOME/shieldd/p2p.conf`, or `~/.config/shieldd/p2p.conf`
 
 A previous file is kept next to it as `p2p.conf.<unix time>.bak`. The file is in
-wpa_supplicant's P2P format and holds the passphrase in plain text; the passphrase is never
-logged. Controller names go in `known-clients` alongside, for the tray: one a line, the MAC,
+wpa_supplicant's P2P format, except that the key is sealed w/ Windows DPAPI as
+`psk=dpapi:<hex>`: only the Windows user who saved it can read it, and only on that machine. A
+plain `psk=`, a quoted passphrase or 64 hex digits, is sealed in place the first time it's read.
+Moving to another machine or user means pairing again. The key is never logged.
+
+Controller names go in `known-clients` alongside, for the tray: one a line, the MAC,
 whitespace, then the name, like a hosts file, w/ `#` lines as comments. A controller starts out
 named for the model it gives while pairing, `nVidiaBlake` for this one. An older `p2p.models` is
 moved over on first run.
@@ -222,7 +226,6 @@ An older path, kept because it still works:
 | `shdlink/` | Packet format shared by `--transmit` and `--receiver` |
 | `res/` | Tray icon SVGs, embedded in shieldd |
 | `tools/` | rtw88 table generator, Python |
-| `attic/` | Retired USB/IP bridge, not compiled |
 
 `rtlusb.exe efuse | rx | ap` are bring-up tools for the adapter: dump efuse, print received
 frames, or run a bare AP.

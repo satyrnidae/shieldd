@@ -3,7 +3,7 @@ resolver = "3"
 members = ["ozproto", "rtlusb", "shdlink", "shieldd"]
 
 [workspace.package]
-version = "0.1.0+alpha"
+version = "0.2.0+alpha"
 authors = ["Isabel Maskrey"]
 edition = "2024"
 license = "GPL-2.0-only"

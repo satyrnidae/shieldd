@@ -3,7 +3,7 @@
 use rand::Rng;
 use rand::seq::SliceRandom;
 
-use crate::p2pconf::Group;
+use crate::p2pconf::{Group, Psk};
 
 /// Channel for a new group: 0 has rtlusb survey first and take the quietest of 1, 6 and 11
 pub const CHANNEL: u8 = 0;
@@ -41,7 +41,7 @@ fn ssid(rng: &mut impl Rng) -> String {
 /// A random group w/ a random passphrase. Its channel is CHANNEL until the radio picks one.
 pub fn new_group() -> Group {
     let mut rng = rand::thread_rng();
-    Group { ssid: ssid(&mut rng), passphrase: pick(&mut rng, ALNUM, PASSPHRASE_LEN), channel: CHANNEL }
+    Group { ssid: ssid(&mut rng), psk: Psk::Passphrase(pick(&mut rng, ALNUM, PASSPHRASE_LEN)), channel: CHANNEL }
 }
 
 #[cfg(test)]
@@ -60,7 +60,7 @@ mod tests {
             assert!(parts[1].bytes().all(|b| DISCRIMINATOR.contains(&b)), "{}", g.ssid);
             assert!(names::ADJECTIVES.contains(&parts[2]) && names::NOUNS.contains(&parts[3]), "{}", g.ssid);
             assert!(plain(&format!("{}-{}", parts[2], parts[3])), "{}", g.ssid);
-            assert_eq!(g.passphrase.len(), PASSPHRASE_LEN);
+            assert_eq!(g.psk.passphrase().map(str::len), Some(PASSPHRASE_LEN));
             assert_eq!(g.channel, CHANNEL);
         }
     }

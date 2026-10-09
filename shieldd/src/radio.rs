@@ -217,11 +217,12 @@ fn run_once(args: &Args, pair: bool, pair_bails: bool, quit: &AtomicBool, sh: &m
         Some(g) => g.clone(),
         None => p2pconf::read(&args.conf)?,
     };
-    let wps = pair.then(|| WpsConfig {
+    // A new group always has a passphrase to hand out
+    let wps = group.psk.passphrase().filter(|_| pair).map(|p| WpsConfig {
         device: Device::from_seed(group.ssid.as_bytes(), "shieldd"),
-        credential: Credential { ssid: group.ssid.clone(), passphrase: group.passphrase.clone() },
+        credential: Credential { ssid: group.ssid.clone(), passphrase: p.to_owned() },
     });
-    let pmk = rtlusb::wpa::pmk(&group.passphrase, &group.ssid);
+    let pmk = group.psk.pmk(&group.ssid);
     let ps_hold = match std::env::var("SHIELDD_PS_HOLD_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
         Some(0) => None,
         Some(ms) => Some(Duration::from_millis(ms)),

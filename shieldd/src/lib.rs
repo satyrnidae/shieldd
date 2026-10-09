@@ -19,6 +19,8 @@ mod civil;
 #[cfg(windows)]
 mod controller;
 #[cfg(windows)]
+mod dpapi;
+#[cfg(windows)]
 mod files;
 #[cfg(windows)]
 mod known_clients;
