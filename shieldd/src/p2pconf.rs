@@ -10,7 +10,8 @@ use anyhow::{Context, Result, bail};
 pub use shieldutl::psk::Psk;
 use tracing::{info, warn};
 
-use shieldutl::files::{commit, seal_file, stage};
+use shieldutl::files::{commit, free_name, seal_file, seal_text, stage, stage_gz};
+use shieldutl::wipe;
 
 #[derive(Debug, Clone)]
 pub struct Group {
@@ -89,40 +90,81 @@ fn parse(text: &str) -> Result<Found> {
     bail!("no mode=3 network block")
 }
 
-/// Replaces `path` w/ just this group. An existing file is kept next to it as
-/// `<name>.<unix time>.bak`, its key sealed if it wasn't; returns that path. Written to
-/// `<name>.tmp` first, so a failed write leaves `path` and the backups as they were.
-pub fn write(path: &Path, g: &Group) -> Result<Option<PathBuf>> {
-    let tmp = stage(path, &format(g)?)?;
-    let backup = if path.exists() {
-        let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
-        let mut name = path.file_name().context("conf path has no file name")?.to_owned();
-        name.push(format!(".{secs}.bak"));
-        let b = path.with_file_name(name);
-        let backing_up = || format!("backing up {} to {}", path.display(), b.display());
-        let old = std::fs::read_to_string(path).ok();
-        match old.as_deref().and_then(|t| Some((t, parse(t).ok()?))) {
-            // The new file takes path's place below, so this only has to leave a sealed copy
-            Some((text, found)) if !found.sealed => {
-                seal_file(&b, text, found.psk_at.clone(), &found.group.psk).with_context(backing_up)?
-            }
-            _ => std::fs::rename(path, &b).with_context(backing_up)?,
+/// Replaces `path` w/ just this group. An existing file is kept, gzipped, in `backup/` next to
+/// it, named for it and when it was last written, UTC like the log files:
+/// `backup/p2p.<stamp>.conf.gz`. `seal`, as for read: the new file's key is sealed, and a plain
+/// one in the backup too, or kept plain w/ a warning if that fails, rather than cost the save.
+/// W/o it, both are written plain. Returns the backup's path, if one was made.
+pub fn write(path: &Path, g: &Group, seal: bool) -> Result<Option<PathBuf>> {
+    // The old file before it goes, but its backup only once the new one's in: a save that fails
+    // leaves no backup, so retrying one doesn't pile them up
+    let old = match std::fs::read(path) {
+        Ok(bytes) => Some((bytes, backup_path(path)?)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            warn!("reading {} to back it up: {e}; replacing it w/o a backup", path.display());
+            None
         }
-        Some(b)
-    } else {
-        None
     };
-    commit(&tmp, path)?;
-    Ok(backup)
+    let mut new = format(g, seal)?.into_bytes();
+    let staged = stage(path, &new);
+    wipe(&mut new);
+    commit(&staged?, path)?;
+
+    let Some((mut old, b)) = old else { return Ok(None) };
+    if seal
+        && let Ok(text) = std::str::from_utf8(&old)
+        && let Ok(found) = parse(text)
+        && !found.sealed
+    {
+        match seal_text(text, found.psk_at.clone(), &found.group.psk) {
+            Ok(sealed) => {
+                wipe(&mut old);
+                old = sealed.into_bytes();
+            }
+            Err(e) => warn!("sealing the backup of {}: {e:#}; keeping it plain", path.display()),
+        }
+    }
+    let saved = stage_gz(&b, &old).and_then(|t| commit(&t, &b));
+    wipe(&mut old);
+    match saved {
+        Ok(()) => Ok(Some(b)),
+        Err(e) => {
+            warn!(
+                "backing up the old {} to {}: {e:#}; the new group's saved all the same",
+                path.display(),
+                b.display()
+            );
+            Ok(None)
+        }
+    }
 }
 
-fn format(g: &Group) -> Result<String> {
+/// `dir/p2p.conf` -> `dir/backup/p2p.<stamp>.conf.gz`, or `p2p.<stamp>-2.conf.gz` and on if
+/// that's taken
+fn backup_path(path: &Path) -> Result<PathBuf> {
+    // Not its creation time: Windows keeps that across a staged file renamed over it
+    let written = std::fs::metadata(path).and_then(|m| m.modified()).unwrap_or_else(|_| std::time::SystemTime::now());
+    let stem = path.file_stem().context("conf path has no file name")?.to_string_lossy();
+    let ext = path.extension().map_or_else(|| "gz".to_owned(), |x| format!("{}.gz", x.to_string_lossy()));
+    let base = format!("{stem}.{}", shieldutl::civil::stamp(written));
+    Ok(free_name(&path.with_file_name("backup"), &base, &[&ext]))
+}
+
+/// The file for `g`, its key sealed or plain
+fn format(g: &Group, seal: bool) -> Result<String> {
+    let (psk, note) = match seal {
+        true => {
+            (g.psk.seal()?, "# psk is sealed w/ DPAPI; only the Windows user who paired can read it, on this machine.")
+        }
+        false => (g.psk.plain(), "# psk is plain, for wpa_supplicant and the like to read too."),
+    };
     let lines = [
         "# Written by shieldd --pair: the group the controller was paired with.".to_owned(),
-        "# psk is sealed w/ DPAPI; only the Windows user who paired can read it, on this machine.".to_owned(),
+        note.to_owned(),
         "network={".to_owned(),
         format!("\tssid=\"{}\"", g.ssid),
-        format!("\tpsk={}", g.psk.seal()?),
+        format!("\tpsk={psk}"),
         "\tproto=RSN".to_owned(),
         "\tkey_mgmt=WPA-PSK".to_owned(),
         "\tpairwise=CCMP".to_owned(),
@@ -163,7 +205,7 @@ mod tests {
     fn written_group_is_sealed_and_reads_back() {
         let g =
             Group { ssid: "DIRECT-FC-organized-baboon".into(), psk: Psk::Passphrase("s3cretPW".into()), channel: 11 };
-        let text = format(&g).unwrap();
+        let text = format(&g, true).unwrap();
         assert!(text.contains("frequency=2462") && text.contains("psk=dpapi:"));
         assert!(!text.contains("s3cretPW"));
         let f = parse(&text).unwrap();
@@ -197,18 +239,40 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    fn gunzip(path: &Path) -> String {
+        use std::io::Read;
+        let mut out = String::new();
+        flate2::read::GzDecoder::new(std::fs::File::open(path).unwrap()).read_to_string(&mut out).unwrap();
+        out
+    }
+
     #[test]
-    fn a_plain_conf_is_backed_up_sealed() {
+    fn backups_are_gzipped_in_their_own_folder() {
         let dir = scratch("write");
         let path = dir.join("p2p.conf");
         std::fs::write(&path, PLAIN_GO).unwrap();
         let g =
             Group { ssid: "DIRECT-FC-organized-baboon".into(), psk: Psk::Passphrase("s3cretPW".into()), channel: 6 };
-        let b = write(&path, &g).unwrap().unwrap();
-        let backup = std::fs::read_to_string(&b).unwrap();
+
+        // The default: sealed in the backup
+        let b = write(&path, &g, true).unwrap().unwrap();
+        assert_eq!(b.parent().unwrap(), dir.join("backup"));
+        let name = b.file_name().unwrap().to_str().unwrap();
+        assert!(name.len() == "p2p.2026-10-09T14_01_04.conf.gz".len(), "{name}");
+        assert!(name.starts_with("p2p.") && name.ends_with(".conf.gz"), "{name}");
+        let backup = gunzip(&b);
         assert!(!backup.contains("pass1234") && backup.contains("DIRECT-0S"));
         assert_eq!(parse(&backup).unwrap().group.psk, Psk::Passphrase("pass1234".into()));
         assert_eq!(read(&path, false).unwrap().ssid, "DIRECT-FC-organized-baboon");
+
+        // A --conf of its own: backed up as it was
+        std::fs::write(&path, PLAIN_GO).unwrap();
+        std::fs::remove_dir_all(dir.join("backup")).unwrap();
+        let b = write(&path, &g, false).unwrap().unwrap();
+        assert_eq!(gunzip(&b), PLAIN_GO);
+        // And the new file plain too, for whatever else reads it
+        let new = std::fs::read_to_string(&path).unwrap();
+        assert!(new.contains("psk=\"s3cretPW\"") && !new.contains("dpapi:"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

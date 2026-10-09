@@ -8,7 +8,9 @@ publish.workspace = true
 
 [features]
 # Log files and the tracing setup, for the binaries
-logs = ["dep:flate2", "dep:tracing", "dep:tracing-subscriber"]
+logs = ["gzip", "dep:tracing", "dep:tracing-subscriber"]
+# Gzipped files: packed logs, conf backups
+gzip = ["dep:flate2"]
 # Controller audio to and from Voicemeeter
 vban = ["dep:tracing"]
 
@@ -22,3 +24,7 @@ tracing-subscriber = { workspace = true, optional = true }
 [target.'cfg(windows)'.dependencies.windows]
 workspace = true
 features = ["Win32_Foundation", "Win32_Security_Cryptography"]
+
+# Its own tests cover the gzip helpers too
+[dev-dependencies]
+shieldutl = { path = ".", features = ["gzip"] }

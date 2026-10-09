@@ -4,7 +4,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use flate2::Compression;
@@ -92,7 +92,9 @@ fn open(dir: &Path, rotate: bool) -> Result<(File, Option<anyhow::Error>)> {
     match fs::metadata(&latest) {
         Ok(meta) => {
             let started = meta.created().or_else(|_| meta.modified()).unwrap_or_else(|_| SystemTime::now());
-            if let Err(e) = fs::rename(&latest, free_name(dir, &stamp(started))) {
+            if let Err(e) =
+                fs::rename(&latest, crate::files::free_name(dir, &crate::civil::stamp(started), &["log", "log.gz"]))
+            {
                 return keep(e, "moving aside");
             }
         }
@@ -151,43 +153,9 @@ fn gz_name(log: &Path) -> PathBuf {
     s.into()
 }
 
-/// `stamp.log`, or `stamp-2.log` and on if two runs started the same second
-fn free_name(dir: &Path, stamp: &str) -> PathBuf {
-    (1..)
-        .map(|n| dir.join(if n == 1 { format!("{stamp}.log") } else { format!("{stamp}-{n}.log") }))
-        .find(|p| !p.exists() && !gz_name(p).exists())
-        .expect("some name is free")
-}
-
-/// YYYY-MM-DDTHH_mm_SS, UTC like the log's lines. Windows forbids `:` in a file name.
-fn stamp(t: SystemTime) -> String {
-    let secs = t.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
-    let (h, m, s) = (secs / 3600 % 24, secs / 60 % 60, secs % 60);
-    format!("{}T{h:02}_{m:02}_{s:02}", crate::civil::date(secs / 86_400))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
-
-    #[test]
-    fn stamps_are_utc_and_colonless() {
-        let t = UNIX_EPOCH + Duration::from_secs(1_791_554_464);
-        assert_eq!(stamp(t), "2026-10-09T14_01_04");
-    }
-
-    #[test]
-    fn names_dodge_packed_and_unpacked_logs() {
-        let dir = std::env::temp_dir().join(format!("shieldd-logs-test-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
-        assert_eq!(free_name(&dir, "s"), dir.join("s.log"));
-        File::create(dir.join("s.log.gz")).unwrap();
-        assert_eq!(free_name(&dir, "s"), dir.join("s-2.log"));
-        File::create(dir.join("s-2.log")).unwrap();
-        assert_eq!(free_name(&dir, "s"), dir.join("s-3.log"));
-        fs::remove_dir_all(&dir).unwrap();
-    }
 
     #[test]
     fn packs_and_keeps_the_newest() {

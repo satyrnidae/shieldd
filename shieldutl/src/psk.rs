@@ -53,13 +53,18 @@ impl Psk {
         Ok(Psk::Pmk(k))
     }
 
+    /// The plain `psk=` value: the passphrase quoted, or the PMK in hex
+    pub fn plain(&self) -> String {
+        match self {
+            Psk::Passphrase(p) => format!("\"{p}\""),
+            Psk::Pmk(k) => k.iter().map(|b| format!("{b:02x}")).collect(),
+        }
+    }
+
     /// The sealed `psk=` value
     #[cfg(windows)]
     pub fn seal(&self) -> Result<String> {
-        let mut plain = match self {
-            Psk::Passphrase(p) => format!("\"{p}\"").into_bytes(),
-            Psk::Pmk(k) => k.iter().map(|b| format!("{b:02x}")).collect::<String>().into_bytes(),
-        };
+        let mut plain = self.plain().into_bytes();
         let sealed = crate::dpapi::protect(&plain);
         wipe(&mut plain);
         Ok(format!("{SEALED}{}", crate::base64::encode(&sealed?)))

@@ -90,7 +90,7 @@ pub struct Args {
     receiver: bool,
     /// Pair a controller: hold its NVIDIA button until the light flashes. Makes a new
     /// group (random DIRECT-xx-name, on the quietest of channels 1, 6 and 11) and writes it
-    /// to --conf once the controller has it, keeping the old file as a .bak. Then hosts as
+    /// to --conf once the controller has it, keeping the old file gzipped in backup/ next to it. Then hosts as
     /// usual.
     #[arg(long, conflicts_with_all = ["receiver", "transmit"])]
     pair: bool,

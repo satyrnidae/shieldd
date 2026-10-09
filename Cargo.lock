@@ -889,6 +889,7 @@ dependencies = [
  "anyhow",
  "clap",
  "ctrlc",
+ "flate2",
  "libc",
  "names",
  "ozproto",
@@ -919,6 +920,7 @@ version = "0.2.0+alpha"
 dependencies = [
  "anyhow",
  "flate2",
+ "shieldutl",
  "tracing",
  "tracing-subscriber",
  "windows",

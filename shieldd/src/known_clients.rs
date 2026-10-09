@@ -92,7 +92,7 @@ pub fn save(conf: &Path, mac: &Mac, name: &str) -> Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(e).with_context(|| format!("reading {}", p.display())),
     };
-    let tmp = files::stage(&p, &set_line(&text, mac, name))?;
+    let tmp = files::stage(&p, set_line(&text, mac, name))?;
     files::commit(&tmp, &p)
 }
 

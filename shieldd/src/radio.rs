@@ -88,6 +88,8 @@ struct Shared {
     unsaved: Option<p2pconf::Group>,
     /// --conf, which known-clients sits next to
     conf: PathBuf,
+    /// --conf is the default one, whose key gets sealed
+    seal: bool,
 }
 
 impl Shared {
@@ -169,7 +171,13 @@ impl Shared {
 
 pub fn run(args: Args, quit: &AtomicBool) -> Result<()> {
     // Up the whole time, so it also says shieldd is running while there's nothing to host
-    let mut sh = Shared { tray: Tray::start(crate::ABOUT), vban: None, unsaved: None, conf: args.conf.clone() };
+    let mut sh = Shared {
+        tray: Tray::start(crate::ABOUT),
+        vban: None,
+        unsaved: None,
+        conf: args.conf.clone(),
+        seal: crate::is_default_conf(&args.conf),
+    };
     if Shared::vban_marker().exists() {
         sh.set_vban(true);
     }
@@ -215,7 +223,7 @@ fn run_once(args: &Args, pair: bool, pair_bails: bool, quit: &AtomicBool, sh: &m
     let mut group = match &sh.unsaved {
         _ if pair => pair::new_group(),
         Some(g) => g.clone(),
-        None => p2pconf::read(&args.conf, crate::is_default_conf(&args.conf))?,
+        None => p2pconf::read(&args.conf, sh.seal)?,
     };
     let wps = match pair {
         true => Some(WpsConfig {
@@ -322,7 +330,7 @@ fn run_once(args: &Args, pair: bool, pair_bails: bool, quit: &AtomicBool, sh: &m
                     names.insert(sta, name);
                 }
                 // The controller has the credential now, so this group is the one it remembers
-                match p2pconf::write(&args.conf, &group) {
+                match p2pconf::write(&args.conf, &group, sh.seal) {
                     Ok(backup) => info!(
                         sta = %fmt_mac(&sta),
                         ssid = group.ssid,
@@ -362,7 +370,7 @@ fn run_once(args: &Args, pair: bool, pair_bails: bool, quit: &AtomicBool, sh: &m
                     if let Some(t) = save_due
                         && now >= t
                     {
-                        match p2pconf::write(&args.conf, &group) {
+                        match p2pconf::write(&args.conf, &group, sh.seal) {
                             Ok(_) => {
                                 info!(conf = %args.conf.display(), "group saved");
                                 sh.unsaved = None;

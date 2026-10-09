@@ -124,13 +124,14 @@ The group is saved to `--conf`, which defaults to the user's settings folder:
 - Windows: `%LOCALAPPDATA%\shieldd\p2p.conf`
 - Linux: `$XDG_CONFIG_HOME/shieldd/p2p.conf`, or `~/.config/shieldd/p2p.conf`
 
-A previous file is kept next to it as `p2p.conf.<unix time>.bak`. The file is in
-wpa_supplicant's P2P format, except that the key is sealed w/ Windows DPAPI as
-`psk=dpapi:<base64>`: only the Windows user who saved it can read it, and only on that machine.
-A plain `psk=`, a quoted passphrase or 64 hex digits, is sealed in place the first time the
-default file is read, and a backup of a plain file is sealed as it's made. A file given w/ `--conf` is read as it is and left plain, since wpa_supplicant or
-something else may read it too. Moving to another machine or user means pairing again.
-`rtlusb.exe ap` reads sealed files as well. The key is never logged.
+A previous file is kept, gzipped, in `backup\` next to it, named for it and when it was last
+written, like the logs: `p2p.2026-10-09T14_01_04.conf.gz`. The file is in wpa_supplicant's P2P format, except that
+the key is sealed w/ Windows DPAPI as `psk=dpapi:<base64>`: only the Windows user who saved it
+can read it, and only on that machine. A plain `psk=`, a quoted passphrase or 64 hex digits, is
+sealed in place the first time the default file is read, and in its backup when a new pairing
+replaces it. A file given w/ `--conf` is read, backed up and written w/ a plain key, since
+wpa_supplicant or something else may read it too. Moving to another machine or user means
+pairing again. `rtlusb.exe ap` reads sealed files as well. The key is never logged.
 
 Controller names go in `known-clients` alongside, for the tray: one a line, the MAC,
 whitespace, then the name, like a hosts file, w/ `#` lines as comments. A controller starts out
