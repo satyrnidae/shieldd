@@ -45,11 +45,11 @@ Works:
   connects flat is sent away until it's plugged in.
 - Tray menu: pair, identify, rename, disconnect, VBAN audio on/off, about
 - Runs at login, windowless, and picks the adapter back up after a replug
+- Mic and headset audio over VBAN, tested w/ Voicemeeter Potato
 
 Not yet, or untested:
-- Audio over VBAN: the mic and headset paths are written but not yet tried on the controller.
-  No native Windows audio device; that would need a kernel driver, and test-signed drivers
-  don't get along w/ anti-cheat.
+- A native Windows audio device. That would need a kernel driver, and test-signed drivers don't
+  get along w/ anti-cheat.
 - 5 GHz, TX power calibration and IQK on the adapter. 2.4 GHz at fixed power is enough at
   couch distance.
 
@@ -77,7 +77,7 @@ Run:
 - [Zadig](https://zadig.akeo.ie/), once, to put the adapter on WinUSB.
 - [Voicemeeter](https://vb-audio.com/Voicemeeter/) or another VBAN app, only for controller
   audio; see [Audio](#audio).
-- [Npcap](https://npcap.com/), only for the legacy `--wifi-direct` and `--receiver` modes.
+- [Npcap](https://npcap.com/), only for the legacy `--wifi-direct` mode.
 
 Build:
 - Rust 1.88 or newer, `x86_64-pc-windows-msvc` toolchain (edition 2024, let chains).
@@ -162,9 +162,10 @@ Options worth knowing, the rest in `shieldd --help`:
 ### Tray
 
 The icon shows the controller's battery: a bolt while it charges, the bolt flashing green for
-5 s when it's plugged in; an all-green full battery once it's charged, which it reads from the
-charger letting go, like the controller's light turning green; and an all-red one w/ a flashing
-warning mark when it's critical. A crossed-out signal flashes red for 5 s at startup and when a
+5 s when it's plugged in; an all-green full battery once it's charged, like the controller's
+light turning green, which it reads from the charger letting go after a top-off, or from one
+plugged in full getting no top-off within 30 s; and an all-red one w/ a flashing warning mark
+when it's critical. A crossed-out signal flashes red for 5 s at startup and when a
 controller drops off on its own rather than sent away. A spinner turns while one is joining, and
 a Wi-Fi signal lights up blue, a bar at a time, while pairing. A controller joining or leaving
 Wi-Fi plays Windows' Device Connect or Device Disconnect sound, as a USB device would.
@@ -194,16 +195,14 @@ With VBAN on, the controller's audio goes through
   outgoing stream at `127.0.0.1:6981`. Played ~12 dB down, since the jack has no volume of its
   own.
 
-The headset side is new on this host and untested; on the old Linux path it stuttered.
-
 ### At login
 
 ```powershell
 .\target\release\shieldd.exe --install
 ```
 
-Starts `shieldw.exe` at login for this user, w/ any other options given alongside `--install`.
-It waits for the adapter, picks it back up after it's unplugged, and logs to
+Starts `shieldw.exe` at login for this user, w/ any other options given alongside `--install`;
+a `--conf` among them has to be an absolute path. It waits for the adapter, picks it back up after it's unplugged, and logs to
 `%LOCALAPPDATA%\shieldd\logs\latest.log`, as does a hosting `shieldd`. Earlier runs' logs are
 gzipped next to it, named for when they started, UTC: `2026-10-09T14_01_04.log.gz`. It shows under
 Task Manager's startup apps, where it can be turned off too.
@@ -229,7 +228,8 @@ Older paths, kept because they still work:
 | `rtlusb/` | Userspace RTL8811AU driver over WinUSB: init, firmware, PHY, AP, WPA2, WPS |
 | `shieldd/` | The host: radio, controller setup, outputs, pairing, tray, login start, legacy modes |
 | `shdlink/` | Packet format shared by `--transmit` and `--receiver` |
-| `tools/` | Python one-offs: rtw88 table generator, Wi-Fi Direct probe |
+| `res/` | Tray icon SVGs, embedded in shieldd |
+| `tools/` | rtw88 table generator, Python |
 | `attic/` | Retired USB/IP bridge, not compiled |
 
 `rtlusb.exe efuse | rx | ap` are bring-up tools for the adapter: dump efuse, print received

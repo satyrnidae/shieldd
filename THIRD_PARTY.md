@@ -8,8 +8,9 @@ work below. Each entry says what was taken and under which license.
 ### rtw88, Linux Realtek 802.11ac driver
 - **Used for:** `rtlusb`. Register access, power-on sequences, firmware download, efuse decode,
   PHY/RF setup, TX/RX descriptors and security CAM follow rtw88's `usb.c`, `mac.c`, `fw.c`,
-  `efuse.c`, `rtw88xxa.c` and `rtw8821a*.c`. `rtlusb/src/tables.rs` is generated from
-  `rtw8821a_table.c` by `tools/gen_rtw_tables.py`.
+  `efuse.c`, `phy.c`, `rx.c`, `tx.c`, `sec.c`, `mac80211.c` (`rtw_ops_set_key`), `rtw88xxa.c`
+  and `rtw8821a*.c`; the register map, its `reg.h`, `rtw88xxa.h` and `sec.h`.
+  `rtlusb/src/tables.rs` is generated from `rtw8821a_table.c` by `tools/gen_rtw_tables.py`.
 - **License:** GPL-2.0 OR BSD-3-Clause, taken here under GPL-2.0.
 - **Copyright:** (c) 2018-2024 Realtek Corporation.
 - **Source:** https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git,
@@ -98,8 +99,8 @@ DAMAGE.
 Installed separately by the user; nothing from them ships with this project.
 
 - **ViGEmBus**, BSD-3-Clause, (c) Nefarius Software Solutions e.U. Virtual Xbox 360 pad.
-- **Npcap**, Npcap License, (c) Insecure.Com LLC. Only `--wifi-direct` and `--receiver` load
-  it; the build links its import library from the Npcap SDK.
+- **Npcap**, Npcap License, (c) Insecure.Com LLC. Only `--wifi-direct` loads it; the build
+  links its import library from the Npcap SDK.
 - **WinUSB**, Microsoft, part of Windows.
 
 ## Icons
@@ -168,9 +169,12 @@ SOFTWARE.
 
 ## Rust crates
 
-Statically linked from crates.io. All are permissive and GPL-2.0 compatible; Apache-2.0 crates
-are all dual-licensed w/ MIT. Their license texts ship in each crate's source. Regenerate this
-list w/ `cargo metadata` after changing dependencies.
+Every crate in `Cargo.lock`, from crates.io. Not all of them end up in the Windows binaries:
+some only run at build time, like `cc`, `syn` and the derive macros; some are for other
+platforms, like `objc2`, `core-foundation` and the `wasm-bindgen` family; and `zlib-rs` is a
+`flate2` backend left off. The rest are statically linked. All are permissive and GPL-2.0
+compatible; Apache-2.0 crates are all dual-licensed w/ MIT. Their license texts ship in each
+crate's source. Regenerate this list w/ `cargo metadata` after changing dependencies.
 
 **MIT OR Apache-2.0**: aes 0.8.4, aes-kw 0.2.1, anstream 1.0.0, anstyle 1.0.14, anstyle-parse 1.0.0, anstyle-query 1.1.5, anstyle-wincon 3.0.11, anyhow 1.0.104, arrayvec 0.7.8, autocfg 1.5.1, bitflags 1.3.2, bitflags 2.13.2, block-buffer 0.10.4, block-padding 0.3.3, bumpalo 3.20.3, cbc 0.1.2, cc 1.6.0, cfg-if 1.0.5, cipher 0.4.4, clap 4.6.7, clap_builder 4.6.7, clap_derive 4.6.7, clap_lex 1.1.1, colorchoice 1.0.5, core-foundation 0.10.1, core-foundation-sys 0.8.7, cpufeatures 0.2.17, crc32fast 1.5.2, crypto-common 0.1.7, ctrlc 3.5.2, data-url 0.3.2, digest 0.10.7, errno 0.2.8, errno 0.3.14, euclid 0.22.14, fdeflate 0.3.7, find-msvc-tools 0.1.14, flate2 1.1.10, futures-core 0.3.34, futures-task 0.3.34, futures-util 0.3.34, getrandom 0.2.17, heck 0.5.0, hmac 0.12.1, inout 0.1.4, io-kit-sys 0.5.0, is_terminal_polyfill 1.70.2, js-sys 0.3.106, kurbo 0.13.1, lazy_static 1.5.1, libc 0.2.190, log 0.4.34, num-bigint 0.4.8, num-integer 0.1.47, num-traits 0.2.19, nusb 0.2.7, once_cell 1.21.4, once_cell_polyfill 1.70.2, pbkdf2 0.12.2, pcap 2.5.0, pin-project-lite 0.2.17, pkg-config 0.3.34, png 0.18.1, polycool 0.4.0, ppv-lite86 0.2.21, proc-macro2 1.0.107, quote 1.0.47, rand 0.8.8, rand_chacha 0.3.1, rand_core 0.6.4, regex 1.13.1, regex-automata 0.4.18, regex-syntax 0.8.11, resvg 0.48.1, roxmltree 0.21.1, rustversion 1.0.23, sha1 0.10.7, sha2 0.10.9, shlex 2.0.1, simplecss 0.2.2, siphasher 1.0.4, smallvec 1.16.2, svgtypes 0.16.1, syn 2.0.119, syn 3.0.6, thread_local 1.1.10, typenum 1.20.1, usvg 0.48.1, utf8parse 0.2.2, version_check 0.9.5, wasm-bindgen 0.2.129, wasm-bindgen-futures 0.4.79, wasm-bindgen-macro 0.2.129, wasm-bindgen-macro-support 0.2.129, wasm-bindgen-shared 0.2.129, web-sys 0.3.106, winapi 0.3.9, winapi-i686-pc-windows-gnu 0.4.0, winapi-x86_64-pc-windows-gnu 0.4.0, windows 0.62.2, windows-collections 0.3.2, windows-core 0.62.2, windows-future 0.3.2, windows-implement 0.60.2, windows-interface 0.59.3, windows-link 0.2.1, windows-numerics 0.3.1, windows-result 0.4.1, windows-strings 0.5.1, windows-sys 0.36.1, windows-sys 0.61.2, windows-threading 0.2.1, windows_aarch64_msvc 0.36.1, windows_i686_gnu 0.36.1, windows_i686_msvc 0.36.1, windows_x86_64_gnu 0.36.1, windows_x86_64_msvc 0.36.1
 
