@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use tracing::{info, warn};
 
+use crate::p2pconf;
+
 type Mac = [u8; 6];
 
 /// Longest name: the WPS model name field it starts out as, which the controller fills to 15
@@ -39,11 +41,8 @@ fn parse_line(line: &str) -> Option<(Mac, String)> {
         return None;
     }
     let (mac, name) = line.split_once(char::is_whitespace)?;
-    let name = name.trim();
-    if name.is_empty() {
-        return None;
-    }
-    Some((parse_mac(mac)?, name.to_owned()))
+    // Hand edits and an old p2p.models get the same limits as a rename
+    Some((parse_mac(mac)?, clean(name)?))
 }
 
 fn parse(text: &str) -> HashMap<Mac, String> {
@@ -104,11 +103,8 @@ pub fn save(conf: &Path, mac: &Mac, name: &str) -> Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(e).with_context(|| format!("reading {}", p.display())),
     };
-    let mut tmp_name = p.file_name().context("no file name")?.to_owned();
-    tmp_name.push(".tmp");
-    let tmp = p.with_file_name(tmp_name);
-    std::fs::write(&tmp, set_line(&text, mac, name)).with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::rename(&tmp, &p).with_context(|| format!("moving {} to {}", tmp.display(), p.display()))
+    let tmp = p2pconf::stage(&p, &set_line(&text, mac, name))?;
+    p2pconf::commit(&tmp, &p)
 }
 
 #[cfg(test)]

@@ -14,18 +14,20 @@
 //! Both sides share the packet format through the `shdlink` crate.
 //!
 //! Two binaries share this: `shieldd`, the console one, and `shieldw`, a windowless one for
-//! running at login (`--install`), which logs to a file. See background.rs.
+//! running at login (`--install`). Hosting, both log to a file too. See background.rs and logs.rs.
 
 #[cfg(windows)]
 mod adapters;
 #[cfg(windows)]
 mod background;
+mod civil;
 #[cfg(windows)]
 mod controller;
 #[cfg(windows)]
 mod host;
 #[cfg(windows)]
 mod known_clients;
+mod logs;
 #[cfg(windows)]
 mod npcap;
 #[cfg(windows)]
@@ -164,26 +166,33 @@ impl Args {
 /// From background::claim
 type Quit = std::sync::Arc<std::sync::atomic::AtomicBool>;
 
-/// Both binaries' main; `windowless` is shieldw, which logs to `settings_dir()/shieldd.log`
+/// Both binaries' main; `windowless` is shieldw, which only logs to the file. See logs.rs.
 pub fn run(windowless: bool) -> Result<()> {
     let parsed = Args::try_parse();
-    // shieldw takes the instance before it touches the log. Only the instance rotates it; any
-    // other shieldw, a second launch or a one-off like --stop, adds to the end of it.
+    // A host takes the instance before it touches the log file, and only the instance starts a
+    // new one. Anything else shieldw does, a second launch or a one-off like --stop, adds to
+    // the end of it; shieldd's one-offs only print.
     #[cfg(windows)]
     let claimed = match &parsed {
-        Ok(a) if windowless && a.hosts() => Some(background::claim(false)),
+        Ok(a) if a.hosts() => Some(background::claim(!windowless)),
         _ => None,
     };
     #[cfg(not(windows))]
     let claimed: Option<Result<Quit>> = None;
-    init_logging(windowless, matches!(claimed, Some(Ok(_))))?;
-    if windowless {
+    let to_file = match &claimed {
+        Some(Ok(_)) => Some(true),
+        _ => windowless.then_some(false),
+    };
+    init_logging(!windowless, to_file)?;
+    if to_file.is_some() {
         std::panic::set_hook(Box::new(|p| error!("{p}")));
     }
     let claimed = match claimed.transpose() {
         Ok(c) => c,
         Err(e) => {
-            error!("{e:#}");
+            if windowless {
+                error!("{e:#}");
+            }
             return Err(e);
         }
     };
@@ -202,26 +211,31 @@ pub fn run(windowless: bool) -> Result<()> {
     result
 }
 
-/// `rotate`: start a fresh log, keeping one run back; otherwise add to the current one
-fn init_logging(to_file: bool, rotate: bool) -> Result<()> {
+/// `to_file`: Some(true) starts a new log file, Some(false) adds to it. Color only goes to a
+/// terminal, never a file or a redirect.
+fn init_logging(console: bool, to_file: Option<bool>) -> Result<()> {
+    use std::io::IsTerminal;
+    use tracing_subscriber::fmt;
+    use tracing_subscriber::prelude::*;
     // rtlusb's info covers the AP, pairing and channel survey; its noisy stats are debug
     let filter =
         tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "shieldd=info,rtlusb=info".into());
-    let fmt = tracing_subscriber::fmt().with_env_filter(filter);
-    if to_file {
-        let dir = settings_dir();
-        std::fs::create_dir_all(&dir)?;
-        let log = dir.join("shieldd.log");
-        let file = if rotate {
-            // One run back is enough to see why it stopped
-            let _ = std::fs::rename(&log, dir.join("shieldd.old.log"));
-            std::fs::File::create(log)?
-        } else {
-            std::fs::OpenOptions::new().create(true).append(true).open(log)?
-        };
-        fmt.with_ansi(false).with_writer(std::sync::Mutex::new(file)).init();
-    } else {
-        fmt.init();
+    let console = console.then(|| fmt::layer().with_ansi(std::io::stdout().is_terminal()));
+    // Nothing logs before the new file is in place, or it'd land in the last run's
+    let (file, stuck) = match to_file {
+        Some(rotate) => {
+            let (f, stuck) = logs::open(rotate)?;
+            (Some(fmt::layer().with_ansi(false).with_writer(std::sync::Mutex::new(f))), stuck)
+        }
+        None => (None, None),
+    };
+    tracing_subscriber::registry().with(filter).with(console).with(file).init();
+    if let Some(e) = stuck {
+        tracing::warn!("{e:#}");
+    }
+    if to_file == Some(true) {
+        // Packing a long log takes a moment; hosting needn't wait on it
+        let _ = std::thread::Builder::new().name("pack logs".into()).spawn(logs::pack);
     }
     Ok(())
 }

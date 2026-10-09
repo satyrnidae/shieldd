@@ -38,7 +38,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::Shell::{
     NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIIF_ERROR, NIIF_NOSOUND, NIIF_WARNING, NIM_ADD, NIM_DELETE,
-    NIM_MODIFY, NOTIFY_ICON_MESSAGE, NOTIFYICONDATAW, Shell_NotifyIconW,
+    NIM_MODIFY, NOTIFY_ICON_MESSAGE, NOTIFYICONDATAW, NOTIFYICONIDENTIFIER, Shell_NotifyIconGetRect, Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, CW_USEDEFAULT, CreateIconIndirect, CreatePopupMenu, CreateWindowExW,
@@ -101,6 +101,19 @@ const RECHARGED_BY: u8 = 10;
 /// the curve on the charger and read 100 at 0xF1D3, which was 91% off it on 2026-10-09.
 const CHARGE_LIFT: u16 = 0x0660;
 
+/// The controller never says it's done charging; band 100 and the charging bit stay up. Near
+/// full the charger holds the reading flat while it tops off, then it falls this far when the
+/// charger stops: 0xF43D -> 0xF23B as the light went green on 2026-10-09.
+const CHARGED_DROP: u16 = 0x0180;
+/// Only from this high; lower down, a dip under load isn't the charger stopping
+const CHARGED_PEAK: u16 = 0xF200;
+/// Plugged in already full, the charger may not top it off at all: 0xF0A8 at rest -> 0xF2C0 and
+/// flat, light green, on 2026-10-09. A top-up starts ~10 s in and lifts it ~0x410 over rest;
+/// one that isn't full, ~0x660. So full at rest and still under this lift this long after
+/// plugging in is charged.
+const IDLE_LIFT: u16 = 0x0300;
+const IDLE_AFTER: Duration = Duration::from_secs(30);
+
 /// On battery, see CURVE
 pub fn percent(reading: u16) -> u8 {
     let Some(i) = CURVE.iter().position(|&(r, _)| reading < r) else { return 100 };
@@ -120,13 +133,34 @@ fn charging_percent(reading: u16) -> u8 {
 struct Gauge {
     pct: Option<u8>,
     charging: Option<bool>,
+    /// Highest reading on the charger since it was plugged in, 0 off it
+    peak: u16,
+    /// Last reading off the charger, 0 if none
+    rest: u16,
+    /// When it was plugged in, and whether the IDLE_AFTER look has been asked for
+    plugged: Option<(Instant, bool)>,
 }
 
 impl Gauge {
     /// Returns the percent to show, and whether a discharge just began (re-arms the critical alert)
-    fn feed(&mut self, b: &Battery) -> (u8, bool) {
-        let p = if b.charging { charging_percent(b.reading) } else { percent(b.reading) };
+    fn feed(&mut self, b: &Battery, now: Instant) -> (u8, bool) {
         let switched = self.charging != Some(b.charging);
+        if !b.charging {
+            (self.peak, self.rest, self.plugged) = (0, b.reading, None);
+        } else if switched {
+            (self.peak, self.plugged) = (b.reading, Some((now, false)));
+        } else {
+            self.peak = self.peak.max(b.reading);
+        }
+        let let_go = self.peak >= CHARGED_PEAK && self.peak - b.reading >= CHARGED_DROP;
+        let idle = self.rest >= CURVE[CURVE.len() - 1].0
+            && self.plugged.is_some_and(|(t, _)| now >= t + IDLE_AFTER)
+            && self.peak < self.rest.saturating_add(IDLE_LIFT);
+        let p = match b.charging {
+            true if let_go || idle => 100,
+            true => charging_percent(b.reading),
+            false => percent(b.reading),
+        };
         let (pct, fresh) = match self.pct {
             None => (p, true),
             Some(_) if switched => (p, !b.charging),
@@ -139,6 +173,17 @@ impl Gauge {
         self.charging = Some(b.charging);
         (pct, fresh)
     }
+
+    /// Once per plug-in, IDLE_AFTER in: time for another look, since no new reading may come
+    fn look_due(&mut self, now: Instant) -> bool {
+        match &mut self.plugged {
+            Some((t, looked)) if !*looked && now >= *t + IDLE_AFTER => {
+                *looked = true;
+                true
+            }
+            _ => false,
+        }
+    }
 }
 
 //endregion
@@ -147,10 +192,10 @@ impl Gauge {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Icon {
-    /// On the charger: green outline and bolt
+    /// On the charger: outline and bolt in the stroke color. Flashes w/ ChargingLit when plugged in.
     Charging,
-    /// Charging's other frame: the green outline w/ the bolt in the stroke color, so it flashes
-    ChargingDim,
+    /// The plug-in flash's other frame: the bolt in green
+    ChargingLit,
     /// On the charger at 100%: the full battery, outline and all in green
     Charged,
     Full,
@@ -210,7 +255,7 @@ enum Accent {
 impl Icon {
     const FIXED: [Icon; 16] = [
         Icon::Charging,
-        Icon::ChargingDim,
+        Icon::ChargingLit,
         Icon::Charged,
         Icon::Full,
         Icon::Medium,
@@ -254,8 +299,8 @@ impl Icon {
     /// The SVG, and the color of every path after the first, which is the outline
     fn source(self) -> (&'static str, Accent) {
         match self {
-            Icon::Charging => (include_str!("../../res/battery-charging-svgrepo-com.svg"), Accent::Green),
-            Icon::ChargingDim => (include_str!("../../res/battery-charging-svgrepo-com.svg"), Accent::None),
+            Icon::Charging => (include_str!("../../res/battery-charging-svgrepo-com.svg"), Accent::None),
+            Icon::ChargingLit => (include_str!("../../res/battery-charging-svgrepo-com.svg"), Accent::Green),
             Icon::Charged => (include_str!("../../res/battery-full-svgrepo-com.svg"), Accent::Green),
             Icon::Full => (include_str!("../../res/battery-full-svgrepo-com.svg"), Accent::Green),
             Icon::Medium => (include_str!("../../res/battery-medium-svgrepo-com.svg"), Accent::Yellow),
@@ -276,8 +321,8 @@ impl Icon {
     /// The animation frame after this one, for the animated icons
     fn next_frame(self) -> Option<Icon> {
         match self {
-            Icon::Charging => Some(Icon::ChargingDim),
-            Icon::ChargingDim => Some(Icon::Charging),
+            Icon::Charging => Some(Icon::ChargingLit),
+            Icon::ChargingLit => Some(Icon::Charging),
             Icon::Critical => Some(Icon::CriticalDim),
             Icon::CriticalDim => Some(Icon::Critical),
             Icon::Disconnected => Some(Icon::DisconnectedRed),
@@ -300,7 +345,7 @@ impl Icon {
     /// `want`, or the frame of it already on screen, so an update doesn't restart the animation
     fn keep_frame(want: Icon, shown: Option<Icon>) -> Icon {
         match (want, shown) {
-            (Icon::Charging, Some(Icon::ChargingDim)) => Icon::ChargingDim,
+            (Icon::Charging, Some(Icon::ChargingLit)) => Icon::ChargingLit,
             (Icon::Critical, Some(Icon::CriticalDim)) => Icon::CriticalDim,
             (Icon::Disconnected, Some(Icon::DisconnectedRed)) => Icon::DisconnectedRed,
             (Icon::Pairing(_), Some(i @ Icon::Pairing(_))) => i,
@@ -315,11 +360,11 @@ impl Icon {
         match self {
             Icon::Pairing(n) => pairing_frame(svg, p, n),
             // All of it in the accent, outline included, which colorize keeps for the stroke
-            Icon::DisconnectedRed | Icon::Charged | Icon::Critical | Icon::Charging | Icon::Empty => {
+            Icon::DisconnectedRed | Icon::Charged | Icon::Critical | Icon::Empty => {
                 svg.replace("#000000", p.accent(accent))
             }
-            // Charging's outline w/ the bolt dimmed to the stroke color
-            Icon::ChargingDim => paint(svg, p.green, p.stroke),
+            // Charging's outline w/ the bolt lit green
+            Icon::ChargingLit => paint(svg, p.stroke, p.green),
             // Critical's outline w/ the mark dimmed to the stroke color
             Icon::CriticalDim => paint(svg, p.red, p.stroke),
             _ => colorize(svg, p, accent),
@@ -651,8 +696,9 @@ mod id {
     pub const RENAME: usize = 7;
 }
 
-/// A tray click this soon after the menu closed w/o a pick is the click that closed it
-const MENU_CLOSE_GRACE: Duration = Duration::from_millis(300);
+/// The menu closed w/ the cursor on the icon: the click that closed it arrives as a tray
+/// click within this long, if at all
+const CLOSING_CLICK_WAIT: Duration = Duration::from_secs(1);
 
 // The window procedure flags what happened, or runs tick w/ State at hand. Everything the
 // tray does runs off window messages, which an open menu or message box still dispatches.
@@ -671,8 +717,10 @@ thread_local! {
     static MENU_SHOWN: RefCell<Option<Vec<Item>>> = const { RefCell::new(None) };
     /// The open menu was closed to show new items; open it again
     static MENU_REOPEN: Cell<bool> = const { Cell::new(false) };
-    /// When the menu last closed w/o a pick
-    static MENU_DISMISSED: Cell<Option<Instant>> = const { Cell::new(None) };
+    /// The menu closed w/o a pick, w/ the cursor on the icon, at this time
+    static CLOSED_ON_ICON: Cell<Option<Instant>> = const { Cell::new(None) };
+    /// In menu(): the menu, or a box it opened, is up
+    static MENU_BUSY: Cell<bool> = const { Cell::new(false) };
     /// What a right-click in the open menu picked
     static RIGHT_PICK: Cell<Option<usize>> = const { Cell::new(None) };
     /// The rename dialog's text, in and out
@@ -686,10 +734,12 @@ fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> {
 
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     if msg == WM_TRAY && matches!(lp.0 as u32 & 0xFFFF, WM_LBUTTONUP | WM_RBUTTONUP | WM_CONTEXTMENU) {
-        // The click that closed the menu, arriving after it: that's all it was for
-        let closing = MENU_SHOWN.with_borrow(Option::is_some)
-            || MENU_DISMISSED.get().is_some_and(|t| t.elapsed() < MENU_CLOSE_GRACE);
-        if !closing {
+        if MENU_BUSY.get() {
+            // A box from the menu is up, maybe behind something; that's what to show
+            raise_modals();
+        } else if CLOSED_ON_ICON.take().is_some_and(|t| t.elapsed() < CLOSING_CLICK_WAIT) {
+            // The click that closed the menu, arriving after it: that's all it was for
+        } else {
             MENU_WANTED.set(true);
         }
     } else if msg == WM_MENURBUTTONUP {
@@ -728,6 +778,39 @@ fn right_click(m: HMENU, pos: i32) {
     RIGHT_PICK.set(Some(if id == id::CONTROLLER { id::RENAME } else { id }));
     // SAFETY: plain call; closes the menu this thread has open
     let _ = unsafe { EndMenu() };
+}
+
+/// Brings any message box or dialog of this thread to the front
+fn raise_modals() {
+    extern "system" fn raise(h: HWND, _: LPARAM) -> BOOL {
+        let mut class = [0u16; 16];
+        // SAFETY: h is a window of this thread, from the enumeration
+        unsafe {
+            let n = GetClassNameW(h, &mut class) as usize;
+            if String::from_utf16_lossy(&class[..n]) == "#32770" {
+                let _ = SetForegroundWindow(h);
+            }
+        }
+        BOOL(1)
+    }
+    // SAFETY: the callback only touches windows it's handed
+    let _ = unsafe { EnumThreadWindows(GetCurrentThreadId(), Some(raise), LPARAM(0)) };
+}
+
+/// Whether the cursor is on our tray icon
+fn cursor_on_icon(hwnd: HWND) -> bool {
+    let id = NOTIFYICONIDENTIFIER {
+        cbSize: size_of::<NOTIFYICONIDENTIFIER>() as u32,
+        hWnd: hwnd,
+        uID: 1,
+        ..Default::default()
+    };
+    let mut at = POINT::default();
+    // SAFETY: id and at outlive the calls
+    unsafe {
+        let Ok(r) = Shell_NotifyIconGetRect(&id) else { return false };
+        GetCursorPos(&mut at).is_ok() && (r.left..r.right).contains(&at.x) && (r.top..r.bottom).contains(&at.y)
+    }
 }
 
 /// Cancels any message box and closes any menu open on this thread
@@ -788,6 +871,8 @@ struct State {
     was_charging: bool,
     /// The charging bolt flashes until then
     charge_flash_until: Option<Instant>,
+    /// What the battery icon settles on once a flash is over
+    settled: Option<Icon>,
     commands: Sender<Command>,
 }
 
@@ -845,6 +930,7 @@ fn run(rx: Receiver<Msg>, commands: Sender<Command>) -> Result<()> {
         flash_until: None,
         was_charging: false,
         charge_flash_until: None,
+        settled: None,
         commands,
     };
     st.load_icons()?;
@@ -876,6 +962,12 @@ fn run(rx: Receiver<Msg>, commands: Sender<Command>) -> Result<()> {
 /// Shows the menu at the cursor and acts on the pick. Reopened in place whenever tick finds
 /// its items stale, so it follows pairing and controllers coming and going.
 fn menu(hwnd: HWND) {
+    MENU_BUSY.set(true);
+    menu_and_boxes(hwnd);
+    MENU_BUSY.set(false);
+}
+
+fn menu_and_boxes(hwnd: HWND) {
     let mut at = POINT::default();
     // SAFETY: at outlives the call
     let _ = unsafe { GetCursorPos(&mut at) };
@@ -892,12 +984,14 @@ fn menu(hwnd: HWND) {
         MENU_SHOWN.set(Some(items.clone()));
         let picked = track(hwnd, &items, at);
         MENU_SHOWN.set(None);
+        // Before a reopen, which would lose it
+        let picked = RIGHT_PICK.take().filter(|_| picked == 0).unwrap_or(picked);
         if picked == 0 && MENU_REOPEN.replace(false) && !QUITTING.get() {
             continue;
         }
-        let picked = RIGHT_PICK.take().filter(|_| picked == 0).unwrap_or(picked);
-        if picked == 0 {
-            MENU_DISMISSED.set(Some(Instant::now()));
+        MENU_REOPEN.set(false);
+        if picked == 0 && cursor_on_icon(hwnd) {
+            CLOSED_ON_ICON.set(Some(Instant::now()));
         }
         break (picked, s, commands);
     };
@@ -1180,7 +1274,7 @@ impl State {
             self.show(icon, msg, Some(tip));
             return;
         };
-        let (shown, fresh) = self.gauge.feed(&b);
+        let (shown, fresh) = self.gauge.feed(&b, now);
         self.pct = Some(shown);
         if fresh || b.charging {
             self.critical_alerted = false;
@@ -1201,6 +1295,7 @@ impl State {
         }
         // Plugged in: the bolt flashes for a bit, already charged or not, then the icon settles
         let settled = Icon::of(&b, shown);
+        self.settled = Some(settled);
         let icon = match settled {
             Icon::Charging | Icon::Charged if self.charge_flashing(now) => self.animate(Icon::Charging, now),
             _ => settled,
@@ -1225,19 +1320,20 @@ impl State {
             // Once the flash is over, back to the plain frame and stay there
             Some(Icon::Disconnected) if !self.flashing(Instant::now()) => None,
             Some(Icon::DisconnectedRed) if !self.flashing(Instant::now()) => Some(Icon::Disconnected),
-            // Likewise the bolt, back to green and still; refresh swaps in Charged if it's full
-            Some(Icon::Charging) if !self.charge_flashing(Instant::now()) => None,
-            Some(Icon::ChargingDim) if !self.charge_flashing(Instant::now()) => Some(Icon::Charging),
+            // Likewise the bolt, settling on Charging, or Charged if it's full
+            Some(i @ (Icon::Charging | Icon::ChargingLit)) if !self.charge_flashing(Instant::now()) => {
+                self.settled.filter(|&s| s != i)
+            }
             shown => shown.and_then(Icon::next_frame),
         }
     }
 
-    /// Until the frame on screen is due to change. The flash's red half ends w/ the flash.
+    /// Until the frame on screen is due to change. A flash's last frame ends w/ the flash.
     fn frame_left(&self) -> Duration {
         let Some(i) = self.shown else { return IDLE_TICK };
         let now = Instant::now();
-        if (i == Icon::DisconnectedRed && !self.flashing(now)) || (i == Icon::ChargingDim && !self.charge_flashing(now))
-        {
+        let charge_over = matches!(i, Icon::Charging | Icon::ChargingLit) && !self.charge_flashing(now);
+        if (i == Icon::DisconnectedRed && !self.flashing(now)) || charge_over {
             return Duration::ZERO;
         }
         i.frame_time().saturating_sub(self.frame_at.elapsed())
@@ -1371,6 +1467,8 @@ impl State {
         if READD_WANTED.replace(false) {
             self.shown = None;
             self.refresh();
+        } else if self.gauge.look_due(Instant::now()) {
+            self.refresh();
         }
         if self.last_theme.elapsed() >= THEME_EVERY {
             self.last_theme = Instant::now();
@@ -1386,11 +1484,6 @@ impl State {
                     Err(e) => warn!("tray icons: {e:#}"),
                 }
             }
-        }
-        // The charging flash is over: settle on Charging or Charged, which only refresh knows
-        if self.charge_flash_until.is_some_and(|t| Instant::now() >= t) {
-            self.charge_flash_until = None;
-            self.refresh();
         }
         if let Some(next) = self.next_frame()
             && self.frame_left().is_zero()
@@ -1605,24 +1698,78 @@ mod tests {
 
     #[test]
     fn gauge_follows_the_charger() {
+        let t0 = Instant::now();
         let b = |charging, reading| Battery { charging, band: 10, reading, critical: false, must_charge: false };
         let mut g = Gauge::default();
-        let (p, fresh) = g.feed(&b(false, 0xD0FD));
+        let (p, fresh) = g.feed(&b(false, 0xD0FD), t0);
         assert!(fresh && p == 11);
         // Plugging in lifts the reading ~0x660; the gauge doesn't jump w/ it
-        let (p, _) = g.feed(&b(true, 0xD0FD + 0x660));
+        let (p, _) = g.feed(&b(true, 0xD0FD + 0x660), t0);
         assert_eq!(p, 11);
-        assert_eq!(g.feed(&b(true, 0xD600 + 0x660)).0, 31);
+        assert_eq!(g.feed(&b(true, 0xD600 + 0x660), t0).0, 31);
         // A dip while charging doesn't take it back down
-        assert_eq!(g.feed(&b(true, 0xD500 + 0x660)).0, 31);
+        assert_eq!(g.feed(&b(true, 0xD500 + 0x660), t0).0, 31);
         // Unplugged: starts over from the resting reading, then only goes down
-        let (p, fresh) = g.feed(&b(false, 0xD580));
+        let (p, fresh) = g.feed(&b(false, 0xD580), t0);
         assert!(fresh && p == 29);
-        assert_eq!(g.feed(&b(false, 0xD700)).0, 29);
-        assert_eq!(g.feed(&b(false, 0xD400)).0, 23);
+        assert_eq!(g.feed(&b(false, 0xD700), t0).0, 29);
+        assert_eq!(g.feed(&b(false, 0xD400), t0).0, 23);
         // Back after charging elsewhere
-        let (p, fresh) = g.feed(&b(false, 0xE000));
+        let (p, fresh) = g.feed(&b(false, 0xE000), t0);
         assert!(fresh && p == 67);
+    }
+
+    #[test]
+    fn charged_when_the_charger_lets_go() {
+        let t0 = Instant::now();
+        let b = |charging, reading| Battery { charging, band: 100, reading, critical: false, must_charge: false };
+        let mut g = Gauge::default();
+        // 2026-10-09: plugged in full, topped off, then the light went green
+        g.feed(&b(false, 0xF042), t0);
+        assert_eq!(g.feed(&b(true, 0xF248), t0).0, 94);
+        assert_eq!(g.feed(&b(true, 0xF43D), t0).0, 97);
+        assert_eq!(g.feed(&b(true, 0xF23B), t0).0, 100);
+        // And stays there
+        assert_eq!(g.feed(&b(true, 0xF2A0), t0).0, 100);
+        // A dip under load lower down is just a dip
+        let mut g = Gauge::default();
+        g.feed(&b(true, 0xF100), t0);
+        assert!(g.feed(&b(true, 0xEF00), t0).0 < 100);
+        // Unplugged and back: starts over
+        let mut g = Gauge::default();
+        g.feed(&b(true, 0xF43D), t0);
+        g.feed(&b(true, 0xF23B), t0);
+        g.feed(&b(false, 0xF042), t0);
+        assert!(g.feed(&b(true, 0xF248), t0).0 < 100);
+    }
+
+    #[test]
+    fn charged_when_the_charger_never_starts() {
+        let t0 = Instant::now();
+        let later = t0 + IDLE_AFTER;
+        let b = |charging, reading| Battery { charging, band: 100, reading, critical: false, must_charge: false };
+        // 2026-10-09: plugged in full, light straight to green, reading flat
+        let mut g = Gauge::default();
+        g.feed(&b(false, 0xF0A8), t0);
+        assert!(g.feed(&b(true, 0xF2C0), t0).0 < 100);
+        assert!(!g.look_due(t0));
+        assert!(g.look_due(later));
+        assert!(!g.look_due(later));
+        assert_eq!(g.feed(&b(true, 0xF2C0), later).0, 100);
+        // Topping off instead: lifted well past rest
+        let mut g = Gauge::default();
+        g.feed(&b(false, 0xF042), t0);
+        g.feed(&b(true, 0xF248), t0);
+        assert!(g.feed(&b(true, 0xF43D), later).0 < 100);
+        // Not full at rest: charging, however long
+        let mut g = Gauge::default();
+        g.feed(&b(false, 0xE000), t0);
+        g.feed(&b(true, 0xE200), t0);
+        assert!(g.feed(&b(true, 0xE200), later).0 < 100);
+        // On the charger at connect, no resting reading to go by
+        let mut g = Gauge::default();
+        g.feed(&b(true, 0xF2C0), t0);
+        assert!(g.feed(&b(true, 0xF2C0), later).0 < 100);
     }
 
     #[test]
@@ -1704,8 +1851,8 @@ mod tests {
 
     #[test]
     fn animations_step_and_keep_their_frame() {
-        assert_eq!(Icon::Charging.next_frame(), Some(Icon::ChargingDim));
-        assert_eq!(Icon::ChargingDim.next_frame(), Some(Icon::Charging));
+        assert_eq!(Icon::Charging.next_frame(), Some(Icon::ChargingLit));
+        assert_eq!(Icon::ChargingLit.next_frame(), Some(Icon::Charging));
         assert_eq!(Icon::Disconnected.next_frame(), Some(Icon::DisconnectedRed));
         assert_eq!(Icon::DisconnectedRed.next_frame(), Some(Icon::Disconnected));
         assert_eq!(Icon::keep_frame(Icon::Disconnected, Some(Icon::DisconnectedRed)), Icon::DisconnectedRed);
@@ -1713,15 +1860,15 @@ mod tests {
         assert!(red.contains(LIGHT.red) && !red.contains(LIGHT.stroke));
         assert_eq!(Icon::Pairing(PAIRING_FRAMES - 1).next_frame(), Some(Icon::Pairing(0)));
         assert_eq!(Icon::Full.next_frame(), None);
-        assert_eq!(Icon::keep_frame(Icon::Charging, Some(Icon::ChargingDim)), Icon::ChargingDim);
+        assert_eq!(Icon::keep_frame(Icon::Charging, Some(Icon::ChargingLit)), Icon::ChargingLit);
         assert_eq!(Icon::keep_frame(Icon::Pairing(0), Some(Icon::Pairing(3))), Icon::Pairing(3));
-        assert_eq!(Icon::keep_frame(Icon::Full, Some(Icon::ChargingDim)), Icon::Full);
-        // The bolt's only color is the accent; dimmed, it's all stroke
-        // Green outline in both frames; only the bolt flashes
-        let lit = Icon::Charging.svg(&DARK);
-        assert!(lit.contains(DARK.green) && !lit.contains(DARK.stroke));
-        let dim = Icon::ChargingDim.svg(&DARK);
-        assert!(dim.contains(DARK.green) && dim.contains(DARK.stroke));
+        assert_eq!(Icon::keep_frame(Icon::Full, Some(Icon::ChargingLit)), Icon::Full);
+        // Stroke outline in both flash frames; only the bolt flashes green
+        let still = Icon::Charging.svg(&DARK);
+        assert!(still.contains(DARK.stroke) && !still.contains(DARK.green));
+        let lit = Icon::ChargingLit.svg(&DARK);
+        assert_eq!(lit.matches(DARK.green).count(), 1);
+        assert!(lit.contains(DARK.stroke));
         // Same for the critical mark, on a red outline
         assert_eq!(Icon::Critical.next_frame(), Some(Icon::CriticalDim));
         assert_eq!(Icon::CriticalDim.next_frame(), Some(Icon::Critical));

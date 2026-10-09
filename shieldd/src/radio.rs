@@ -90,6 +90,8 @@ struct Shared {
     vban: Option<Vban>,
     /// Hosted in place of --conf's, and saved again each run until it works
     unsaved: Option<p2pconf::Group>,
+    /// --conf, which known-clients sits next to
+    conf: PathBuf,
 }
 
 impl Shared {
@@ -125,7 +127,22 @@ impl Shared {
         }
     }
 
-    /// Between runs, w/ no radio: only Exit and VBAN mean anything
+    /// Saves a controller's new name, or says why it couldn't. Returns whether it did.
+    fn rename(&self, mac: &[u8; 6], name: &str) -> bool {
+        match known_clients::save(&self.conf, mac, name) {
+            Ok(()) => {
+                info!(sta = %fmt_mac(mac), name, "renamed");
+                true
+            }
+            Err(e) => {
+                warn!("renaming the controller: {e:#}");
+                self.tray.problem("Couldn't rename the controller", &format!("{e:#}"));
+                false
+            }
+        }
+    }
+
+    /// Between runs, w/ no radio: Exit, VBAN, and a rename the dialog was still open for
     fn idle(&mut self, quit: &AtomicBool, d: Duration) {
         let until = Instant::now() + d;
         while !quit.load(Ordering::Relaxed) && Instant::now() < until {
@@ -134,7 +151,10 @@ impl Shared {
                     Command::Exit => quit.store(true, Ordering::Relaxed),
                     Command::Vban(on) => self.set_vban(on),
                     Command::Pair => self.tray.problem("Can't pair yet", "Plug in the adapter first."),
-                    Command::Identify | Command::Disconnect | Command::Rename(..) => {}
+                    Command::Rename(mac, name) => {
+                        self.rename(&mac, &name);
+                    }
+                    Command::Identify | Command::Disconnect => {}
                 }
             }
             self.tray.update(Status {
@@ -153,7 +173,7 @@ impl Shared {
 
 pub fn run(args: Args, quit: &AtomicBool) -> Result<()> {
     // Up the whole time, so it also says shieldd is running while there's nothing to host
-    let mut sh = Shared { tray: Tray::start(), vban: None, unsaved: None };
+    let mut sh = Shared { tray: Tray::start(), vban: None, unsaved: None, conf: args.conf.clone() };
     if Shared::vban_marker().exists() {
         sh.set_vban(true);
     }
@@ -372,16 +392,11 @@ fn run_once(args: &Args, pair: bool, pair_bails: bool, quit: &AtomicBool, sh: &m
                                 ctl.set_streams(args.mic || on, on);
                             }
                             Command::Identify => ctl.identify(),
-                            Command::Rename(mac, name) => match known_clients::save(&args.conf, &mac, &name) {
-                                Ok(()) => {
-                                    info!(sta = %fmt_mac(&mac), name, "renamed");
+                            Command::Rename(mac, name) => {
+                                if sh.rename(&mac, &name) {
                                     names.insert(mac, name);
                                 }
-                                Err(e) => {
-                                    warn!("renaming the controller: {e:#}");
-                                    sh.tray.problem("Couldn't rename the controller", &format!("{e:#}"));
-                                }
-                            },
+                            }
                             Command::Disconnect => {
                                 if leaving.is_none() && host.say_goodbye() {
                                     info!("disconnecting from the tray; saying goodbye first");

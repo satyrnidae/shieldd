@@ -2,31 +2,22 @@ use std::env;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Days since 1970-01-01 as YYYY-MM-DD, proleptic Gregorian (Howard Hinnant's civil_from_days)
-fn civil(days: u64) -> String {
-    let z = days + 719_468;
-    let era = z / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe + era * 400 + u64::from(m <= 2);
-    format!("{y:04}-{m:02}-{d:02}")
-}
+#[path = "src/civil.rs"]
+mod civil;
 
 fn main() {
-    // The About box's build date, UTC. Cargo reruns this when the sources change, so it's the
-    // last build that changed anything. SOURCE_DATE_EPOCH pins it for a reproducible build.
-    println!("cargo:rerun-if-changed=src");
-    println!("cargo:rerun-if-changed=../Cargo.toml");
+    // The About box's build date, UTC. Cargo reruns this when anything that goes into shieldd
+    // changes, so it's the last build that changed anything. SOURCE_DATE_EPOCH pins it for a
+    // reproducible build.
+    for path in ["src", "Cargo.toml", "../Cargo.toml", "../res", "../rtlusb", "../ozproto", "../shdlink"] {
+        println!("cargo:rerun-if-changed={path}");
+    }
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
     let secs = env::var("SOURCE_DATE_EPOCH")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()));
-    println!("cargo:rustc-env=SHIELDD_BUILD_DATE={}", civil(secs / 86_400));
+    println!("cargo:rustc-env=SHIELDD_BUILD_DATE={}", civil::date(secs / 86_400));
 
     // Npcap is only for the Windows host; the Linux build is just --transmit
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {

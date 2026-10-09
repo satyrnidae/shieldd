@@ -161,8 +161,9 @@ Options worth knowing, the rest in `shieldd --help`:
 
 ### Tray
 
-The icon shows the controller's battery: a green bolt while it charges, flashing for 5 s when
-it's plugged in; an all-green full battery once it's charged; and an all-red one w/ a flashing
+The icon shows the controller's battery: a bolt while it charges, the bolt flashing green for
+5 s when it's plugged in; an all-green full battery once it's charged, which it reads from the
+charger letting go, like the controller's light turning green; and an all-red one w/ a flashing
 warning mark when it's critical. A crossed-out signal flashes red for 5 s at startup and when a
 controller drops off on its own rather than sent away. A spinner turns while one is joining, and
 a Wi-Fi signal lights up blue, a bar at a time, while pairing. A controller joining or leaving
@@ -203,7 +204,8 @@ The headset side is new on this host and untested; on the old Linux path it stut
 
 Starts `shieldw.exe` at login for this user, w/ any other options given alongside `--install`.
 It waits for the adapter, picks it back up after it's unplugged, and logs to
-`%LOCALAPPDATA%\shieldd\shieldd.log`, the previous run's in `shieldd.old.log`. It shows under
+`%LOCALAPPDATA%\shieldd\logs\latest.log`, as does a hosting `shieldd`. Earlier runs' logs are
+gzipped next to it, named for when they started, UTC: `2026-10-09T14_01_04.log.gz`. It shows under
 Task Manager's startup apps, where it can be turned off too.
 - `shieldd --stop`: stop the running one, e.g. to pair or rebuild. Only one runs at a time.
 - `shieldd --uninstall`: don't start at login anymore.

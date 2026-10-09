@@ -975,6 +975,7 @@ dependencies = [
  "anyhow",
  "clap",
  "ctrlc",
+ "flate2",
  "libc",
  "names",
  "ozproto",

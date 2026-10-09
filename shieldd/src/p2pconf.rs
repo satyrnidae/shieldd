@@ -65,13 +65,7 @@ fn parse(text: &str) -> Result<Group> {
 /// `<name>.<unix time>.bak`; returns that path. Written to `<name>.tmp` first, so a failed write
 /// leaves `path` and the backups as they were.
 pub fn write(path: &Path, g: &Group) -> Result<Option<PathBuf>> {
-    let mut tmp_name = path.file_name().context("conf path has no file name")?.to_owned();
-    tmp_name.push(".tmp");
-    let tmp = path.with_file_name(tmp_name);
-    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
-        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    }
-    std::fs::write(&tmp, format(g)).with_context(|| format!("writing {}", tmp.display()))?;
+    let tmp = stage(path, &format(g))?;
     let backup = if path.exists() {
         let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
         let mut name = path.file_name().context("conf path has no file name")?.to_owned();
@@ -82,8 +76,26 @@ pub fn write(path: &Path, g: &Group) -> Result<Option<PathBuf>> {
     } else {
         None
     };
-    std::fs::rename(&tmp, path).with_context(|| format!("moving {} to {}", tmp.display(), path.display()))?;
+    commit(&tmp, path)?;
     Ok(backup)
+}
+
+/// The first half of replacing `path` w/o ever leaving it half written: `contents` to
+/// `<name>.tmp` next to it, its folder made if need be. Returns the temp file for commit.
+pub fn stage(path: &Path, contents: &str) -> Result<PathBuf> {
+    let mut tmp_name = path.file_name().with_context(|| format!("{} has no file name", path.display()))?.to_owned();
+    tmp_name.push(".tmp");
+    let tmp = path.with_file_name(tmp_name);
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    std::fs::write(&tmp, contents).with_context(|| format!("writing {}", tmp.display()))?;
+    Ok(tmp)
+}
+
+/// The second half: the staged file takes `path`'s place
+pub fn commit(tmp: &Path, path: &Path) -> Result<()> {
+    std::fs::rename(tmp, path).with_context(|| format!("moving {} to {}", tmp.display(), path.display()))
 }
 
 fn format(g: &Group) -> String {
