@@ -148,9 +148,9 @@ pub fn msg3_key_data(kek: &[u8; 16], rsn_ie: &[u8], gtk: &[u8; 16], gtk_idx: u8)
     plain.extend_from_slice(&[0xdd, 6 + 16, 0x00, 0x0f, 0xac, 0x01, gtk_idx & 0x3, 0x00]);
     plain.extend_from_slice(gtk);
     // Pad to a multiple of 8, at least 16: 0xdd then zeros
-    if plain.len() % 8 != 0 || plain.len() < 16 {
+    if !plain.len().is_multiple_of(8) || plain.len() < 16 {
         plain.push(0xdd);
-        while plain.len() % 8 != 0 || plain.len() < 16 {
+        while !plain.len().is_multiple_of(8) || plain.len() < 16 {
             plain.push(0);
         }
     }

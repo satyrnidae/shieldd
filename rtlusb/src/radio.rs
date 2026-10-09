@@ -200,7 +200,7 @@ impl Radio {
         let mut led: Option<bool> = None;
         rx_loop(chip, None, Duration::from_millis(10), quit, &mut |p| {
             // Solid when connected, blinking while waiting
-            let want = bss.any_connected() || (t0.elapsed().as_millis() / LED_BLINK.as_millis()) % 2 == 0;
+            let want = bss.any_connected() || (t0.elapsed().as_millis() / LED_BLINK.as_millis()).is_multiple_of(2);
             if led != Some(want) {
                 led = Some(want);
                 chip.set_led(want)?;

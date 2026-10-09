@@ -810,10 +810,12 @@ fn has_wmm(ies: &[u8]) -> bool {
     let mut i = 0;
     while i + 2 <= ies.len() {
         let (id, len) = (ies[i], ies[i + 1] as usize);
-        if let Some(v) = ies.get(i + 2..i + 2 + len) {
-            if id == 221 && v.len() >= 5 && v[..4] == [0x00, 0x50, 0xf2, 0x02] {
-                return true;
-            }
+        if let Some(v) = ies.get(i + 2..i + 2 + len)
+            && id == 221
+            && v.len() >= 5
+            && v[..4] == [0x00, 0x50, 0xf2, 0x02]
+        {
+            return true;
         }
         i += 2 + len;
     }
