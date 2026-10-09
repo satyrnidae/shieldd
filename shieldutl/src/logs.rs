@@ -1,5 +1,5 @@
-//! The log file: `settings_dir()/logs/latest.log`, earlier runs gzipped next to it and named
-//! for when they started, UTC
+//! Logging for rtlusb and shieldd: tracing to the console and to `<dir>/latest.log`, earlier
+//! runs gzipped next to it and named for when they started, UTC
 
 use std::fs::{self, File, OpenOptions};
 use std::io;
@@ -9,22 +9,76 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use flate2::Compression;
 use flate2::write::GzEncoder;
-use tracing::warn;
+use tracing::{error, warn};
 
 const LATEST: &str = "latest.log";
 /// Packed logs kept; older ones go
 const KEEP: usize = 20;
 
-pub fn dir() -> PathBuf {
-    crate::settings_dir().join("logs")
+/// Panics, logged for the file; the console has Rust's own report of them
+const PANIC: &str = "panic";
+
+pub struct Setup<'a> {
+    /// What to log w/o RUST_LOG
+    pub default_filter: &'a str,
+    /// Also to the console, colored only on a terminal, never in a file or a redirect
+    pub console: bool,
+    /// The log file's folder, and whether this run starts a new file or adds to the current one
+    pub file: Option<(PathBuf, bool)>,
 }
 
-/// Opens latest.log. `rotate` starts a new one, moving the old one aside for `pack`; otherwise
-/// this adds to it. Also returns why the old one couldn't move, in which case this adds to it.
-pub fn open(rotate: bool) -> Result<(File, Option<anyhow::Error>)> {
-    anyhow::ensure!(!crate::settings_dir().as_os_str().is_empty(), "no LOCALAPPDATA to keep logs in");
-    let dir = dir();
-    fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+/// Sets up tracing. A console carries on w/o the file if it won't open. W/ the file, a panic
+/// goes into it too. Returns whether the file's in use.
+pub fn init(setup: Setup) -> Result<bool> {
+    use std::io::IsTerminal;
+    use tracing_subscriber::fmt;
+    use tracing_subscriber::prelude::*;
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| setup.default_filter.into())
+        // A panic gets logged whatever RUST_LOG says
+        .add_directive(format!("{PANIC}=error").parse().expect("a valid directive"));
+    let console = setup.console.then(|| {
+        fmt::layer()
+            .with_ansi(std::io::stdout().is_terminal())
+            .with_filter(tracing_subscriber::filter::filter_fn(|m| m.target() != PANIC))
+    });
+    // Nothing logs before the new file is in place, or it'd land in the last run's
+    let (file, trouble) = match setup.file.as_ref().map(|(dir, rotate)| open(dir, *rotate)) {
+        Some(Ok((f, stuck))) => (Some(fmt::layer().with_ansi(false).with_writer(std::sync::Mutex::new(f))), stuck),
+        Some(Err(e)) if console.is_some() => (None, Some(e.context("logging to the console only"))),
+        Some(Err(e)) => return Err(e),
+        None => (None, None),
+    };
+    let in_use = file.is_some();
+    tracing_subscriber::registry().with(filter).with(console).with(file).init();
+    if let Some(e) = trouble {
+        warn!("{e:#}");
+    }
+    if !in_use {
+        return Ok(false);
+    }
+    // To the file; a console still gets Rust's own report, w/ the thread and any backtrace
+    let report = std::panic::take_hook();
+    let console = setup.console;
+    std::panic::set_hook(Box::new(move |p| {
+        error!(target: PANIC, "{p}");
+        if console {
+            report(p);
+        }
+    }));
+    if let Some((dir, true)) = setup.file {
+        // Packing a long log takes a moment; the program needn't wait on it
+        let _ = std::thread::Builder::new().name("pack logs".into()).spawn(move || pack(&dir));
+    }
+    Ok(true)
+}
+
+/// Opens latest.log in `dir`. `rotate` starts a new one, moving the old one aside for `pack`;
+/// otherwise this adds to it. Also returns why the old one couldn't move, in which case this
+/// adds to it.
+fn open(dir: &Path, rotate: bool) -> Result<(File, Option<anyhow::Error>)> {
+    anyhow::ensure!(dir.is_absolute(), "no settings folder to keep logs in");
+    fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let latest = dir.join(LATEST);
     let append = || OpenOptions::new().create(true).append(true).open(&latest);
     // Anything but a clean move aside adds to the old one rather than emptying it
@@ -38,7 +92,7 @@ pub fn open(rotate: bool) -> Result<(File, Option<anyhow::Error>)> {
     match fs::metadata(&latest) {
         Ok(meta) => {
             let started = meta.created().or_else(|_| meta.modified()).unwrap_or_else(|_| SystemTime::now());
-            if let Err(e) = fs::rename(&latest, free_name(&dir, &stamp(started))) {
+            if let Err(e) = fs::rename(&latest, free_name(dir, &stamp(started))) {
                 return keep(e, "moving aside");
             }
         }
@@ -58,11 +112,7 @@ pub fn open(rotate: bool) -> Result<(File, Option<anyhow::Error>)> {
 
 /// Gzips every log moved aside, this run's predecessor and any a crash left behind, then drops
 /// all but the newest KEEP
-pub fn pack() {
-    pack_in(&dir());
-}
-
-fn pack_in(dir: &Path) {
+fn pack(dir: &Path) {
     let names = || fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path());
     for path in names() {
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
@@ -148,7 +198,7 @@ mod tests {
         }
         fs::write(dir.join("2026-02-01T00_00_00.log"), "last run").unwrap();
         fs::write(dir.join(LATEST), "this run").unwrap();
-        pack_in(&dir);
+        pack(&dir);
         let mut left: Vec<_> = fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
         left.sort();
         assert_eq!(left.len(), KEEP + 1);

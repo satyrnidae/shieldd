@@ -7,13 +7,12 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-mac.workspace = true
+shieldutl = { workspace = true, features = ["logs"] }
 anyhow.workspace = true
 clap.workspace = true
 nusb = "0.2.7"
 ctrlc.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
 hmac = "0.12"
 sha1 = "0.10"
 pbkdf2 = "0.12"

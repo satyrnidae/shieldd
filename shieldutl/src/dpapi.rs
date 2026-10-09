@@ -8,18 +8,26 @@ use windows::Win32::Security::Cryptography::{
 };
 use windows::core::w;
 
-/// Mixed into every blob, so another app's DPAPI data can't pass for ours or the reverse
+/// Mixed into every blob, so another app's DPAPI data can't pass for ours or the reverse. Seals
+/// made before this moved out of shieldd use it too, so it stays as it is.
 const ENTROPY: &[u8] = b"shieldd p2p.conf psk";
 
 fn blob(b: &[u8]) -> CRYPT_INTEGER_BLOB {
     CRYPT_INTEGER_BLOB { cbData: b.len() as u32, pbData: b.as_ptr().cast_mut() }
 }
 
-/// Copies DPAPI's output out and frees it
-fn take(out: CRYPT_INTEGER_BLOB) -> Vec<u8> {
-    // SAFETY: DPAPI filled out w/ a LocalAlloc'd buffer of cbData bytes, freed right after
+/// Copies DPAPI's output out and frees it, wiped first if it's a secret
+fn take(out: CRYPT_INTEGER_BLOB, secret: bool) -> Vec<u8> {
+    if out.pbData.is_null() {
+        return Vec::new();
+    }
+    // SAFETY: DPAPI filled out w/ a LocalAlloc'd buffer of cbData bytes, ours until freed here
     unsafe {
-        let v = std::slice::from_raw_parts(out.pbData, out.cbData as usize).to_vec();
+        let buf = std::slice::from_raw_parts_mut(out.pbData, out.cbData as usize);
+        let v = buf.to_vec();
+        if secret {
+            crate::wipe(buf);
+        }
         let _ = LocalFree(Some(HLOCAL(out.pbData.cast())));
         v
     }
@@ -40,9 +48,10 @@ pub fn protect(plain: &[u8]) -> Result<Vec<u8>> {
         )
     }
     .context("encrypting w/ DPAPI")?;
-    Ok(take(out))
+    Ok(take(out, false))
 }
 
+/// The caller wipes what it gets back once done w/ it
 pub fn unprotect(sealed: &[u8]) -> Result<Vec<u8>> {
     let mut out = CRYPT_INTEGER_BLOB::default();
     // SAFETY: as protect
@@ -50,7 +59,7 @@ pub fn unprotect(sealed: &[u8]) -> Result<Vec<u8>> {
         CryptUnprotectData(&blob(sealed), None, Some(&blob(ENTROPY)), None, None, CRYPTPROTECT_UI_FORBIDDEN, &mut out)
     }
     .context("decrypting w/ DPAPI; it only opens for the Windows user who saved it, on that machine")?;
-    Ok(take(out))
+    Ok(take(out, true))
 }
 
 #[cfg(test)]
@@ -66,5 +75,7 @@ mod tests {
         let last = bad.len() - 1;
         bad[last] ^= 1;
         assert!(unprotect(&bad).is_err());
+        // Empty in, empty out
+        assert_eq!(unprotect(&protect(b"").unwrap()).unwrap(), b"");
     }
 }

@@ -170,7 +170,7 @@ impl Radio {
             let mut tx = Tx::new(&chip.rtl)?;
             chip.enable_sec_engine()?;
             chip.start_ap(&mut tx, &cfg)?;
-            info!(ssid = cfg.ssid, bssid = mac::fmt_mac(&bssid), channel = opts.channel, "AP up");
+            info!(ssid = cfg.ssid, bssid = shieldutl::mac::fmt_mac(&bssid), channel = opts.channel, "AP up");
             let mut bss = Bss::new(cfg, opts.pmk);
             bss.set_ps_hold(opts.ps_hold);
             bss.install_gtk(&chip)?;

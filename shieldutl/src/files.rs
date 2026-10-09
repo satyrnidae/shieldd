@@ -1,6 +1,7 @@
 //! Replacing a file w/o ever leaving it half written: stage the new contents next to it, then
 //! commit them in one rename
 
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -21,4 +22,12 @@ pub fn stage(path: &Path, contents: &str) -> Result<PathBuf> {
 /// The staged file takes `path`'s place
 pub fn commit(tmp: &Path, path: &Path) -> Result<()> {
     std::fs::rename(tmp, path).with_context(|| format!("moving {} to {}", tmp.display(), path.display()))
+}
+
+/// Writes `text`, a wpa_supplicant conf, to `to` w/ the plain `psk=` value at `at` swapped for
+/// `psk` sealed
+#[cfg(windows)]
+pub fn seal_file(to: &Path, text: &str, at: Range<usize>, psk: &crate::psk::Psk) -> Result<()> {
+    let sealed = format!("{}{}{}", &text[..at.start], psk.seal()?, &text[at.end..]);
+    commit(&stage(to, &sealed)?, to)
 }

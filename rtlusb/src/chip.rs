@@ -139,7 +139,7 @@ impl Chip {
         let btcoex = rtl.r32(WL_BT_PWR_CTRL)? & BT_FUNC_EN != 0;
         let cond = PhyCond::new(cut, &efuse, btcoex);
         info!(
-            mac = mac::fmt_mac(&efuse.mac),
+            mac = shieldutl::mac::fmt_mac(&efuse.mac),
             cut,
             btcoex,
             speed = ?rtl.speed,

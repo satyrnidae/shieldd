@@ -8,15 +8,13 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-mac.workspace = true
 ozproto.workspace = true
 shdlink.workspace = true
+shieldtray.workspace = true
+shieldutl = { workspace = true, features = ["logs", "vban"] }
 anyhow.workspace = true
 clap.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
-# Earlier runs' logs
-flate2 = "1.1"
 
 # The host and --receiver: Windows only
 [target.'cfg(windows)'.dependencies]
@@ -24,8 +22,6 @@ ctrlc.workspace = true
 rtlusb.workspace = true
 rand = "0.8"
 names = { version = "0.14", default-features = false }
-# Tray icons from res/*.svg; no text or raster images in them
-resvg = { version = "0.48", default-features = false }
 vigem-client.workspace = true
 
 # --transmit: the WSL side
@@ -36,16 +32,9 @@ libc.workspace = true
 workspace = true
 features = [
     "Win32_Foundation",
-    "Win32_Graphics_Gdi",
-    "Win32_Media_Audio",
     "Win32_Security",
-    "Win32_Security_Cryptography",
-    "Win32_System_LibraryLoader",
     "Win32_System_Registry",
     "Win32_System_Threading",
-    "Win32_UI_Controls",
-    "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
-    "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ]

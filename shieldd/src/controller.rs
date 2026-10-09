@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use ozproto::Host;
 use ozproto::usb::{self, Message, Request};
+use shieldtray::Battery;
 use tracing::{debug, info, warn};
 
 const HID_INTERFACE: u16 = 0;
@@ -31,9 +32,9 @@ const SETUP: [&str; 14] = [
     "SET_REPORT feature 0xFD=01",
     "GET_REPORT feature 0xFD (status)",
     "SET_REPORT feature 0xFD=08",
-    "GET_REPORT feature 0xFD (version?)",
+    "GET_REPORT feature 0xFD (version)",
     "SET_REPORT feature 0xFD=0D",
-    "GET_REPORT feature 0xFD (0D)",
+    "GET_REPORT feature 0xFD (handshake)",
 ];
 /// Audio streaming interfaces, alt 1 streaming and alt 0 idle
 const HEADSET_INTERFACE: u8 = 2;
@@ -44,7 +45,8 @@ pub const HEADSET_EP: u8 = 0x02;
 const MIC_EP: u8 = 0x83;
 
 /// Feature 0xFD is a mailbox: SET writes a command byte, GET reads back the command and its
-/// answer. The tablet sends 0A, 01, 08 and 0D on every connect in its handshake capture.
+/// answer. The tablet sends 0A, 01, 08 and 0D on every connect in its handshake capture. 0D
+/// answers w/ just 0D, a handshake check as far as anyone can tell.
 const MAILBOX: u8 = 0xFD;
 /// Command whose answer is the best battery candidate: `01 32 d7 xx` in every tablet capture
 const STATUS_CMD: u8 = 0x01;
@@ -202,20 +204,6 @@ impl Report {
 }
 
 //endregion
-
-/// The battery, from the controller's status answer
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Battery {
-    pub charging: bool,
-    /// The controller's own level band: 100 (on the charger), 75, 50, 25, 10, 0 seen so far
-    pub band: u8,
-    /// Mailbox 01 bytes 2-3, a voltage reading
-    pub reading: u16,
-    /// Below the rumble cutoff
-    pub critical: bool,
-    /// Kicked until it charges
-    pub must_charge: bool,
-}
 
 pub struct Controller {
     step: usize,

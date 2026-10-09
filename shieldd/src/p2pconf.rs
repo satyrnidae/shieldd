@@ -1,15 +1,16 @@
 //! The controller's saved group, in wpa_supplicant P2P config form: read for hosting, written
 //! by --pair. The key is sealed w/ DPAPI, `psk=dpapi:<base64>`, so only this Windows user can read
-//! it; a plain `psk=` from an older or hand-made file gets sealed the first time it's read.
+//! it. A plain `psk=` in the default conf gets sealed the first time it's read; one given w/
+//! --conf is left as it is, since something else may read it too.
 
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+pub use shieldutl::psk::Psk;
 use tracing::{info, warn};
 
-use crate::dpapi;
-use crate::files::{commit, stage};
+use shieldutl::files::{commit, seal_file, stage};
 
 #[derive(Debug, Clone)]
 pub struct Group {
@@ -17,81 +18,6 @@ pub struct Group {
     pub psk: Psk,
     /// 2.4 GHz channel, from `frequency=`. Groups from before --pair have none: channel 1.
     pub channel: u8,
-}
-
-/// The group's key, as `psk=` holds it under the seal: a quoted passphrase, or the PMK itself
-/// in 64 hex digits
-#[derive(Clone, PartialEq, Eq)]
-pub enum Psk {
-    Passphrase(String),
-    Pmk(rtlusb::wpa::Pmk),
-}
-
-const SEALED: &str = "dpapi:";
-/// Every DPAPI blob opens w/ its version and provider GUID; in hex, it's a seal from before
-/// base64, read and then sealed again
-const SEALED_HEX: &str = "01000000d08c9ddf";
-
-impl Psk {
-    pub fn pmk(&self, ssid: &str) -> rtlusb::wpa::Pmk {
-        match self {
-            Psk::Passphrase(p) => rtlusb::wpa::pmk(p, ssid),
-            Psk::Pmk(k) => *k,
-        }
-    }
-
-    /// WPS hands the controller a passphrase; a bare PMK has none to give
-    pub fn passphrase(&self) -> Option<&str> {
-        match self {
-            Psk::Passphrase(p) => Some(p),
-            Psk::Pmk(_) => None,
-        }
-    }
-
-    /// A `psk=` value, sealed or not
-    fn parse(s: &str) -> Result<Psk> {
-        let Some(sealed) = s.strip_prefix(SEALED) else { return Psk::parse_plain(s) };
-        let blob = match sealed.starts_with(SEALED_HEX) {
-            true => unhex(sealed).context("sealed psk isn't hex")?,
-            false => crate::base64::decode(sealed).context("sealed psk isn't base64")?,
-        };
-        let plain = dpapi::unprotect(&blob)?;
-        Psk::parse_plain(std::str::from_utf8(&plain).context("sealed psk isn't text")?)
-    }
-
-    fn parse_plain(s: &str) -> Result<Psk> {
-        if let Some(p) = s.strip_prefix('"').and_then(|p| p.strip_suffix('"')) {
-            anyhow::ensure!((8..=63).contains(&p.len()), "psk passphrase isn't 8-63 characters");
-            return Ok(Psk::Passphrase(p.to_owned()));
-        }
-        anyhow::ensure!(s.len() == 64, "psk is neither a quoted passphrase nor 64 hex digits");
-        let k = unhex(s).context("psk isn't hex")?;
-        Ok(Psk::Pmk(k.try_into().expect("64 hex digits are 32 bytes")))
-    }
-
-    /// The sealed `psk=` value
-    fn seal(&self) -> Result<String> {
-        let plain = match self {
-            Psk::Passphrase(p) => format!("\"{p}\""),
-            Psk::Pmk(k) => crate::hex(k),
-        };
-        Ok(format!("{SEALED}{}", crate::base64::encode(&dpapi::protect(plain.as_bytes())?)))
-    }
-}
-
-/// Never the key itself, so a {:?} can't leak it into a log
-impl std::fmt::Debug for Psk {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Psk::Passphrase(_) => "Passphrase(..)",
-            Psk::Pmk(_) => "Pmk(..)",
-        })
-    }
-}
-
-fn unhex(s: &str) -> Result<Vec<u8>> {
-    anyhow::ensure!(s.len().is_multiple_of(2) && s.is_ascii(), "odd length");
-    (0..s.len()).step_by(2).map(|i| Ok(u8::from_str_radix(&s[i..i + 2], 16)?)).collect()
 }
 
 /// The channel the old DIRECT-0S group, and any conf w/o `frequency=`, lives on
@@ -105,23 +31,20 @@ fn mhz_of(channel: u8) -> u32 {
     2407 + 5 * channel as u32
 }
 
-/// First `mode=3` (GO) network block. A plain key gets sealed in place, the rest of the file
-/// left be; if that fails, hosting goes on and it's tried again next time.
-pub fn read(path: &Path) -> Result<Group> {
+/// First `mode=3` (GO) network block. `seal`: a plain key gets sealed in place, the rest of the
+/// file left be; if that fails, hosting goes on and it's tried again next time.
+pub fn read(path: &Path, seal: bool) -> Result<Group> {
     let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let found = parse(&text).with_context(|| format!("in {}", path.display()))?;
-    if !found.sealed {
-        match seal_in_place(path, &text, &found) {
+    if seal && !found.sealed {
+        match seal_file(path, &text, found.psk_at.clone(), &found.group.psk) {
             Ok(()) => info!("sealed the group key in {}", path.display()),
             Err(e) => warn!("sealing the group key in {}: {e:#}", path.display()),
         }
+    } else if !found.sealed {
+        info!("the group key in {} isn't sealed; only the default conf gets sealed", path.display());
     }
     Ok(found.group)
-}
-
-fn seal_in_place(path: &Path, text: &str, found: &Found) -> Result<()> {
-    let sealed = format!("{}{}{}", &text[..found.psk_at.start], found.group.psk.seal()?, &text[found.psk_at.end..]);
-    commit(&stage(path, &sealed)?, path)
 }
 
 struct Found {
@@ -159,16 +82,16 @@ fn parse(text: &str) -> Result<Found> {
             }
             None => DEFAULT_CHANNEL,
         };
-        let group = Group { ssid: ssid.trim_matches('"').to_owned(), psk: Psk::parse(psk)?, channel };
-        let sealed = psk.strip_prefix(SEALED).is_some_and(|s| !s.starts_with(SEALED_HEX));
+        let (psk, sealed) = Psk::parse(psk)?;
+        let group = Group { ssid: ssid.trim_matches('"').to_owned(), psk, channel };
         return Ok(Found { group, psk_at, sealed });
     }
     bail!("no mode=3 network block")
 }
 
 /// Replaces `path` w/ just this group. An existing file is kept next to it as
-/// `<name>.<unix time>.bak`; returns that path. Written to `<name>.tmp` first, so a failed write
-/// leaves `path` and the backups as they were.
+/// `<name>.<unix time>.bak`, its key sealed if it wasn't; returns that path. Written to
+/// `<name>.tmp` first, so a failed write leaves `path` and the backups as they were.
 pub fn write(path: &Path, g: &Group) -> Result<Option<PathBuf>> {
     let tmp = stage(path, &format(g)?)?;
     let backup = if path.exists() {
@@ -176,7 +99,15 @@ pub fn write(path: &Path, g: &Group) -> Result<Option<PathBuf>> {
         let mut name = path.file_name().context("conf path has no file name")?.to_owned();
         name.push(format!(".{secs}.bak"));
         let b = path.with_file_name(name);
-        std::fs::rename(path, &b).with_context(|| format!("backing up {} to {}", path.display(), b.display()))?;
+        let backing_up = || format!("backing up {} to {}", path.display(), b.display());
+        let old = std::fs::read_to_string(path).ok();
+        match old.as_deref().and_then(|t| Some((t, parse(t).ok()?))) {
+            // The new file takes path's place below, so this only has to leave a sealed copy
+            Some((text, found)) if !found.sealed => {
+                seal_file(&b, text, found.psk_at.clone(), &found.group.psk).with_context(backing_up)?
+            }
+            _ => std::fs::rename(path, &b).with_context(backing_up)?,
+        }
         Some(b)
     } else {
         None
@@ -208,10 +139,19 @@ fn format(g: &Group) -> Result<String> {
 mod tests {
     use super::*;
 
+    const PLAIN_GO: &str = "network={\n\tssid=\"DIRECT-0S\"\n\tpsk=\"pass1234\"\n\tmode=3\n}\n";
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("shieldd-p2pconf-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     #[test]
     fn picks_go_block() {
-        let conf = "update_config=1\nnetwork={\n\tssid=\"home\"\n\tpsk=\"x\"\n}\nnetwork={\n\tssid=\"DIRECT-0S\"\n\tpsk=\"pass1234\"\n\tmode=3\n\tdisabled=2\n}\n";
-        let f = parse(conf).unwrap();
+        let conf = format!("update_config=1\nnetwork={{\n\tssid=\"home\"\n\tpsk=\"x\"\n}}\n{PLAIN_GO}");
+        let f = parse(&conf).unwrap();
         assert_eq!(f.group.ssid, "DIRECT-0S");
         assert_eq!(f.group.psk, Psk::Passphrase("pass1234".into()));
         assert_eq!(f.group.channel, 1);
@@ -232,49 +172,43 @@ mod tests {
     }
 
     #[test]
-    fn hex_psk_is_the_pmk() {
-        // IEEE 802.11 test vector: "password" on "IEEE"
-        let hex = "f42c6fc52df0ebef9ebb4b90b38a5f902e83fe1b135a70e23aed762e9710a12e";
-        let conf = format!("network={{\nssid=\"IEEE\"\npsk={hex}\nmode=3\n}}\n");
-        let g = parse(&conf).unwrap().group;
-        assert_eq!(g.psk.pmk("IEEE"), rtlusb::wpa::pmk("password", "IEEE"));
-        assert_eq!(g.psk.passphrase(), None);
-        let sealed = format(&g).unwrap();
-        assert!(!sealed.contains(hex));
-        assert_eq!(parse(&sealed).unwrap().group.psk, g.psk);
-        assert_eq!(format!("{g:?}").matches(hex).count(), 0);
-        // Too short to be either
-        assert!(parse("network={\nssid=\"DIRECT-0S\"\npsk=0123abcd\nmode=3\n}\n").is_err());
-    }
-
-    #[test]
-    fn a_hex_seal_is_read_and_sealed_again() {
-        let psk = Psk::Passphrase("pass1234".into());
-        let blob = dpapi::protect(b"\"pass1234\"").unwrap();
-        assert!(crate::hex(&blob).starts_with(SEALED_HEX));
-        let conf = format!("network={{\nssid=\"DIRECT-0S\"\npsk={SEALED}{}\nmode=3\n}}\n", crate::hex(&blob));
-        let f = parse(&conf).unwrap();
-        assert_eq!(f.group.psk, psk);
-        assert!(!f.sealed);
-        // And base64 seals count as sealed
-        let f = parse(&format!("network={{\nssid=\"DIRECT-0S\"\npsk={}\nmode=3\n}}\n", psk.seal().unwrap())).unwrap();
-        assert!(f.sealed && f.group.psk == psk);
-    }
-
-    #[test]
-    fn reading_seals_a_plain_key_in_place() {
-        let dir = std::env::temp_dir().join(format!("shieldd-p2pconf-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+    fn reading_the_default_seals_it() {
+        let dir = scratch("default");
         let path = dir.join("p2p.conf");
-        let conf = "# mine\nnetwork={\n\tssid=\"home\"\n\tpsk=\"homepass1\"\n}\nnetwork={\n\tssid=\"DIRECT-0S\"\n\tpsk=\"pass1234\"\n\tmode=3\n}\n";
-        std::fs::write(&path, conf).unwrap();
-        let g = read(&path).unwrap();
+        let conf = format!("# mine\nnetwork={{\n\tssid=\"home\"\n\tpsk=\"homepass1\"\n}}\n{PLAIN_GO}");
+        std::fs::write(&path, &conf).unwrap();
+        let g = read(&path, true).unwrap();
         let after = std::fs::read_to_string(&path).unwrap();
         assert!(!after.contains("pass1234") && after.contains("psk=dpapi:"));
         // Only the GO's key; the rest stays as it was
         assert!(after.starts_with("# mine\nnetwork={\n\tssid=\"home\"\n\tpsk=\"homepass1\"\n}\n"));
-        assert_eq!(read(&path).unwrap().psk, g.psk);
+        assert_eq!(read(&path, true).unwrap().psk, g.psk);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), after);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_conf_of_its_own_is_left_plain() {
+        let dir = scratch("custom");
+        let path = dir.join("p2p.conf");
+        std::fs::write(&path, PLAIN_GO).unwrap();
+        assert_eq!(read(&path, false).unwrap().psk, Psk::Passphrase("pass1234".into()));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), PLAIN_GO);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_plain_conf_is_backed_up_sealed() {
+        let dir = scratch("write");
+        let path = dir.join("p2p.conf");
+        std::fs::write(&path, PLAIN_GO).unwrap();
+        let g =
+            Group { ssid: "DIRECT-FC-organized-baboon".into(), psk: Psk::Passphrase("s3cretPW".into()), channel: 6 };
+        let b = write(&path, &g).unwrap().unwrap();
+        let backup = std::fs::read_to_string(&b).unwrap();
+        assert!(!backup.contains("pass1234") && backup.contains("DIRECT-0S"));
+        assert_eq!(parse(&backup).unwrap().group.psk, Psk::Passphrase("pass1234".into()));
+        assert_eq!(read(&path, false).unwrap().ssid, "DIRECT-FC-organized-baboon");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

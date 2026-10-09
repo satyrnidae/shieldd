@@ -4,6 +4,18 @@ use anyhow::{Result, bail};
 
 const ABC: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
+/// Each byte's value in ABC, NONE if it isn't in it
+const VALUE: [u8; 256] = {
+    let mut t = [NONE; 256];
+    let mut i = 0;
+    while i < ABC.len() {
+        t[ABC[i] as usize] = i as u8;
+        i += 1;
+    }
+    t
+};
+const NONE: u8 = 0xff;
+
 pub fn encode(b: &[u8]) -> String {
     let mut out = String::with_capacity(b.len().div_ceil(3) * 4);
     for c in b.chunks(3) {
@@ -28,8 +40,11 @@ pub fn decode(s: &str) -> Result<Vec<u8>> {
         }
         let mut n = 0u32;
         for &b in &c[..4 - pad] {
-            let Some(v) = ABC.iter().position(|&a| a == b) else { bail!("{:?} isn't base64", b as char) };
-            n = n << 6 | v as u32;
+            let v = VALUE[b as usize];
+            if v == NONE {
+                bail!("{:?} isn't base64", b as char);
+            }
+            n = n << 6 | u32::from(v);
         }
         n <<= 6 * pad;
         out.extend_from_slice(&n.to_be_bytes()[1..4 - pad]);
@@ -58,5 +73,6 @@ mod tests {
         let all: Vec<u8> = (0..=255).collect();
         assert_eq!(decode(&encode(&all)).unwrap(), all);
         assert!(decode("Zm9").is_err() && decode("Zg==Zm9v").is_err() && decode("Zm9-").is_err());
+        assert!(decode("Zm9\u{e9}").is_err());
     }
 }

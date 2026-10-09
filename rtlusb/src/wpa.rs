@@ -2,9 +2,10 @@
 //! IEEE 802.11-2020 12.7; hostapd's wpa_auth.c is the behavior reference.
 
 use aes_kw::KekAes128;
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use hmac::{Hmac, Mac};
 use sha1::Sha1;
+use shieldutl::psk::Psk;
 
 type HmacSha1 = Hmac<Sha1>;
 
@@ -17,23 +18,19 @@ pub fn pmk(passphrase: &str, ssid: &str) -> Pmk {
     out
 }
 
-/// Reads `psk=` from a wpa_supplicant network block: a quoted passphrase or 64 hex digits
+/// The PMK a `psk=` value stands for
+pub fn pmk_of(psk: &Psk, ssid: &str) -> Pmk {
+    match psk {
+        Psk::Passphrase(p) => pmk(p, ssid),
+        Psk::Pmk(k) => *k,
+    }
+}
+
+/// Reads `psk=` from a wpa_supplicant network block: a quoted passphrase or 64 hex digits,
+/// sealed by shieldd or not
 pub fn pmk_from_conf(conf: &str, ssid: &str) -> Result<Pmk> {
     let line = conf.lines().map(str::trim).find_map(|l| l.strip_prefix("psk=")).context("no psk= line")?;
-    if let Some(pass) = line.strip_prefix('"').and_then(|l| l.strip_suffix('"')) {
-        if !(8..=63).contains(&pass.len()) {
-            bail!("passphrase must be 8-63 characters");
-        }
-        return Ok(pmk(pass, ssid));
-    }
-    if line.len() != 64 {
-        bail!("psk is neither a quoted passphrase nor 64 hex digits");
-    }
-    let mut out = [0u8; 32];
-    for (i, o) in out.iter_mut().enumerate() {
-        *o = u8::from_str_radix(&line[i * 2..i * 2 + 2], 16).context("psk hex")?;
-    }
-    Ok(out)
+    Ok(pmk_of(&Psk::parse(line.trim())?.0, ssid))
 }
 
 fn hmac_sha1(key: &[u8], parts: &[&[u8]]) -> [u8; 20] {
@@ -222,5 +219,13 @@ mod tests {
     fn reads_quoted_passphrase() {
         let conf = "network={\n\tssid=\"IEEE\"\n\tpsk=\"password\"\n}\n";
         assert_eq!(pmk_from_conf(conf, "IEEE").unwrap(), pmk("password", "IEEE"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn reads_a_sealed_one() {
+        let sealed = Psk::Passphrase("password".into()).seal().unwrap();
+        let conf = format!("network={{\n\tssid=\"IEEE\"\n\tpsk={sealed}\n}}\n");
+        assert_eq!(pmk_from_conf(&conf, "IEEE").unwrap(), pmk("password", "IEEE"));
     }
 }

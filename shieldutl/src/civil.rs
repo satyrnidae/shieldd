@@ -1,4 +1,4 @@
-//! Calendar dates from Unix days. Shared w/ build.rs, which has no crate to borrow from.
+//! Calendar dates from Unix days. Shared w/ shieldd's build.rs, which has no crate to borrow from.
 
 /// Days since 1970-01-01 as YYYY-MM-DD, proleptic Gregorian. Howard Hinnant's civil_from_days.
 pub fn date(days: u64) -> String {

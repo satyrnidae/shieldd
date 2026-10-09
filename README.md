@@ -126,9 +126,11 @@ The group is saved to `--conf`, which defaults to the user's settings folder:
 
 A previous file is kept next to it as `p2p.conf.<unix time>.bak`. The file is in
 wpa_supplicant's P2P format, except that the key is sealed w/ Windows DPAPI as
-`psk=dpapi:<base64>`: only the Windows user who saved it can read it, and only on that machine. A
-plain `psk=`, a quoted passphrase or 64 hex digits, is sealed in place the first time it's read.
-Moving to another machine or user means pairing again. The key is never logged.
+`psk=dpapi:<base64>`: only the Windows user who saved it can read it, and only on that machine.
+A plain `psk=`, a quoted passphrase or 64 hex digits, is sealed in place the first time the
+default file is read, and a backup of a plain file is sealed as it's made. A file given w/ `--conf` is read as it is and left plain, since wpa_supplicant or
+something else may read it too. Moving to another machine or user means pairing again.
+`rtlusb.exe ap` reads sealed files as well. The key is never logged.
 
 Controller names go in `known-clients` alongside, for the tray: one a line, the MAC,
 whitespace, then the name, like a hosts file, w/ `#` lines as comments. A controller starts out
@@ -220,16 +222,18 @@ An older path, kept because it still works:
 
 | Path | What |
 | --- | --- |
-| `mac/` | MAC address formatting shared by rtlusb and shieldd |
+| `shieldtray/` | The tray: what it shows and sends back, the battery gauge, the Windows tray, and its icon SVGs in `res/` |
+| `shieldw/` | shieldd w/o a console window, for running at login |
+| `shieldutl/` | Shared by rtlusb and shieldd: MAC formatting, base64, `psk=` values and their DPAPI seal |
 | `ozproto/` | Ozmo protocol: wire format and host session state machine, no I/O |
 | `rtlusb/` | Userspace RTL8811AU driver over WinUSB: init, firmware, PHY, AP, WPA2, WPS |
 | `shieldd/` | The host: radio, controller setup, outputs, pairing, tray, login start, WSL bridge receiver |
 | `shdlink/` | Packet format shared by `--transmit` and `--receiver` |
-| `res/` | Tray icon SVGs, embedded in shieldd |
 | `tools/` | rtw88 table generator, Python |
 
 `rtlusb.exe efuse | rx | ap` are bring-up tools for the adapter: dump efuse, print received
-frames, or run a bare AP.
+frames, or run a bare AP. Each run logs to `%LOCALAPPDATA%\shieldd\logs\rtlusb\latest.log` too,
+earlier runs gzipped next to it as for shieldd.
 
 ## Prior art
 

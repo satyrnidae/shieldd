@@ -79,10 +79,14 @@ enum Cmd {
 }
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "rtlusb=info".into()))
-        .init();
-    match Args::parse().cmd {
+    // Before the log, so --help and a typo don't start a new one
+    let args = Args::parse();
+    shieldutl::logs::init(shieldutl::logs::Setup {
+        default_filter: "rtlusb=info,shieldutl=info",
+        console: true,
+        file: Some((shieldutl::settings_dir().join("logs").join("rtlusb"), true)),
+    })?;
+    match args.cmd {
         Cmd::Efuse { dump } => efuse_cmd(dump),
         Cmd::Rx { channel, mac, no_beacons, no_promisc, seconds } => {
             rx_cmd(channel, mac, no_beacons, !no_promisc, seconds.map(Duration::from_secs))
@@ -108,7 +112,7 @@ fn efuse_cmd(dump: Option<PathBuf>) -> Result<()> {
     efuse::hexdump(&log);
     let e = efuse::Efuse::parse(&log);
     println!("efuse VID:PID {:04x}:{:04x}", e.vid, e.pid);
-    println!("MAC {}", mac::fmt_mac(&e.mac));
+    println!("MAC {}", shieldutl::mac::fmt_mac(&e.mac));
 
     if let Some(dir) = dump {
         std::fs::create_dir_all(&dir)?;
@@ -184,7 +188,7 @@ fn ap_cmd(
         let mut tx = tx::Tx::new(&chip.rtl)?;
         chip.enable_sec_engine()?;
         chip.start_ap(&mut tx, &cfg)?;
-        info!(ssid = cfg.ssid, bssid = mac::fmt_mac(&bssid), channel, "beaconing, Ctrl-C to stop");
+        info!(ssid = cfg.ssid, bssid = shieldutl::mac::fmt_mac(&bssid), channel, "beaconing, Ctrl-C to stop");
         let mut bss = bss::Bss::new(cfg, pmk);
         bss.install_gtk(&chip)?;
 
@@ -222,7 +226,7 @@ fn ap_cmd(
                     ozmo_frames += 1;
                     if ozmo_frames <= 20 || ozmo_frames.is_multiple_of(500) {
                         info!(
-                            sta = mac::fmt_mac(&sta),
+                            sta = shieldutl::mac::fmt_mac(&sta),
                             ethertype = format!("{ethertype:#06x}"),
                             len = payload.len(),
                             head = format!("{:02x?}", &payload[..payload.len().min(16)]),
@@ -271,8 +275,8 @@ fn print_frame(p: &rx::RxPkt, t0: Instant) {
         rx::rate_name(p.rate),
         p.dbm.map_or("?".into(), |d| d.to_string()),
         kind,
-        mac::fmt_mac(a1),
-        a2.map_or("-".into(), mac::fmt_mac),
+        shieldutl::mac::fmt_mac(a1),
+        a2.map_or("-".into(), shieldutl::mac::fmt_mac),
     );
     if !flags.is_empty() {
         line += &format!(" [{flags}]");

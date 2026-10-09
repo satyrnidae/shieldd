@@ -104,8 +104,8 @@ Installed separately by the user; nothing from them ships with this project.
 ## Icons
 
 ### Ikono Bold Line Icons
-- **Used for:** the tray icons, `res/battery-*-svgrepo-com.svg` and
-  `res/loading-spinner-svgrepo-com.svg`, embedded in `shieldd` and recolored per theme at
+- **Used for:** the tray icons, `shieldtray/res/battery-*-svgrepo-com.svg` and
+  `shieldtray/res/loading-spinner-svgrepo-com.svg`, embedded in `shieldtray` and recolored per theme at
   runtime. `battery-empty` is the outline of the set's battery icons.
 - **License:** MIT.
 - **Author:** Will Kelly. Retrieved via SVG Repo, https://www.svgrepo.com
@@ -135,8 +135,8 @@ SOFTWARE.
 ```
 
 ### Clarity Project Icons
-- **Used for:** the tray icons while no controller is connected, `res/disconnected-svgrepo-com.svg`,
-  and while pairing, `res/wifi-svgrepo-com.svg`, embedded in `shieldd` and recolored per theme
+- **Used for:** the tray icons while no controller is connected, `shieldtray/res/disconnected-svgrepo-com.svg`,
+  and while pairing, `shieldtray/res/wifi-svgrepo-com.svg`, embedded in `shieldtray` and recolored per theme
   at runtime.
 - **License:** MIT.
 - **Author:** VMware. Retrieved via SVG Repo, https://www.svgrepo.com

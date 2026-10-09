@@ -14,19 +14,19 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, bail};
-use mac::fmt_mac;
+use anyhow::{Context, Result, bail};
 use ozproto::wire::ETHERTYPE;
 use ozproto::{Config, Event, Host};
 use rtlusb::ap::WpsConfig;
 use rtlusb::wps::{Credential, Device};
 use rtlusb::{ApOptions, Radio, RadioEvent};
+use shieldtray::{self as tray, Command, Connected, Shunned, Status, Tray};
+use shieldutl::mac::fmt_mac;
+use shieldutl::vban::{self, Vban};
 use tracing::{debug, info, trace, warn};
 
 use crate::controller::{Controller, HEADSET_EP, Report, RumbleProbe};
 use crate::outputs::Outputs;
-use crate::tray::{self, Command, Connected, Shunned, Status, Tray};
-use crate::vban::{self, Vban};
 use crate::{Args, hex, known_clients, p2pconf, pair};
 
 /// WPS walk time: how long push-button stays on
@@ -169,7 +169,7 @@ impl Shared {
 
 pub fn run(args: Args, quit: &AtomicBool) -> Result<()> {
     // Up the whole time, so it also says shieldd is running while there's nothing to host
-    let mut sh = Shared { tray: Tray::start(), vban: None, unsaved: None, conf: args.conf.clone() };
+    let mut sh = Shared { tray: Tray::start(crate::ABOUT), vban: None, unsaved: None, conf: args.conf.clone() };
     if Shared::vban_marker().exists() {
         sh.set_vban(true);
     }
@@ -215,14 +215,19 @@ fn run_once(args: &Args, pair: bool, pair_bails: bool, quit: &AtomicBool, sh: &m
     let mut group = match &sh.unsaved {
         _ if pair => pair::new_group(),
         Some(g) => g.clone(),
-        None => p2pconf::read(&args.conf)?,
+        None => p2pconf::read(&args.conf, crate::is_default_conf(&args.conf))?,
     };
-    // A new group always has a passphrase to hand out
-    let wps = group.psk.passphrase().filter(|_| pair).map(|p| WpsConfig {
-        device: Device::from_seed(group.ssid.as_bytes(), "shieldd"),
-        credential: Credential { ssid: group.ssid.clone(), passphrase: p.to_owned() },
-    });
-    let pmk = group.psk.pmk(&group.ssid);
+    let wps = match pair {
+        true => Some(WpsConfig {
+            device: Device::from_seed(group.ssid.as_bytes(), "shieldd"),
+            credential: Credential {
+                ssid: group.ssid.clone(),
+                passphrase: group.psk.passphrase().context("a group to pair has no passphrase to hand out")?.to_owned(),
+            },
+        }),
+        false => None,
+    };
+    let pmk = rtlusb::wpa::pmk_of(&group.psk, &group.ssid);
     let ps_hold = match std::env::var("SHIELDD_PS_HOLD_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
         Some(0) => None,
         Some(ms) => Some(Duration::from_millis(ms)),

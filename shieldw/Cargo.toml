@@ -1,0 +1,11 @@
+[package]
+name = "shieldw"
+description = "shieldd w/o a console window, for running at login"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+shieldd.workspace = true

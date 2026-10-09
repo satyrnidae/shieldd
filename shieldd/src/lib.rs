@@ -11,22 +11,15 @@
 //! Both sides share the packet format through the `shdlink` crate.
 //!
 //! Two binaries share this: `shieldd`, the console one, and `shieldw`, a windowless one for
-//! running at login (`--install`). Hosting, both log to a file too. See background.rs and logs.rs.
+//! running at login (`--install`) that lives in its own crate. Hosting, both log to a file too.
+//! See background.rs, and shieldutl's logs.rs.
 
 #[cfg(windows)]
 mod background;
 #[cfg_attr(not(windows), allow(dead_code, reason = "only the Windows host uses it so far"))]
-mod base64;
-mod civil;
-#[cfg_attr(not(windows), allow(dead_code, reason = "only the Windows host uses it so far"))]
 mod controller;
-#[cfg(windows)]
-mod dpapi;
-#[cfg_attr(not(windows), allow(dead_code, reason = "only the Windows host uses it so far"))]
-mod files;
 #[cfg_attr(not(windows), allow(dead_code, reason = "only the Windows host uses it so far"))]
 mod known_clients;
-mod logs;
 #[cfg(windows)]
 mod outputs;
 #[cfg(windows)]
@@ -39,10 +32,6 @@ mod radio;
 mod receiver;
 #[cfg(target_os = "linux")]
 mod transmit;
-#[cfg(windows)]
-mod tray;
-#[cfg_attr(not(windows), allow(dead_code, reason = "only the Windows host uses it so far"))]
-mod vban;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -51,22 +40,27 @@ use anyhow::Result;
 use clap::Parser;
 use tracing::error;
 
-/// The user's local settings folder: `%LOCALAPPDATA%\shieldd` on Windows, local rather than
-/// roaming since the group is tied to this machine's adapter, and `$XDG_CONFIG_HOME/shieldd`
-/// or `~/.config/shieldd` elsewhere. The working directory if neither is set.
-pub fn settings_dir() -> PathBuf {
-    use std::env::var_os;
-    #[cfg(windows)]
-    let dir = var_os("LOCALAPPDATA").map(PathBuf::from);
-    #[cfg(not(windows))]
-    let dir = var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| var_os("HOME").map(|h| PathBuf::from(h).join(".config")));
-    dir.map_or_else(PathBuf::new, |d| d.join("shieldd"))
-}
+pub use shieldutl::settings_dir;
+
+/// For the tray's About box
+#[cfg(windows)]
+const ABOUT: shieldtray::About = shieldtray::About {
+    version: env!("CARGO_PKG_VERSION"),
+    authors: env!("CARGO_PKG_AUTHORS"),
+    built: env!("SHIELDD_BUILD_DATE"),
+};
 
 pub fn default_conf() -> PathBuf {
     settings_dir().join("p2p.conf")
+}
+
+/// Whether `conf` is the default one, however it's spelled
+#[cfg(windows)]
+fn is_default_conf(conf: &std::path::Path) -> bool {
+    match (std::fs::canonicalize(conf), std::fs::canonicalize(default_conf())) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => conf == default_conf(),
+    }
 }
 
 #[derive(Parser, Debug)]
@@ -147,7 +141,8 @@ impl Args {
 /// From background::claim
 type Quit = std::sync::Arc<std::sync::atomic::AtomicBool>;
 
-/// Both binaries' main; `windowless` is shieldw, which only logs to the file. See logs.rs.
+/// Both binaries' main; `windowless` is shieldw, in its own crate, which only logs to the file.
+/// See shieldutl's logs.rs.
 pub fn run(windowless: bool) -> Result<()> {
     let parsed = Args::try_parse();
     // A host takes the instance before it touches the log file, and only the instance starts a
@@ -164,16 +159,12 @@ pub fn run(windowless: bool) -> Result<()> {
         Some(Ok(_)) => Some(true),
         _ => windowless.then_some(false),
     };
-    if init_logging(!windowless, to_file)? {
-        // To the file; a console still gets Rust's own report, w/ the thread and any backtrace
-        let report = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |p| {
-            error!(target: PANIC, "{p}");
-            if !windowless {
-                report(p);
-            }
-        }));
-    }
+    // rtlusb's info covers the AP, pairing and channel survey; its noisy stats are debug
+    shieldutl::logs::init(shieldutl::logs::Setup {
+        default_filter: "shieldd=info,rtlusb=info,shieldtray=info,shieldutl=info",
+        console: !windowless,
+        file: to_file.map(|rotate| (settings_dir().join("logs"), rotate)),
+    })?;
     let claimed = match claimed.transpose() {
         Ok(c) => c,
         Err(e) => {
@@ -196,43 +187,6 @@ pub fn run(windowless: bool) -> Result<()> {
         error!("{e:#}");
     }
     result
-}
-
-/// Panics, logged for the file; the console has Rust's own report of them
-const PANIC: &str = "shieldd::panic";
-
-/// `to_file`: Some(true) starts a new log file, Some(false) adds to it. A console carries on
-/// w/o the file if it won't open. Color only goes to a terminal, never a file or a redirect.
-/// Returns whether the file's in use.
-fn init_logging(console: bool, to_file: Option<bool>) -> Result<bool> {
-    use std::io::IsTerminal;
-    use tracing_subscriber::fmt;
-    use tracing_subscriber::prelude::*;
-    // rtlusb's info covers the AP, pairing and channel survey; its noisy stats are debug
-    let filter =
-        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "shieldd=info,rtlusb=info".into());
-    let console = console.then(|| {
-        fmt::layer()
-            .with_ansi(std::io::stdout().is_terminal())
-            .with_filter(tracing_subscriber::filter::filter_fn(|m| m.target() != PANIC))
-    });
-    // Nothing logs before the new file is in place, or it'd land in the last run's
-    let (file, trouble) = match to_file.map(logs::open) {
-        Some(Ok((f, stuck))) => (Some(fmt::layer().with_ansi(false).with_writer(std::sync::Mutex::new(f))), stuck),
-        Some(Err(e)) if console.is_some() => (None, Some(e.context("logging to the console only"))),
-        Some(Err(e)) => return Err(e),
-        None => (None, None),
-    };
-    let to_file = to_file.filter(|_| file.is_some());
-    tracing_subscriber::registry().with(filter).with(console).with(file).init();
-    if let Some(e) = trouble {
-        tracing::warn!("{e:#}");
-    }
-    if to_file == Some(true) {
-        // Packing a long log takes a moment; hosting needn't wait on it
-        let _ = std::thread::Builder::new().name("pack logs".into()).spawn(logs::pack);
-    }
-    Ok(to_file.is_some())
 }
 
 #[cfg_attr(not(windows), expect(unused_mut, reason = "only Windows sets background"))]

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["mac", "ozproto", "rtlusb", "shdlink", "shieldd"]
+members = ["ozproto", "rtlusb", "shdlink", "shieldd", "shieldtray", "shieldutl", "shieldw"]
 
 [workspace.package]
 version = "0.2.0+alpha"
@@ -10,10 +10,12 @@ license = "GPL-2.0-only"
 publish = false
 
 [workspace.dependencies]
-mac = { path = "mac" }
 ozproto = { path = "ozproto" }
 rtlusb = { path = "rtlusb" }
 shdlink = { path = "shdlink" }
+shieldd = { path = "shieldd" }
+shieldtray = { path = "shieldtray" }
+shieldutl = { path = "shieldutl" }
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
 ctrlc = "3.5.2"

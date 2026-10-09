@@ -9,12 +9,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use tracing::{info, warn};
 
-use crate::files;
+use shieldutl::files;
+pub use shieldutl::names::clean;
 
 type Mac = [u8; 6];
-
-/// Longest name: the WPS model name field it starts out as, which the controller fills to 15
-pub const MAX_NAME: usize = 15;
 
 fn path(conf: &Path) -> PathBuf {
     conf.with_file_name("known-clients")
@@ -52,7 +50,7 @@ fn parse(text: &str) -> HashMap<Mac, String> {
 /// `text` w/ `mac`'s line saying `name`: the first line for it rewritten, any later ones dropped,
 /// or a new line at the end. Comments and everything else stay as they were.
 fn set_line(text: &str, mac: &Mac, name: &str) -> String {
-    let line = format!("{} {name}", mac::fmt_mac(mac));
+    let line = format!("{} {name}", shieldutl::mac::fmt_mac(mac));
     let mut out = String::with_capacity(text.len() + line.len() + 1);
     let mut done = false;
     for l in text.lines() {
@@ -72,15 +70,6 @@ fn set_line(text: &str, mac: &Mac, name: &str) -> String {
         out.push('\n');
     }
     out
-}
-
-/// `name` as a controller name: trimmed, one line, at most MAX_NAME characters. None if
-/// nothing's left.
-pub fn clean(name: &str) -> Option<String> {
-    let name: String = name.chars().filter(|c| !c.is_control()).collect();
-    let name: String = name.trim().chars().take(MAX_NAME).collect();
-    let name = name.trim_end();
-    (!name.is_empty()).then(|| name.to_owned())
 }
 
 /// Empty if there's no file yet. Moves an old `p2p.models` over first.
@@ -130,13 +119,5 @@ mod tests {
         assert_eq!(set_line("", &MAC, "nVidiaBlake"), "00:04:4b:21:92:06 nVidiaBlake\n");
         // A duplicate goes
         assert_eq!(set_line("00:04:4b:21:92:06 a\n00:04:4b:21:92:06 b\n", &MAC, "c"), "00:04:4b:21:92:06 c\n");
-    }
-
-    #[test]
-    fn names_are_cleaned() {
-        assert_eq!(clean("  nVidiaBlake     ").as_deref(), Some("nVidiaBlake"));
-        assert_eq!(clean("a\r\nb").as_deref(), Some("ab"));
-        assert_eq!(clean("0123456789abcdefgh").as_deref(), Some("0123456789abcde"));
-        assert_eq!(clean("   "), None);
     }
 }

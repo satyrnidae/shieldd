@@ -11,8 +11,8 @@ use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use mac::fmt_mac;
 use rand::RngCore;
+use shieldutl::mac::fmt_mac;
 use tracing::{debug, info, trace, warn};
 
 use crate::ap::{ApConfig, RSN, WMM_PARAM};
