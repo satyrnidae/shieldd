@@ -1,0 +1,59 @@
+[package]
+name = "shieldd"
+description = "Windows host for the 2015 NVIDIA SHIELD controller over Wi-Fi Direct + Ozmo, plus the WSL bridge (--transmit / --receiver)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ozproto.workspace = true
+shdlink.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# The host and --receiver: Windows only
+[target.'cfg(windows)'.dependencies]
+ctrlc.workspace = true
+rtlusb.workspace = true
+rand = "0.8"
+names = { version = "0.14", default-features = false }
+# Tray icons from res/*.svg; no text or raster images in them
+resvg = { version = "0.48", default-features = false }
+pcap.workspace = true
+vigem-client.workspace = true
+
+# --transmit: the WSL side
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies.windows]
+workspace = true
+features = [
+    "Devices_Radios",
+    "Devices_WiFi",
+    "Devices_WiFiDirect",
+    "Foundation",
+    "Foundation_Collections",
+    "Networking_Connectivity",
+    "Security_Credentials",
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Media_Audio",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+    "Win32_Security",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_UI_Controls",
+    "Win32_System_WinRT",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+]

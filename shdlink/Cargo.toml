@@ -1,0 +1,9 @@
+[package]
+name = "shdlink"
+description = "SHD2 packet: controller state from the WSL side (shieldd --transmit) to the Windows side (shieldd --receiver)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]

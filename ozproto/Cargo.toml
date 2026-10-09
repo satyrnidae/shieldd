@@ -1,0 +1,9 @@
+[package]
+name = "ozproto"
+description = "Ozmo USB-over-Wi-Fi protocol: wire format and host-side session state machine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]

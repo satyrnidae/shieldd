@@ -1,0 +1,16 @@
+reference/
+HANDOFF.md
+
+# Rust
+/target/
+debug/
+**/*.rs.bk
+*.pdb
+# Cargo.lock stays tracked: the workspace ships binaries
+
+# Saved groups hold the controller's passphrase; --conf normally keeps them out of the tree
+p2p.conf*
+
+# Python probes in tools/
+__pycache__/
+*.pyc

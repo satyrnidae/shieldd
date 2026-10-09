@@ -1,0 +1,1387 @@
+//! Tray icon for the controller's battery (mailbox 01, controller.rs), w/ a notification when
+//! it goes critical and another when it's kicked for being too flat to use. Shown as long as
+//! shieldd runs, disconnected or not.
+//!
+//! Battery icons are Ikono Bold Line Icons, turned upright; the disconnected and pairing ones
+//! are from Clarity. All from res/, MIT, see THIRD_PARTY.md. Rendered at the tray's size and colored
+//! for the taskbar's light or dark theme.
+
+use std::cell::{Cell, RefCell};
+use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
+
+use anyhow::{Context, Result};
+use resvg::tiny_skia::{Pixmap, Transform};
+use resvg::usvg;
+use tracing::{debug, info, warn};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Graphics::Gdi::{
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateBitmap, CreateDIBSection, DIB_RGB_COLORS, DeleteObject,
+};
+use windows::Win32::Media::Audio::{PlaySoundW, SND_ALIAS, SND_ASYNC};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
+use windows::Win32::System::Threading::GetCurrentThreadId;
+use windows::Win32::UI::Controls::{
+    ICC_BAR_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, TOOLTIPS_CLASSW, TTF_ABSOLUTE, TTF_TRACK,
+    TTM_ADDTOOLW, TTM_SETMAXTIPWIDTH, TTM_TRACKACTIVATE, TTM_TRACKPOSITION, TTM_UPDATETIPTEXTW, TTS_ALWAYSTIP,
+    TTS_NOPREFIX, TTTOOLINFOW,
+};
+use windows::Win32::UI::HiDpi::{
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForSystem, GetSystemMetricsForDpi, SetThreadDpiAwarenessContext,
+};
+use windows::Win32::UI::Shell::{
+    NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIIF_ERROR, NIIF_NOSOUND, NIIF_WARNING, NIM_ADD, NIM_DELETE,
+    NIM_MODIFY, NOTIFY_ICON_MESSAGE, NOTIFYICONDATAW, Shell_NotifyIconW,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    AppendMenuW, CW_USEDEFAULT, CreateIconIndirect, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon,
+    DestroyMenu, DestroyWindow, DispatchMessageW, EndDialog, EndMenu, EnumThreadWindows, GetClassNameW, GetCursorPos,
+    GetMessageW, HICON, HWND_TOPMOST, ICONINFO, IDCANCEL, IDOK, KillTimer, MB_DEFBUTTON2, MB_ICONINFORMATION,
+    MB_ICONWARNING, MB_OK, MB_OKCANCEL, MB_SETFOREGROUND, MENU_ITEM_FLAGS, MF_DISABLED, MF_GRAYED, MF_SEPARATOR,
+    MF_STRING, MSG, MessageBoxW, PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SM_CXSMICON,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SendMessageW, SetForegroundWindow, SetTimer, SetWindowPos, TPM_RETURNCMD,
+    TPM_RIGHTBUTTON, TrackPopupMenu, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CONTEXTMENU, WM_ENTERIDLE, WM_LBUTTONUP,
+    WM_MENUSELECT, WM_NULL, WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_EX_TOPMOST, WS_POPUP,
+};
+use windows::core::{BOOL, PCWSTR, PWSTR, w};
+
+//region Battery
+
+/// What the tray shows, from the controller's status answer
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Battery {
+    pub charging: bool,
+    /// The controller's own level band: 50, 25, 10, 0 seen so far
+    pub band: u8,
+    /// Mailbox 01 bytes 2-3, a voltage reading
+    pub reading: u16,
+    /// Below the rumble cutoff
+    pub critical: bool,
+    /// Kicked until it charges
+    pub must_charge: bool,
+}
+
+/// Readings for 0% and 100%, a straight line through where the controller's 25 and 10 bands
+/// start (0xD47F, 0xD081). 0% lands right where it gave out on 2026-10-08 (~0xCCFD).
+const EMPTY: u16 = 0xCD00;
+const FULL: u16 = 0xE800;
+/// A reading this much above what's shown means it was charged while away
+const RECHARGED_BY: u8 = 10;
+
+/// How far the charger lifts the reading the moment it's plugged in: 0xDCB2 -> 0xE34E and
+/// 0xDD36 -> 0xE374 on 2026-10-08. Left in, charging would read ~23% high.
+const CHARGE_LIFT: u16 = 0x0660;
+
+pub fn percent(reading: u16) -> u8 {
+    let span = u32::from(FULL - EMPTY);
+    (u32::from(reading.saturating_sub(EMPTY)) * 100 / span).min(100) as u8
+}
+
+/// The percent to show, from readings that bounce under load and jump w/ the charger. On
+/// battery it only goes down, on the charger only up, and each switch starts over.
+#[derive(Debug, Default)]
+struct Gauge {
+    pct: Option<u8>,
+    charging: Option<bool>,
+}
+
+impl Gauge {
+    /// Returns the percent to show, and whether a discharge just began (re-arms the critical alert)
+    fn feed(&mut self, b: &Battery) -> (u8, bool) {
+        let p = if b.charging { percent(b.reading.saturating_sub(CHARGE_LIFT)) } else { percent(b.reading) };
+        let switched = self.charging != Some(b.charging);
+        let (pct, fresh) = match self.pct {
+            None => (p, true),
+            Some(_) if switched => (p, !b.charging),
+            Some(shown) if b.charging => (shown.max(p), false),
+            // Charged while disconnected
+            Some(shown) if p >= shown.saturating_add(RECHARGED_BY) => (p, true),
+            Some(shown) => (shown.min(p), false),
+        };
+        self.pct = Some(pct);
+        self.charging = Some(b.charging);
+        (pct, fresh)
+    }
+}
+
+//endregion
+
+//region Icons
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Icon {
+    /// On the charger: green outline and bolt
+    Charging,
+    /// Charging's other frame: the green outline w/ the bolt in the stroke color, so it flashes
+    ChargingDim,
+    /// On the charger at 100%: the full battery, outline and all in green
+    Charged,
+    Full,
+    Medium,
+    Low,
+    Empty,
+    Critical,
+    Disconnected,
+    /// Disconnected's other frame, all in red, so it flashes
+    DisconnectedRed,
+    /// Frame 0 to PAIRING_FRAMES - 1 of the pairing animation
+    Pairing(u8),
+    /// Frame 0 to SPINNER_FRAMES - 1 of the spinner, while a controller is on its way in
+    Spinner(u8),
+}
+
+/// The spinner turns this far each frame, at 30 fps: 225 deg/s, a turn every 1.6 s
+const SPINNER_STEP: f32 = 7.5;
+const SPINNER_FRAMES: u8 = (360.0 / SPINNER_STEP) as u8;
+const SPINNER_FRAME: Duration = Duration::from_nanos(1_000_000_000 / 30);
+/// The spinner's arc, in its 24-unit viewBox: centered, radius 8 plus half its 3.56 stroke.
+/// It's fit by this circle rather than by the arc, which would wobble as it turns.
+const SPINNER_RADIUS: f32 = 8.0 + 3.55556 / 2.0;
+
+/// The pairing animation: a blank frame, then the Wi-Fi icon's dot and its arcs inside out
+/// light up blue one at a time
+const PAIRING_FRAMES: u8 = 5;
+/// How long each pairing frame shows
+const PAIRING_FRAME: Duration = Duration::from_millis(400);
+/// How long each half of a flash shows: the charging bolt, the disconnected icon
+const FLASH_FRAME: Duration = Duration::from_millis(800);
+/// The wifi icon's elements, by class, in the order they light up: the dot, then the arcs
+/// inside out
+const PAIRING_ORDER: [&str; 4] = ["path-1", "path-4", "path-3", "path-2"];
+
+#[derive(Debug, Clone, Copy)]
+enum Accent {
+    None,
+    Green,
+    Yellow,
+    Red,
+}
+
+impl Icon {
+    const FIXED: [Icon; 15] = [
+        Icon::Charging,
+        Icon::ChargingDim,
+        Icon::Charged,
+        Icon::Full,
+        Icon::Medium,
+        Icon::Low,
+        Icon::Empty,
+        Icon::Critical,
+        Icon::Disconnected,
+        Icon::DisconnectedRed,
+        Icon::Pairing(0),
+        Icon::Pairing(1),
+        Icon::Pairing(2),
+        Icon::Pairing(3),
+        Icon::Pairing(4),
+    ];
+
+    /// Every icon and every animation frame
+    fn all() -> impl Iterator<Item = Icon> {
+        Icon::FIXED.into_iter().chain((0..SPINNER_FRAMES).map(Icon::Spinner))
+    }
+
+    /// For `b`, w/ `pct` the percent shown
+    fn of(b: &Battery, pct: u8) -> Icon {
+        if b.charging && pct >= 100 {
+            Icon::Charged
+        } else if b.charging {
+            Icon::Charging
+        } else if b.critical {
+            Icon::Critical
+        } else {
+            match b.band {
+                51.. => Icon::Full,
+                50 => Icon::Medium,
+                25..=49 => Icon::Low,
+                _ => Icon::Empty,
+            }
+        }
+    }
+
+    /// The SVG, and the color of every path after the first, which is the outline
+    fn source(self) -> (&'static str, Accent) {
+        match self {
+            Icon::Charging => (include_str!("../../res/battery-charging-svgrepo-com.svg"), Accent::Green),
+            Icon::ChargingDim => (include_str!("../../res/battery-charging-svgrepo-com.svg"), Accent::None),
+            Icon::Charged => (include_str!("../../res/battery-full-svgrepo-com.svg"), Accent::Green),
+            Icon::Full => (include_str!("../../res/battery-full-svgrepo-com.svg"), Accent::Green),
+            Icon::Medium => (include_str!("../../res/battery-medium-svgrepo-com.svg"), Accent::Yellow),
+            Icon::Low => (include_str!("../../res/battery-low-svgrepo-com.svg"), Accent::Red),
+            Icon::Empty => (include_str!("../../res/battery-empty-svgrepo-com.svg"), Accent::Red),
+            Icon::Critical => (include_str!("../../res/battery-warning-svgrepo-com.svg"), Accent::Red),
+            // Its color is on the root element, before any path; all of it is outline
+            Icon::Disconnected => (include_str!("../../res/disconnected-svgrepo-com.svg"), Accent::None),
+            Icon::DisconnectedRed => (include_str!("../../res/disconnected-svgrepo-com.svg"), Accent::Red),
+            // Colored by pairing_frame instead
+            Icon::Pairing(_) => (include_str!("../../res/wifi-svgrepo-com.svg"), Accent::None),
+            // Turned by pixmap
+            Icon::Spinner(_) => (include_str!("../../res/loading-spinner-svgrepo-com.svg"), Accent::None),
+        }
+    }
+
+    /// The animation frame after this one, for the animated icons
+    fn next_frame(self) -> Option<Icon> {
+        match self {
+            Icon::Charging => Some(Icon::ChargingDim),
+            Icon::ChargingDim => Some(Icon::Charging),
+            Icon::Disconnected => Some(Icon::DisconnectedRed),
+            Icon::DisconnectedRed => Some(Icon::Disconnected),
+            Icon::Pairing(n) => Some(Icon::Pairing((n + 1) % PAIRING_FRAMES)),
+            Icon::Spinner(n) => Some(Icon::Spinner((n + 1) % SPINNER_FRAMES)),
+            _ => None,
+        }
+    }
+
+    /// How long this frame of an animation shows
+    fn frame_time(self) -> Duration {
+        match self {
+            Icon::Pairing(_) => PAIRING_FRAME,
+            Icon::Spinner(_) => SPINNER_FRAME,
+            _ => FLASH_FRAME,
+        }
+    }
+
+    /// `want`, or the frame of it already on screen, so an update doesn't restart the animation
+    fn keep_frame(want: Icon, shown: Option<Icon>) -> Icon {
+        match (want, shown) {
+            (Icon::Charging, Some(Icon::ChargingDim)) => Icon::ChargingDim,
+            (Icon::Disconnected, Some(Icon::DisconnectedRed)) => Icon::DisconnectedRed,
+            (Icon::Pairing(_), Some(i @ Icon::Pairing(_))) => i,
+            (Icon::Spinner(_), Some(i @ Icon::Spinner(_))) => i,
+            _ => want,
+        }
+    }
+
+    /// The SVG in the taskbar's colors
+    fn svg(self, p: &Palette) -> String {
+        let (svg, accent) = self.source();
+        match self {
+            Icon::Pairing(n) => pairing_frame(svg, p, n),
+            // All of it in the accent, outline included, which colorize keeps for the stroke
+            Icon::DisconnectedRed | Icon::Charged | Icon::Critical | Icon::Charging | Icon::Empty => {
+                svg.replace("#000000", p.accent(accent))
+            }
+            // Charging's outline w/ the bolt dimmed to the stroke color
+            Icon::ChargingDim => paint(svg, p.green, p.stroke),
+            _ => colorize(svg, p, accent),
+        }
+    }
+
+    /// Rendered at `size` in the taskbar's colors
+    fn pixmap(self, p: &Palette, size: u32) -> Result<Pixmap> {
+        match self {
+            Icon::Spinner(n) => rasterize_turned(&self.svg(p), size, f32::from(n) * SPINNER_STEP),
+            _ => rasterize(&self.svg(p), size),
+        }
+    }
+}
+
+/// Taskbar colors for one theme
+struct Palette {
+    stroke: &'static str,
+    green: &'static str,
+    yellow: &'static str,
+    red: &'static str,
+    /// The pairing animation
+    blue: &'static str,
+}
+
+const LIGHT: Palette =
+    Palette { stroke: "#000000", green: "#225500", yellow: "#D4AA00", red: "#550000", blue: "#0044AA" };
+const DARK: Palette =
+    Palette { stroke: "#FFFFFF", green: "#44AA00", yellow: "#FFD42A", red: "#AA0000", blue: "#0066FF" };
+
+impl Palette {
+    fn accent(&self, a: Accent) -> &'static str {
+        match a {
+            Accent::None => self.stroke,
+            Accent::Green => self.green,
+            Accent::Yellow => self.yellow,
+            Accent::Red => self.red,
+        }
+    }
+}
+
+/// The icons are drawn in #000000 throughout. Path 1 (Inkscape's numbering, document order)
+/// and anything before it is the outline and takes the stroke color; the rest are the level
+/// and take the accent.
+fn colorize(svg: &str, p: &Palette, accent: Accent) -> String {
+    paint(svg, p.stroke, p.accent(accent))
+}
+
+/// The outline, path 1 and anything before it, in `outline`; the rest in `fill`
+fn paint(svg: &str, outline: &str, fill: &str) -> String {
+    let mut parts = svg.split("<path");
+    let mut out = parts.next().unwrap_or_default().replace("#000000", outline);
+    for (i, part) in parts.enumerate() {
+        out.push_str("<path");
+        out.push_str(&part.replace("#000000", if i == 0 { outline } else { fill }));
+    }
+    out
+}
+
+/// The wifi icon in the stroke color, which it gets from the root element, w/ element `n` of
+/// PAIRING_ORDER, counting from 1, in blue. Frame 0 has none.
+fn pairing_frame(svg: &str, p: &Palette, n: u8) -> String {
+    let out = svg.replace("#000000", p.stroke);
+    let Some(class) = usize::from(n).checked_sub(1).and_then(|i| PAIRING_ORDER.get(i)) else { return out };
+    let at = format!("class=\"clr-i-solid clr-i-solid-{class}\"");
+    out.replace(&at, &format!("fill=\"{}\" {at}", p.blue))
+}
+
+/// True when the taskbar uses the light theme. Windows keeps it apart from the apps' theme.
+fn light_taskbar() -> bool {
+    let mut v = 0u32;
+    let mut len = size_of::<u32>() as u32;
+    // SAFETY: v is a u32 and len says so
+    let err = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            w!(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"),
+            w!("SystemUsesLightTheme"),
+            RRF_RT_REG_DWORD,
+            None,
+            Some(&raw mut v as *mut core::ffi::c_void),
+            Some(&mut len),
+        )
+    };
+    // Missing means pre-1903 Windows, whose taskbar is dark
+    err.is_ok() && v != 0
+}
+
+/// The drawing itself, stroke included, fit to a `size` square and centered; the canvas has
+/// margins
+fn rasterize(svg: &str, size: u32) -> Result<Pixmap> {
+    let tree = usvg::Tree::from_str(svg, &usvg::Options::default()).context("parsing icon")?;
+    let mut pm = Pixmap::new(size, size).context("icon pixmap")?;
+    let bb = tree.root().abs_stroke_bounding_box();
+    let side = size as f32;
+    let scale = side / bb.width().max(bb.height());
+    let tx = (side - bb.width() * scale) / 2.0 - bb.x() * scale;
+    let ty = (side - bb.height() * scale) / 2.0 - bb.y() * scale;
+    resvg::render(&tree, Transform::from_row(scale, 0.0, 0.0, scale, tx, ty), &mut pm.as_mut());
+    Ok(pm)
+}
+
+/// The spinner turned `deg` clockwise about its center, fit by SPINNER_RADIUS
+fn rasterize_turned(svg: &str, size: u32, deg: f32) -> Result<Pixmap> {
+    let tree = usvg::Tree::from_str(svg, &usvg::Options::default()).context("parsing icon")?;
+    let mut pm = Pixmap::new(size, size).context("icon pixmap")?;
+    // The tree is in canvas units; the viewBox is 24 across
+    let c = tree.size().width() / 2.0;
+    let r = SPINNER_RADIUS / 12.0 * c;
+    let side = size as f32;
+    let scale = side / (2.0 * r);
+    let t = Transform::from_rotate_at(deg, c, c)
+        .post_translate(-c, -c)
+        .post_scale(scale, scale)
+        .post_translate(side / 2.0, side / 2.0);
+    resvg::render(&tree, t, &mut pm.as_mut());
+    Ok(pm)
+}
+
+fn render(pm: &Pixmap) -> Result<HICON> {
+    let size = pm.width();
+    // Icons take straight-alpha BGRA; tiny-skia has premultiplied RGBA
+    let bgra: Vec<u8> = pm
+        .pixels()
+        .iter()
+        .flat_map(|p| {
+            let c = p.demultiply();
+            [c.blue(), c.green(), c.red(), c.alpha()]
+        })
+        .collect();
+    let side = size as i32;
+    let bmi = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: side,
+            biHeight: -side, // top-down
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    // SAFETY: the DIB is size x size x 4 bytes, exactly bgra's length; both bitmaps are
+    // deleted once the icon has its own copies
+    unsafe {
+        let mut bits = std::ptr::null_mut();
+        let color = CreateDIBSection(None, &bmi, DIB_RGB_COLORS, &mut bits, None, 0).context("icon bitmap")?;
+        std::ptr::copy_nonoverlapping(bgra.as_ptr(), bits.cast::<u8>(), bgra.len());
+        // All-zero AND mask: the alpha channel does the masking
+        let mask = CreateBitmap(side, side, 1, 1, None);
+        let info = ICONINFO { fIcon: true.into(), xHotspot: 0, yHotspot: 0, hbmMask: mask, hbmColor: color };
+        let icon = CreateIconIndirect(&info);
+        let _ = DeleteObject(color.into());
+        let _ = DeleteObject(mask.into());
+        icon.context("creating icon")
+    }
+}
+
+//endregion
+
+//region Tray
+
+/// What the tray shows
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Status {
+    pub controller: Option<Connected>,
+    pub vban: bool,
+    pub pairing: bool,
+    /// The group being hosted, None w/o an adapter
+    pub ssid: Option<String>,
+    /// A controller is on its way in: associated, but not yet up w/ a battery reading
+    pub joining: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Connected {
+    pub mac: [u8; 6],
+    /// From WPS when it paired; unknown for one paired before shieldd kept track
+    pub model: Option<String>,
+    /// XInput port, 1-4, once Windows has assigned one
+    pub port: Option<u8>,
+    /// Once the first status answer is in
+    pub battery: Option<Battery>,
+}
+
+/// Picked from the menu
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Command {
+    Pair,
+    /// On or off
+    Vban(bool),
+    Identify,
+    Disconnect,
+    Exit,
+}
+
+enum Msg {
+    Status(Status),
+    /// Something went wrong that the user should hear about: title, text
+    Problem(String, String),
+    Quit,
+}
+
+/// The tray icon and its menu, on their own thread. Shown from start to drop.
+pub struct Tray {
+    tx: Sender<Msg>,
+    commands: Receiver<Command>,
+    thread: Option<JoinHandle<()>>,
+    last: Option<Status>,
+}
+
+impl Tray {
+    pub fn start() -> Tray {
+        let (tx, rx) = mpsc::channel();
+        let (cmd_tx, commands) = mpsc::channel();
+        let thread = std::thread::Builder::new()
+            .name("tray".into())
+            .spawn(move || {
+                if let Err(e) = run(rx, cmd_tx) {
+                    warn!("tray icon: {e:#}");
+                }
+            })
+            .ok();
+        let mut tray = Tray { tx, commands, thread, last: None };
+        tray.update(Status::default());
+        tray
+    }
+
+    /// Only changes go through
+    pub fn update(&mut self, s: Status) {
+        if self.last.as_ref() != Some(&s) {
+            self.last = Some(s.clone());
+            let _ = self.tx.send(Msg::Status(s));
+            wake();
+        }
+    }
+
+    /// A notification w/o the alarm, for a menu command that failed
+    pub fn problem(&self, title: &str, text: &str) {
+        let _ = self.tx.send(Msg::Problem(title.into(), text.into()));
+        wake();
+    }
+
+    /// Menu picks since the last call
+    pub fn commands(&self) -> Vec<Command> {
+        self.commands.try_iter().collect()
+    }
+}
+
+/// Has the tray thread look at the channel now, rather than at its next tick
+fn wake() {
+    let hwnd = TRAY_HWND.load(Ordering::Acquire);
+    if hwnd != 0 {
+        // SAFETY: a stale handle just fails the post
+        let _ = unsafe { PostMessageW(Some(HWND(hwnd as _)), WM_WAKE, WPARAM(0), LPARAM(0)) };
+    }
+}
+
+impl Drop for Tray {
+    fn drop(&mut self) {
+        let _ = self.tx.send(Msg::Quit);
+        // An open message box or menu runs its own loop and never sees Quit, but it still
+        // dispatches this
+        let hwnd = TRAY_HWND.load(Ordering::Acquire);
+        if hwnd != 0 {
+            // SAFETY: a stale handle just fails the post
+            let _ = unsafe { PostMessageW(Some(HWND(hwnd as _)), WM_SHUTDOWN, WPARAM(0), LPARAM(0)) };
+        }
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+/// How often to look for a taskbar theme change
+const THEME_EVERY: Duration = Duration::from_secs(5);
+/// A kicked controller may come back a few times before it gives up; say so only once a while
+const MUST_CHARGE_EVERY: Duration = Duration::from_secs(600);
+/// The icon's callback message
+const WM_TRAY: u32 = WM_APP + 1;
+/// Close whatever's open, see Tray::drop
+const WM_SHUTDOWN: u32 = WM_APP + 2;
+/// Something's waiting on the channel, see wake
+const WM_WAKE: u32 = WM_APP + 3;
+/// State::tick's timer, and the longest it waits w/ nothing animating
+const TICK_TIMER: usize = 1;
+const IDLE_TICK: Duration = Duration::from_millis(100);
+
+/// A menu item: flags, ID, text
+type Item = (MENU_ITEM_FLAGS, usize, String);
+/// The tray window, for Tray::drop; one per process
+static TRAY_HWND: AtomicIsize = AtomicIsize::new(0);
+
+/// Menu item IDs; 0 is TrackPopupMenu's "nothing picked"
+mod id {
+    pub const PAIR: usize = 1;
+    pub const VBAN: usize = 2;
+    /// The controller line: identifies the controller, and WM_MENUSELECT knows it by this
+    pub const CONTROLLER: usize = 3;
+    pub const DISCONNECT: usize = 4;
+    pub const EXIT: usize = 5;
+}
+
+// The window procedure flags what happened, or runs tick w/ State at hand. Everything the
+// tray does runs off window messages, which an open menu or message box still dispatches.
+thread_local! {
+    static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
+    static MENU_WANTED: Cell<bool> = const { Cell::new(false) };
+    static TASKBAR_CREATED: Cell<u32> = const { Cell::new(0) };
+    static READD_WANTED: Cell<bool> = const { Cell::new(false) };
+    /// Tooltip for the controller line, and its text while the menu is up
+    static TIP: Cell<Option<HWND>> = const { Cell::new(None) };
+    static TIP_TEXT: RefCell<Vec<u16>> = const { RefCell::new(Vec::new()) };
+    static TIP_ON: Cell<bool> = const { Cell::new(false) };
+    /// Shutting down: no more menus or boxes
+    static QUITTING: Cell<bool> = const { Cell::new(false) };
+    /// The open menu's items, so tick can tell when they've gone stale
+    static MENU_SHOWN: RefCell<Option<Vec<Item>>> = const { RefCell::new(None) };
+    /// The open menu was closed to show new items; open it again
+    static MENU_REOPEN: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Runs `f` on the tray's state, unless it's already in use further up the stack
+fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> {
+    STATE.with(|cell| cell.try_borrow_mut().ok()?.as_mut().map(f))
+}
+
+extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    if msg == WM_TRAY && matches!(lp.0 as u32 & 0xFFFF, WM_LBUTTONUP | WM_RBUTTONUP | WM_CONTEXTMENU) {
+        MENU_WANTED.set(true);
+    } else if msg == WM_MENUSELECT {
+        // Item ID in the low word; the menu, or none once it closes
+        show_tip(hwnd, wp.0 & 0xFFFF == id::CONTROLLER && lp.0 != 0);
+    } else if msg == WM_ENTERIDLE {
+        // The menu loop has caught up, e.g. after a mouse move
+        follow_mouse();
+    } else if msg == WM_SHUTDOWN {
+        QUITTING.set(true);
+        close_modals();
+        // Quit is on the channel already
+        with_state(State::tick);
+    } else if (msg == WM_TIMER && wp.0 == TICK_TIMER) || msg == WM_WAKE {
+        // Busy further up the stack, e.g. inside Shell_NotifyIcon: the next tick catches up
+        with_state(State::tick);
+    } else if msg != 0 && msg == TASKBAR_CREATED.get() {
+        // Explorer restarted and forgot every icon
+        READD_WANTED.set(true);
+        with_state(State::tick);
+    }
+    // SAFETY: the arguments we were called w/
+    unsafe { DefWindowProcW(hwnd, msg, wp, lp) }
+}
+
+/// Cancels any message box and closes any menu open on this thread
+fn close_modals() {
+    extern "system" fn cancel(h: HWND, _: LPARAM) -> BOOL {
+        let mut class = [0u16; 16];
+        // SAFETY: h is a window of this thread, from the enumeration
+        unsafe {
+            let n = GetClassNameW(h, &mut class) as usize;
+            // The dialog class, which message boxes use
+            if String::from_utf16_lossy(&class[..n]) == "#32770" {
+                let _ = EndDialog(h, IDCANCEL.0 as isize);
+            }
+        }
+        BOOL(1)
+    }
+    // SAFETY: the callback only touches windows it's handed
+    unsafe {
+        let _ = EndMenu();
+        let _ = EnumThreadWindows(GetCurrentThreadId(), Some(cancel), LPARAM(0));
+    }
+}
+
+/// Stops the message loop in run, and anything modal in the way
+fn quit() {
+    QUITTING.set(true);
+    close_modals();
+    // SAFETY: plain call, on the tray thread
+    unsafe { PostQuitMessage(0) };
+}
+
+struct State {
+    hwnd: HWND,
+    rx: Receiver<Msg>,
+    light: bool,
+    last_theme: Instant,
+    icons: Vec<(Icon, HICON)>,
+    /// What's on screen, if the icon is shown
+    shown: Option<Icon>,
+    status: Status,
+    gauge: Gauge,
+    /// The gauge's last answer, for the menu
+    pct: Option<u8>,
+    critical_alerted: bool,
+    /// Last must-charge notification
+    must_charge_told: Option<Instant>,
+    /// When the animation on screen last moved
+    frame_at: Instant,
+    commands: Sender<Command>,
+}
+
+fn run(rx: Receiver<Msg>, commands: Sender<Command>) -> Result<()> {
+    // shieldd isn't DPI-aware, so Windows would hand out 100% sizes and stretch the result.
+    // This thread is, so icons render at the display's real tray size.
+    // SAFETY: affects only this thread
+    unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+    // A hidden top-level window rather than a message-only one: the menu needs a window that
+    // can come to the foreground, and only top-level ones hear TaskbarCreated
+    // SAFETY: class and window live until the end of this function; wndproc is 'static
+    let hwnd = unsafe {
+        let instance = GetModuleHandleW(None).context("module handle")?;
+        let class = WNDCLASSW {
+            lpfnWndProc: Some(wndproc),
+            hInstance: instance.into(),
+            lpszClassName: w!("shieldd tray"),
+            ..Default::default()
+        };
+        RegisterClassW(&class);
+        TASKBAR_CREATED.set(RegisterWindowMessageW(w!("TaskbarCreated")));
+        CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            w!("shieldd tray"),
+            w!("shieldd"),
+            WINDOW_STYLE(0),
+            0,
+            0,
+            0,
+            0,
+            None,
+            None,
+            Some(instance.into()),
+            None,
+        )
+    }
+    .context("tray window")?;
+    TIP.set(create_tip(hwnd));
+    let mut st = State {
+        hwnd,
+        rx,
+        light: light_taskbar(),
+        last_theme: Instant::now(),
+        icons: Vec::new(),
+        shown: None,
+        status: Status::default(),
+        gauge: Gauge::default(),
+        pct: None,
+        critical_alerted: false,
+        must_charge_told: None,
+        frame_at: Instant::now(),
+        commands,
+    };
+    st.load_icons()?;
+    STATE.set(Some(st));
+    // Only now: a wake before STATE is set would find nothing to tick
+    TRAY_HWND.store(hwnd.0 as isize, Ordering::Release);
+    with_state(State::tick);
+    let mut msg = MSG::default();
+    // SAFETY: msg outlives the calls; 0 is WM_QUIT, -1 an error
+    while unsafe { GetMessageW(&mut msg, None, 0, 0) }.0 > 0 {
+        unsafe { DispatchMessageW(&msg) };
+        if MENU_WANTED.replace(false) && !QUITTING.get() {
+            menu(hwnd);
+        }
+    }
+    TRAY_HWND.store(0, Ordering::Release);
+    if let Some(mut st) = STATE.take() {
+        st.hide();
+        st.free_icons();
+    }
+    // SAFETY: created above on this thread
+    unsafe {
+        let _ = KillTimer(Some(hwnd), TICK_TIMER);
+        let _ = DestroyWindow(hwnd);
+    }
+    Ok(())
+}
+
+/// Shows the menu at the cursor and acts on the pick. Reopened in place whenever tick finds
+/// its items stale, so it follows pairing and controllers coming and going.
+fn menu(hwnd: HWND) {
+    let mut at = POINT::default();
+    // SAFETY: at outlives the call
+    let _ = unsafe { GetCursorPos(&mut at) };
+    let (picked, s, commands) = loop {
+        let Some((items, tip, s, commands)) = with_state(|st| {
+            let (items, tip) = st.menu_items();
+            (items, tip, st.status.clone(), st.commands.clone())
+        }) else {
+            return;
+        };
+        TIP_TEXT.set(tip.as_deref().map(wide).unwrap_or_default());
+        MENU_REOPEN.set(false);
+        MENU_SHOWN.set(Some(items.clone()));
+        let picked = track(hwnd, &items, at);
+        MENU_SHOWN.set(None);
+        if picked == 0 && MENU_REOPEN.replace(false) && !QUITTING.get() {
+            continue;
+        }
+        break (picked, s, commands);
+    };
+    show_tip(hwnd, false);
+    let connected = s.controller.is_some();
+    let cmd = match picked {
+        _ if QUITTING.get() => return,
+        id::PAIR if confirm_pair(hwnd, connected) => Command::Pair,
+        id::VBAN => Command::Vban(!s.vban),
+        id::CONTROLLER => Command::Identify,
+        id::DISCONNECT => Command::Disconnect,
+        id::EXIT => Command::Exit,
+        _ => return,
+    };
+    debug!(?cmd, "tray menu");
+    let _ = commands.send(cmd);
+    if cmd == Command::Vban(true) && !QUITTING.get() {
+        let text = format!(
+            "Controller audio over VBAN, for Voicemeeter:\n\n\
+             Mic: stream {}, sent to 127.0.0.1 port {}\n\
+             Headset: stream {}, received on port {}\n\n\
+             Point an incoming stream at the first and an outgoing one at the second, PCM 16-bit.",
+            crate::vban::MIC_STREAM,
+            crate::vban::MIC_PORT,
+            crate::vban::PAD_STREAM,
+            crate::vban::PAD_PORT,
+        );
+        let text = wide(&text);
+        // SAFETY: text outlives the call
+        unsafe {
+            MessageBoxW(
+                Some(hwnd),
+                PCWSTR(text.as_ptr()),
+                w!("shieldd: VBAN on"),
+                MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND,
+            )
+        };
+    }
+}
+
+/// Pops up `items` at `at` until something's picked or it's closed; 0 for nothing
+fn track(hwnd: HWND, items: &[Item], at: POINT) -> usize {
+    // SAFETY: the menu is ours and destroyed below; the strings outlive AppendMenuW, which
+    // copies them
+    unsafe {
+        let Ok(m) = CreatePopupMenu() else { return 0 };
+        for (flags, id, text) in items {
+            let text = wide(text);
+            let _ = AppendMenuW(m, *flags, *id, PCWSTR(text.as_ptr()));
+        }
+        // W/o the window in front, the menu won't close on a click elsewhere
+        let _ = SetForegroundWindow(hwnd);
+        let picked = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, at.x, at.y, None, hwnd, None);
+        let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
+        let _ = DestroyMenu(m);
+        picked.0 as usize
+    }
+}
+
+/// A tracking tooltip, owned by the tray window; positioned and shown by show_tip
+fn create_tip(owner: HWND) -> Option<HWND> {
+    // SAFETY: plain window creation; the tool info is copied by TTM_ADDTOOLW
+    unsafe {
+        let icc = INITCOMMONCONTROLSEX { dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32, dwICC: ICC_BAR_CLASSES };
+        let _ = InitCommonControlsEx(&icc);
+        let tip = CreateWindowExW(
+            WS_EX_TOPMOST,
+            TOOLTIPS_CLASSW,
+            None,
+            WS_POPUP | WINDOW_STYLE(TTS_NOPREFIX | TTS_ALWAYSTIP),
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            Some(owner),
+            None,
+            None,
+            None,
+        )
+        .ok()?;
+        let ti = tool(owner, w!("").as_ptr());
+        SendMessageW(tip, TTM_ADDTOOLW, None, Some(LPARAM(&raw const ti as isize)));
+        // Any max width turns on line breaks
+        SendMessageW(tip, TTM_SETMAXTIPWIDTH, None, Some(LPARAM(400)));
+        Some(tip)
+    }
+}
+
+/// The one tool on the tooltip. Sized w/o lpReserved, which comctl32 v5 refuses; there's no
+/// manifest asking for v6.
+fn tool(owner: HWND, text: *const u16) -> TTTOOLINFOW {
+    TTTOOLINFOW {
+        cbSize: (size_of::<TTTOOLINFOW>() - size_of::<*mut core::ffi::c_void>()) as u32,
+        uFlags: TTF_TRACK | TTF_ABSOLUTE,
+        hwnd: owner,
+        uId: 1,
+        lpszText: PWSTR(text.cast_mut()),
+        ..Default::default()
+    }
+}
+
+/// Shows the tooltip at the mouse, or hides it
+fn show_tip(owner: HWND, on: bool) {
+    let Some(tip) = TIP.get() else { return };
+    let on = on && TIP_TEXT.with_borrow(|t| t.len() > 1);
+    if on == TIP_ON.get() {
+        return;
+    }
+    TIP_ON.set(on);
+    TIP_TEXT.with_borrow(|text| {
+        let ti = tool(owner, text.as_ptr());
+        let ti = LPARAM(&raw const ti as isize);
+        // SAFETY: ti and text outlive the calls, which copy what they need
+        unsafe {
+            if on {
+                SendMessageW(tip, TTM_UPDATETIPTEXTW, None, Some(ti));
+                follow_mouse();
+            }
+            SendMessageW(tip, TTM_TRACKACTIVATE, Some(WPARAM(on.into())), Some(ti));
+            if on {
+                raise(tip);
+            }
+        }
+    });
+}
+
+/// Moves a shown tooltip to just below and right of the pointer, where a regular one goes
+fn follow_mouse() {
+    let Some(tip) = TIP.get().filter(|_| TIP_ON.get()) else { return };
+    let mut at = POINT::default();
+    // SAFETY: plain queries and a message w/ no pointers
+    unsafe {
+        if GetCursorPos(&mut at).is_err() {
+            return;
+        }
+        let (x, y) = (at.x + 16, at.y + 20);
+        let packed = (x as u16 as u32) | ((y as u16 as u32) << 16);
+        SendMessageW(tip, TTM_TRACKPOSITION, None, Some(LPARAM(packed as isize)));
+        raise(tip);
+    }
+}
+
+/// Above the menu, which is topmost too and opened after the tooltip was made
+fn raise(tip: HWND) {
+    // SAFETY: our own window; no move, size or focus change
+    let _ = unsafe { SetWindowPos(tip, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE) };
+}
+
+/// Runs the window procedure for whatever's queued
+/// Copies `s` into a fixed UTF-16 field, truncated, NUL-terminated
+fn put(dst: &mut [u16], s: &str) {
+    let n = dst.len() - 1;
+    let mut i = 0;
+    for c in s.encode_utf16().take(n) {
+        dst[i] = c;
+        i += 1;
+    }
+    dst[i] = 0;
+}
+
+fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain([0]).collect()
+}
+
+/// The controller line of the menu
+fn controller_line(c: Option<&Connected>, pct: Option<u8>) -> String {
+    let Some(c) = c else { return "No controllers connected".into() };
+    let model = c.model.as_deref().unwrap_or("Controller");
+    let port = c.port.map_or_else(|| "?".into(), |p| p.to_string());
+    match (c.battery, pct) {
+        (Some(b), Some(p)) if b.charging && p >= 100 => format!("{model}: Port #{port} ({p}%) (charged)"),
+        (Some(b), Some(p)) if b.charging => format!("{model}: Port #{port} ({p}%) (charging)"),
+        (Some(_), Some(p)) => format!("{model}: Port #{port} ({p}%)"),
+        _ => format!("{model}: Port #{port}"),
+    }
+}
+
+impl State {
+    fn load_icons(&mut self) -> Result<()> {
+        self.free_icons();
+        let palette = if self.light { &LIGHT } else { &DARK };
+        // SAFETY: plain queries
+        let size = unsafe { GetSystemMetricsForDpi(SM_CXSMICON, GetDpiForSystem()) }.max(16) as u32;
+        for icon in Icon::all() {
+            self.icons.push((icon, render(&icon.pixmap(palette, size)?)?));
+        }
+        debug!(size, light = self.light, "tray icons rendered");
+        Ok(())
+    }
+
+    fn free_icons(&mut self) {
+        for (_, h) in self.icons.drain(..) {
+            // SAFETY: created by load_icons, no longer referenced
+            let _ = unsafe { DestroyIcon(h) };
+        }
+    }
+
+    fn data(&self) -> NOTIFYICONDATAW {
+        NOTIFYICONDATAW { cbSize: size_of::<NOTIFYICONDATAW>() as u32, hWnd: self.hwnd, uID: 1, ..Default::default() }
+    }
+
+    /// Icon, tooltip and battery notifications for the current status
+    fn refresh(&mut self) {
+        let now = Instant::now();
+        let msg = if self.shown.is_some() { NIM_MODIFY } else { NIM_ADD };
+        let s = self.status.clone();
+        if s.pairing {
+            self.pct = None;
+            let icon = self.animate(Icon::Pairing(0), now);
+            self.show(icon, msg, Some("SHIELD controller: pairing"));
+            return;
+        }
+        if s.joining {
+            self.pct = None;
+            let icon = self.animate(Icon::Spinner(0), now);
+            self.show(icon, msg, Some("SHIELD controller: connecting..."));
+            return;
+        }
+        let Some(b) = s.controller.as_ref().and_then(|c| c.battery) else {
+            let tip = match s.controller {
+                Some(_) => "SHIELD controller: connected",
+                None => "SHIELD controller: not connected",
+            };
+            self.pct = None;
+            // Flashing only w/ nothing connected; one that is has its battery in a moment
+            let icon = if s.controller.is_some() { Icon::Disconnected } else { self.animate(Icon::Disconnected, now) };
+            self.show(icon, msg, Some(tip));
+            return;
+        };
+        let (shown, fresh) = self.gauge.feed(&b);
+        self.pct = Some(shown);
+        if fresh || b.charging {
+            self.critical_alerted = false;
+        }
+        let tell_must_charge =
+            b.must_charge && self.must_charge_told.is_none_or(|t| now.duration_since(t) >= MUST_CHARGE_EVERY);
+        if b.must_charge {
+            // Says it all already
+            self.critical_alerted = true;
+        }
+        if tell_must_charge {
+            self.must_charge_told = Some(now);
+        }
+        // Once per discharge, when rumble cuts out
+        let alert = !b.charging && b.critical && !self.critical_alerted;
+        if alert {
+            self.critical_alerted = true;
+        }
+        let icon = self.animate(Icon::of(&b, shown), now);
+        let tip = match icon {
+            Icon::Charged => format!("SHIELD controller: {shown}% (charged)"),
+            _ if b.charging => format!("SHIELD controller: {shown}% (charging)"),
+            _ => format!("SHIELD controller: {shown}%"),
+        };
+        self.show(icon, msg, Some(&tip));
+        if alert {
+            self.notify("Controller battery critical", &format!("{shown}% left. Rumble is off; charge it now."), true);
+        }
+        if tell_must_charge {
+            self.notify("Controller battery empty", "Disconnected; plug in the controller to use it.", true);
+        }
+    }
+
+    /// The animation's next frame, if what's on screen is animated
+    fn next_frame(&self) -> Option<Icon> {
+        let still = matches!(self.shown, Some(Icon::Disconnected)) && self.status.controller.is_some();
+        if still { None } else { self.shown.and_then(Icon::next_frame) }
+    }
+
+    /// The frame of `icon` to show; a new animation starts its clock. The run loop steps it
+    /// from there.
+    fn animate(&mut self, icon: Icon, now: Instant) -> Icon {
+        let kept = Icon::keep_frame(icon, self.shown);
+        if kept == icon && self.shown != Some(icon) {
+            self.frame_at = now;
+        }
+        kept
+    }
+
+    fn show(&mut self, icon: Icon, msg: NOTIFY_ICON_MESSAGE, tip: Option<&str>) {
+        let Some(&(_, h)) = self.icons.iter().find(|(i, _)| *i == icon) else { return };
+        let mut d = self.data();
+        d.uFlags = NIF_ICON | NIF_SHOWTIP | NIF_MESSAGE;
+        d.uCallbackMessage = WM_TRAY;
+        d.hIcon = h;
+        if let Some(tip) = tip {
+            d.uFlags |= NIF_TIP;
+            put(&mut d.szTip, tip);
+        }
+        // SAFETY: d is a filled-in NOTIFYICONDATAW for our window
+        if unsafe { Shell_NotifyIconW(msg, &d) }.as_bool() {
+            self.shown = Some(icon);
+        } else {
+            debug!("Shell_NotifyIcon failed");
+        }
+    }
+
+    fn hide(&mut self) {
+        if self.shown.take().is_some() {
+            let d = self.data();
+            // SAFETY: as in show
+            let _ = unsafe { Shell_NotifyIconW(NIM_DELETE, &d) };
+        }
+    }
+
+    /// `alarm`: Windows' critical battery sound and the error icon, else a plain warning
+    fn notify(&self, title: &str, text: &str, alarm: bool) {
+        info!(title, text, "notification");
+        let mut d = self.data();
+        d.uFlags = NIF_INFO;
+        put(&mut d.szInfoTitle, title);
+        put(&mut d.szInfo, text);
+        // Our own sound instead of the generic one
+        d.dwInfoFlags = if alarm { NIIF_ERROR | NIIF_NOSOUND } else { NIIF_WARNING };
+        // SAFETY: as in show; PlaySound copies nothing from us after returning
+        unsafe {
+            let _ = Shell_NotifyIconW(NIM_MODIFY, &d);
+            if alarm {
+                let _ = PlaySoundW(w!("CriticalBatteryAlarm"), None, SND_ALIAS | SND_ASYNC);
+            }
+        }
+    }
+
+    /// The menu for the current status, and the controller line's tooltip
+    fn menu_items(&self) -> (Vec<Item>, Option<String>) {
+        let s = &self.status;
+        let connected = s.controller.is_some();
+        let gray = |on: bool| if on { MF_STRING } else { MF_STRING | MF_GRAYED };
+        let tip = s.controller.as_ref().map(|c| format!("MAC {}\nClick to identify", crate::adapters::fmt_mac(&c.mac)));
+        let title = MF_STRING | MF_DISABLED;
+        let mut items: Vec<Item> =
+            vec![(title, 0, "shieldd".into()), (title, 0, format!(" > {} connected", u8::from(connected)))];
+        if let Some(ssid) = &s.ssid {
+            // A lone & would underline the next letter
+            items.push((title, 0, format!(" > {}", ssid.replace('&', "&&"))));
+        }
+        items.extend([
+            (MF_SEPARATOR, 0, String::new()),
+            // Click to identify
+            (gray(connected), id::CONTROLLER, controller_line(s.controller.as_ref(), self.pct)),
+            (MF_SEPARATOR, 0, String::new()),
+            (
+                gray(!s.pairing),
+                id::PAIR,
+                if connected { "Re-&pair controller..." } else { "&Pair controller..." }.into(),
+            ),
+            (MF_STRING, id::VBAN, if s.vban { "Disable &VBAN" } else { "Enable &VBAN" }.into()),
+            (gray(connected), id::DISCONNECT, "&Disconnect".into()),
+            (MF_SEPARATOR, 0, String::new()),
+            (MF_STRING, id::EXIT, "E&xit".into()),
+        ]);
+        (items, tip)
+    }
+
+    /// Takes in what Tray sent, follows the taskbar theme, steps the animation, flags a stale
+    /// menu, and sets the timer for the next go
+    fn tick(&mut self) {
+        loop {
+            match self.rx.try_recv() {
+                Ok(Msg::Status(s)) => {
+                    self.status = s;
+                    self.refresh();
+                }
+                Ok(Msg::Problem(title, text)) => self.notify(&title, &text, false),
+                Ok(Msg::Quit) | Err(TryRecvError::Disconnected) => return quit(),
+                Err(TryRecvError::Empty) => break,
+            }
+        }
+        if READD_WANTED.replace(false) {
+            self.shown = None;
+            self.refresh();
+        }
+        if self.last_theme.elapsed() >= THEME_EVERY {
+            self.last_theme = Instant::now();
+            let light = light_taskbar();
+            if light != self.light {
+                self.light = light;
+                match self.load_icons() {
+                    Ok(()) => {
+                        if let Some(i) = self.shown {
+                            self.show(i, NIM_MODIFY, None);
+                        }
+                    }
+                    Err(e) => warn!("tray icons: {e:#}"),
+                }
+            }
+        }
+        if let Some(next) = self.next_frame()
+            && self.shown.is_some_and(|i| self.frame_at.elapsed() >= i.frame_time())
+        {
+            self.frame_at = Instant::now();
+            self.show(next, NIM_MODIFY, None);
+        }
+        let stale = MENU_SHOWN.with_borrow(|shown| shown.as_ref().is_some_and(|items| *items != self.menu_items().0));
+        if stale {
+            MENU_REOPEN.set(true);
+            // SAFETY: plain call; closes the menu this thread has open
+            let _ = unsafe { EndMenu() };
+        }
+        // Up to the next animation frame, at most IDLE_TICK
+        let wait = self
+            .next_frame()
+            .zip(self.shown)
+            .map_or(IDLE_TICK, |(_, i)| i.frame_time().saturating_sub(self.frame_at.elapsed()))
+            .min(IDLE_TICK);
+        // SAFETY: our window, on its thread; a new SetTimer w/ the same ID replaces the old
+        unsafe { SetTimer(Some(self.hwnd), TICK_TIMER, (wait.as_millis() as u32).max(1), None) };
+    }
+}
+
+/// Pairing throws the current group away, so ask first
+fn confirm_pair(hwnd: HWND, connected: bool) -> bool {
+    let dropped =
+        if connected { "Re-pairing controllers will drop the connected controller from the network.\n" } else { "" };
+    let text = format!(
+        "{dropped}Once a new controller is paired, the network will be updated with a new name and passphrase. \
+         Any controller paired to the old network will need to be paired again.\n\
+         If no controller pairs within 2 minutes, the changes will be discarded. Any dropped controllers will \
+         automatically reconnect.\n\nContinue pairing?"
+    );
+    let text = wide(&text);
+    let title = if connected { w!("shieldd: re-pair controller") } else { w!("shieldd: pair controller") };
+    // SAFETY: text outlives the call
+    let r = unsafe {
+        MessageBoxW(
+            Some(hwnd),
+            PCWSTR(text.as_ptr()),
+            title,
+            MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2 | MB_SETFOREGROUND,
+        )
+    };
+    r == IDOK
+}
+
+//endregion
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pairing_frames_light_one_at_a_time() {
+        let lit = |n| {
+            let svg = Icon::Pairing(n).svg(&DARK);
+            PAIRING_ORDER.iter().position(|c| svg.contains(&format!("\" class=\"clr-i-solid clr-i-solid-{c}\"")))
+        };
+        assert_eq!((0..PAIRING_FRAMES).map(lit).collect::<Vec<_>>(), [None, Some(0), Some(1), Some(2), Some(3)]);
+        let blues = |n| Icon::Pairing(n).svg(&DARK).matches(DARK.blue).count();
+        assert!((1..PAIRING_FRAMES).all(|n| blues(n) == 1));
+        let one = Icon::Pairing(1).svg(&DARK);
+        assert!(one.contains(&format!("fill=\"{}\" class=\"clr-i-solid clr-i-solid-path-1\"", DARK.blue)));
+        assert!(!one.contains("#000000"));
+    }
+
+    #[test]
+    fn percent_scale() {
+        assert_eq!(percent(0xCCFD), 0);
+        assert_eq!(percent(EMPTY), 0);
+        assert_eq!(percent(FULL), 100);
+        assert_eq!(percent(0xF000), 100);
+        // Where the controller's bands start
+        assert_eq!(percent(0xD47F), 27);
+        assert_eq!(percent(0xD081), 12);
+    }
+
+    #[test]
+    fn gauge_follows_the_charger() {
+        let b = |charging, reading| Battery { charging, band: 10, reading, critical: false, must_charge: false };
+        let mut g = Gauge::default();
+        let (p, fresh) = g.feed(&b(false, 0xD0FD));
+        assert!(fresh && p == 14);
+        // Plugging in lifts the reading ~0x660; the gauge doesn't jump w/ it
+        let (p, _) = g.feed(&b(true, 0xD0FD + 0x660));
+        assert_eq!(p, 14);
+        assert_eq!(g.feed(&b(true, 0xD600 + 0x660)).0, 33);
+        // A dip while charging doesn't take it back down
+        assert_eq!(g.feed(&b(true, 0xD500 + 0x660)).0, 33);
+        // Unplugged: starts over from the resting reading, then only goes down
+        let (p, fresh) = g.feed(&b(false, 0xD580));
+        assert!(fresh && p == 31);
+        assert_eq!(g.feed(&b(false, 0xD700)).0, 31);
+        assert_eq!(g.feed(&b(false, 0xD400)).0, 25);
+        // Back after charging elsewhere
+        let (p, fresh) = g.feed(&b(false, 0xE000));
+        assert!(fresh && p == 70);
+    }
+
+    #[test]
+    fn colors_by_path_order() {
+        let (svg, accent) = Icon::Full.source();
+        let s = colorize(svg, &DARK, accent);
+        assert!(!s.contains("#000000"));
+        assert_eq!(s.matches(DARK.stroke).count(), 1);
+        assert_eq!(s.matches(DARK.green).count(), 3);
+        let (svg, accent) = Icon::Empty.source();
+        assert_eq!(colorize(svg, &LIGHT, accent).matches(LIGHT.stroke).count(), 1);
+    }
+
+    #[test]
+    fn every_icon_renders() {
+        for p in [&LIGHT, &DARK] {
+            for icon in Icon::all() {
+                let pm = icon.pixmap(p, 32).unwrap();
+                assert!(pm.pixels().iter().any(|px| px.alpha() > 0), "{icon:?} is blank");
+            }
+        }
+    }
+
+    /// target/tests/icons, next to the profile folder this test binary runs from
+    fn icon_dir() -> std::path::PathBuf {
+        let exe = std::env::current_exe().unwrap();
+        // target/<profile>/deps/shieldd-<hash>.exe
+        exe.ancestors().nth(3).unwrap().join("tests").join("icons")
+    }
+
+    /// Every icon in both themes, on its taskbar color, for eyeballing: one PNG each, a strip
+    /// of the status icons and one of the pairing animation
+    #[test]
+    fn renders_icons_to_target() {
+        const SIZE: u32 = 64;
+        const GAP: u32 = 8;
+        let dir = icon_dir();
+        for (theme, p, bg) in [("light", &LIGHT, [0xEE, 0xEE, 0xEE]), ("dark", &DARK, [0x20, 0x20, 0x20])] {
+            let out = dir.join(theme);
+            std::fs::create_dir_all(&out).unwrap();
+            let bg = resvg::tiny_skia::Color::from_rgba8(bg[0], bg[1], bg[2], 0xFF);
+            let strip_of = |n: u32| {
+                let mut s = Pixmap::new(n * SIZE + (n - 1) * GAP, SIZE).unwrap();
+                s.fill(resvg::tiny_skia::Color::from_rgba8(0x80, 0x80, 0x80, 0xFF));
+                s
+            };
+            let statuses = Icon::FIXED.iter().filter(|i| !matches!(i, Icon::Pairing(_))).count() as u32;
+            let mut status_strip = strip_of(statuses);
+            let mut strip = strip_of(u32::from(PAIRING_FRAMES));
+            // Every eighth of a turn
+            let spun = SPINNER_FRAMES / 8;
+            let mut spinner_strip = strip_of(8);
+            let mut next_status = 0;
+            for icon in Icon::all() {
+                let mut pm = Pixmap::new(SIZE, SIZE).unwrap();
+                pm.fill(bg);
+                let fg = icon.pixmap(p, SIZE).unwrap();
+                let paint = resvg::tiny_skia::PixmapPaint::default();
+                pm.draw_pixmap(0, 0, fg.as_ref(), &paint, Transform::identity(), None);
+                let (s, i) = match icon {
+                    Icon::Spinner(n) if n % spun == 0 => (&mut spinner_strip, u32::from(n / spun)),
+                    // Only the strip for the rest of the turn
+                    Icon::Spinner(_) => continue,
+                    Icon::Pairing(n) => (&mut strip, u32::from(n)),
+                    _ => {
+                        next_status += 1;
+                        (&mut status_strip, next_status - 1)
+                    }
+                };
+                let name = format!("{icon:?}").to_lowercase().replace('(', "_").replace(')', "");
+                pm.save_png(out.join(format!("{name}.png"))).unwrap();
+                s.draw_pixmap((i * (SIZE + GAP)) as i32, 0, pm.as_ref(), &paint, Transform::identity(), None);
+            }
+            status_strip.save_png(out.join("status_strip.png")).unwrap();
+            strip.save_png(out.join("pairing_strip.png")).unwrap();
+            spinner_strip.save_png(out.join("spinner_strip.png")).unwrap();
+        }
+    }
+
+    #[test]
+    fn animations_step_and_keep_their_frame() {
+        assert_eq!(Icon::Charging.next_frame(), Some(Icon::ChargingDim));
+        assert_eq!(Icon::ChargingDim.next_frame(), Some(Icon::Charging));
+        assert_eq!(Icon::Disconnected.next_frame(), Some(Icon::DisconnectedRed));
+        assert_eq!(Icon::DisconnectedRed.next_frame(), Some(Icon::Disconnected));
+        assert_eq!(Icon::keep_frame(Icon::Disconnected, Some(Icon::DisconnectedRed)), Icon::DisconnectedRed);
+        let red = Icon::DisconnectedRed.svg(&LIGHT);
+        assert!(red.contains(LIGHT.red) && !red.contains(LIGHT.stroke));
+        assert_eq!(Icon::Pairing(PAIRING_FRAMES - 1).next_frame(), Some(Icon::Pairing(0)));
+        assert_eq!(Icon::Full.next_frame(), None);
+        assert_eq!(Icon::keep_frame(Icon::Charging, Some(Icon::ChargingDim)), Icon::ChargingDim);
+        assert_eq!(Icon::keep_frame(Icon::Pairing(0), Some(Icon::Pairing(3))), Icon::Pairing(3));
+        assert_eq!(Icon::keep_frame(Icon::Full, Some(Icon::ChargingDim)), Icon::Full);
+        // The bolt's only color is the accent; dimmed, it's all stroke
+        // Green outline in both frames; only the bolt flashes
+        let lit = Icon::Charging.svg(&DARK);
+        assert!(lit.contains(DARK.green) && !lit.contains(DARK.stroke));
+        let dim = Icon::ChargingDim.svg(&DARK);
+        assert!(dim.contains(DARK.green) && dim.contains(DARK.stroke));
+    }
+
+    #[test]
+    fn spinner_turns_in_place() {
+        assert_eq!(SPINNER_FRAMES, 48);
+        assert_eq!(Icon::Spinner(SPINNER_FRAMES - 1).next_frame(), Some(Icon::Spinner(0)));
+        assert_eq!(Icon::keep_frame(Icon::Spinner(0), Some(Icon::Spinner(9))), Icon::Spinner(9));
+        // Half a turn on is the same drawing upside down, so it stays put rather than drifting
+        let a = Icon::Spinner(0).pixmap(&DARK, 32).unwrap();
+        let b = Icon::Spinner(SPINNER_FRAMES / 2).pixmap(&DARK, 32).unwrap();
+        let alpha = |pm: &Pixmap, x: u32, y: u32| pm.pixel(x, y).unwrap().alpha();
+        let off = (0..32)
+            .flat_map(|y| (0..32).map(move |x| (x, y)))
+            .filter(|&(x, y)| alpha(&a, x, y).abs_diff(alpha(&b, 31 - x, 31 - y)) > 64)
+            .count();
+        assert!(off < 8, "{off} pixels off");
+    }
+
+    #[test]
+    fn icon_choice() {
+        let b = |band, charging, critical| Battery { charging, band, reading: 0xD500, critical, must_charge: false };
+        assert_eq!(Icon::of(&b(100, false, false), 80), Icon::Full);
+        assert_eq!(Icon::of(&b(50, false, false), 50), Icon::Medium);
+        assert_eq!(Icon::of(&b(25, false, false), 30), Icon::Low);
+        assert_eq!(Icon::of(&b(10, false, false), 12), Icon::Empty);
+        assert_eq!(Icon::of(&b(10, false, true), 2), Icon::Critical);
+        assert_eq!(Icon::of(&b(10, true, true), 2), Icon::Charging);
+        assert_eq!(Icon::of(&b(100, true, false), 99), Icon::Charging);
+        assert_eq!(Icon::of(&b(100, true, false), 100), Icon::Charged);
+        // Off the charger, 100% is just full
+        assert_eq!(Icon::of(&b(100, false, false), 100), Icon::Full);
+        let critical = Icon::Critical.svg(&DARK);
+        assert!(critical.contains(DARK.red) && !critical.contains(DARK.stroke));
+        let charged = Icon::Charged.svg(&DARK);
+        assert!(charged.contains(DARK.green) && !charged.contains(DARK.stroke));
+    }
+}

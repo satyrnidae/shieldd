@@ -1,0 +1,25 @@
+[package]
+name = "rtlusb"
+description = "Userspace RTL8811AU driver over WinUSB (plan B)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+nusb = "0.2.7"
+ctrlc.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+hmac = "0.12"
+sha1 = "0.10"
+pbkdf2 = "0.12"
+aes-kw = "0.2"
+rand = "0.8"
+# WPS: DH group 5, HMAC-SHA256, AES-128-CBC encrypted settings
+sha2 = "0.10"
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
+num-bigint = "0.4"
