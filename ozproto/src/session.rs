@@ -205,23 +205,6 @@ impl Host {
         self.session.as_ref().map(|s| s.id)
     }
 
-    /// Queues a DISCONNECT element: the device's own "going to sleep", sent the other way, as
-    /// a goodbye. ozwpan never sends one; what the controller makes of it is being found out.
-    /// False if there's no session.
-    pub fn say_goodbye(&mut self) -> bool {
-        let Some(s) = self.session.as_mut() else { return false };
-        let mut e = Vec::with_capacity(2);
-        wire::push_element(&mut e, elt::DISCONNECT, &[]);
-        s.pending.push_back(e);
-        true
-    }
-
-    /// Every element queued so far has been acknowledged; the empty frames that answer
-    /// triggers don't count
-    pub fn all_delivered(&self) -> bool {
-        self.session.as_ref().is_none_or(|s| s.pending.is_empty() && s.unacked.iter().all(|f| f.elements.is_empty()))
-    }
-
     /// Drops the session at once, for a device the host sent away. Stopped if there was one.
     pub fn end_session(&mut self) -> Option<Event> {
         self.session.take().map(|_| Event::Stopped)
@@ -434,22 +417,6 @@ mod tests {
         let ev = h.on_frame(t, CTRL, &tablet_connect_req_frame());
         assert!(matches!(ev[..], [Event::Connected { session_id: 2, .. }]), "{ev:?}");
         (h, t)
-    }
-
-    #[test]
-    fn goodbye_goes_out_on_the_next_trigger() {
-        let (mut h, t) = connected();
-        h.take_tx();
-        assert!(h.all_delivered());
-        assert!(h.say_goodbye());
-        assert!(!h.all_delivered());
-        // A trigger from the device, with ACK_REQUESTED
-        h.on_frame(t, CTRL, &frame(0x84, 0, 0x9e, &[]));
-        let tx = h.take_tx();
-        assert_eq!(tx[0].1[6..], hex("0800")[..]);
-        // ...and its acknowledgment of packet 1
-        h.on_frame(t, CTRL, &frame(0x94, 1, 0x9f, &[]));
-        assert!(h.all_delivered());
     }
 
     #[test]

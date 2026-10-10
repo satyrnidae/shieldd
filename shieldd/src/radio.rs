@@ -28,7 +28,7 @@ use rtlusb::wps::{Credential, Device};
 use rtlusb::{ApOptions, Link, Radio, RadioEvent};
 use shdlib::vban::{self, Vban};
 use shdnet::mac::{Mac, MacFmt};
-use shdtray::{self as tray, Command, Shunned, Status, Tray, tr};
+use shdtray::{self as tray, Command, Status, Tray, tr};
 use tracing::{debug, info, trace, warn};
 
 use crate::outputs::Desktop;
@@ -49,9 +49,12 @@ const ADAPTER_EVERY: Duration = Duration::from_secs(2);
 /// that lasted longer than the max starts again from the min.
 const RETRY_MIN: Duration = Duration::from_secs(2);
 const RETRY_MAX: Duration = Duration::from_secs(60);
-/// A controller sent away is ignored this long, so it gives up and sleeps: its sleep timer is
-/// 30 s, plus some slack. Kicked without this, it rejoins within ~130 ms.
-const SLEEP_SHUN: Duration = Duration::from_millis(30_250);
+/// A fifth controller is ignored until it's been quiet this long, so it gives up and sleeps
+/// rather than rejoining, which it does within ~130 ms of a plain kick. Once kicked, it keeps
+/// sending for ~5 s, then probes every 5.3 s.
+const SHUN_QUIET: Duration = Duration::from_secs(8);
+/// One that never stops trying is let back in, and kicked again, after this anyway
+const SHUN_MAX: Duration = Duration::from_secs(120);
 /// A controller that associated, or is connected without a battery reading, shows as joining until
 /// it's up, or this long
 const JOIN_TIMEOUT: Duration = Duration::from_secs(15);
@@ -198,7 +201,7 @@ impl Shared {
                     Command::Rename(mac, name) => {
                         self.rename(&mac, &name);
                     }
-                    Command::Identify(_) | Command::Disconnect(_) => {}
+                    Command::Identify(_) | Command::Disconnect(_) | Command::Forget(_) => {}
                 }
             }
             self.tray.update(Status::default());
@@ -291,13 +294,16 @@ fn save_group(args: &Args, sh: &mut Shared, group: &p2pconf::Group, now: Instant
 }
 
 /// The seat for `mac`, made if it's new. One past MAX_SEATS takes the place of one that's
-/// gone, with no session and not even joining Wi-Fi, or is sent away to sleep if they're all here.
+/// gone, with no session and not even joining Wi-Fi, or is kicked and shunned if they're all
+/// here. Back after SHUN_MAX, it's turned away again, but the tray hears of it once a run, per
+/// `turned_away`.
 fn seat_for<'a>(
     seats: &'a mut Vec<Seat>,
     mac: Mac,
     args: &Args,
     sh: &Shared,
     link: &mut Link,
+    turned_away: &mut HashSet<Mac>,
 ) -> Result<Option<&'a mut Seat>> {
     if let Some(i) = seats.iter().position(|s| s.mac == mac) {
         return Ok(Some(&mut seats[i]));
@@ -309,13 +315,19 @@ fn seat_for<'a>(
                 seats.remove(i);
             }
             None => {
-                warn!(sta = %mac.fmt(), "a fifth controller; sending it away");
-                link.kick(&mac)?;
-                link.shun(&mac, SLEEP_SHUN);
-                sh.tray.problem(
-                    &tr!("problem-too-many-title"),
-                    &tr!("problem-too-many", max = MAX_SEATS, mac = mac.fmt()),
-                );
+                if link.is_associated(&mac) {
+                    link.kick(&mac)?;
+                }
+                link.shun(&mac, SHUN_QUIET, SHUN_MAX);
+                if turned_away.insert(mac) {
+                    warn!(sta = %mac.fmt(), "a fifth controller; sending it away");
+                    sh.tray.problem(
+                        &tr!("problem-too-many-title"),
+                        &tr!("problem-too-many", max = MAX_SEATS, mac = mac.fmt()),
+                    );
+                } else {
+                    debug!(sta = %mac.fmt(), "the fifth controller again; sending it away");
+                }
                 return Ok(None);
             }
         }
@@ -381,6 +393,8 @@ fn run_once(args: &Args, start: Start, quit: &AtomicBool, sh: &mut Shared) -> Re
     let mut seats: Vec<Seat> = Vec::new();
     // Past the 4-way handshake: their leaving is worth a sound
     let mut linked: HashSet<Mac> = HashSet::new();
+    // Fifth controllers the tray has heard of, see seat_for
+    let mut turned_away: HashSet<Mac> = HashSet::new();
     let mut last_slow = Instant::now();
     let mut pair_until = pairing.then(|| Instant::now() + PAIR_WINDOW);
     // Headset audio: time owed in isoc units, and since when
@@ -396,7 +410,7 @@ fn run_once(args: &Args, start: Start, quit: &AtomicBool, sh: &mut Shared) -> Re
         match ev {
             RadioEvent::Data { src, ethertype: ETHERTYPE, payload } => {
                 trace!(src = %src.fmt(), frame = %hex(payload), "rx");
-                if let Some(seat) = seat_for(&mut seats, src, args, sh, link)? {
+                if let Some(seat) = seat_for(&mut seats, src, args, sh, link, &mut turned_away)? {
                     seat.on_frame(now, payload, &mut desktop);
                 }
             }
@@ -404,7 +418,7 @@ fn run_once(args: &Args, start: Start, quit: &AtomicBool, sh: &mut Shared) -> Re
                 debug!(ethertype = format!("{ethertype:#06x}"), "ignoring data frame")
             }
             RadioEvent::Associated(sta) => {
-                if let Some(seat) = seat_for(&mut seats, sta, args, sh, link)? {
+                if let Some(seat) = seat_for(&mut seats, sta, args, sh, link, &mut turned_away)? {
                     seat.joining = Some(now);
                 }
             }
@@ -468,12 +482,10 @@ fn run_once(args: &Args, start: Start, quit: &AtomicBool, sh: &mut Shared) -> Re
                     }
                     for seat in &mut seats {
                         let Some(why) = seat.pad_failed.take() else { continue };
-                        warn!(sta = %seat.mac.fmt(), "no virtual pad for it: {why}; sending it away");
+                        warn!(sta = %seat.mac.fmt(), "no virtual pad for it: {why}; powering it off");
                         sh.tray.problem(&tr!("problem-pad-title"), &tr!("problem-pad", error = why.as_str()));
-                        if let Some(peer) = seat.host.peer() {
-                            link.kick(&peer)?;
-                            link.shun(&peer, SLEEP_SHUN);
-                            seat.end_session(now, &mut desktop);
+                        if seat.leaving.is_none() && seat.host.peer().is_some() && seat.ctl.power_off(&mut seat.host) {
+                            seat.leaving = Some(Leaving::new(now, false));
                         }
                     }
                     for cmd in sh.tray.commands() {
@@ -512,39 +524,62 @@ fn run_once(args: &Args, start: Start, quit: &AtomicBool, sh: &mut Shared) -> Re
                                     names.insert(mac, name);
                                 }
                             }
+                            Command::Forget(mac) => {
+                                // Not on top of a power-off: it may be asleep before the forget lands
+                                if let Some(s) = seat_mut(&mut seats, &mac)
+                                    && s.leaving.is_none()
+                                    && s.host.peer().is_some()
+                                    && s.ctl.forget(&mut s.host)
+                                {
+                                    warn!(sta = %mac.fmt(), "forgetting from the tray; it has to pair again");
+                                    s.leaving = Some(Leaving::new(now, true));
+                                }
+                            }
                             Command::Disconnect(mac) => {
                                 if let Some(s) = seat_mut(&mut seats, &mac)
                                     && s.leaving.is_none()
-                                    && s.host.say_goodbye()
+                                    && s.host.peer().is_some()
+                                    && s.ctl.power_off(&mut s.host)
                                 {
-                                    info!(sta = %mac.fmt(), "disconnecting from the tray; saying goodbye first");
-                                    s.leaving = Some(Leaving::new(now));
+                                    info!(sta = %mac.fmt(), "disconnecting from the tray; powering it off");
+                                    s.leaving = Some(Leaving::new(now, false));
                                 }
                             }
                         }
                     }
                     for seat in &mut seats {
                         // Before the tray update, so it says "charge it" rather than "critical"
-                        if seat.leaving.is_none() && seat.ctl.must_charge(now) && seat.host.say_goodbye() {
+                        if seat.leaving.is_none()
+                            && seat.ctl.must_charge(now)
+                            && seat.host.peer().is_some()
+                            && seat.ctl.power_off(&mut seat.host)
+                        {
                             let sta = seat.mac.fmt();
-                            warn!(%sta, "battery too low to use; sending the controller away until it charges");
+                            warn!(%sta, "battery too low to use; powering the controller off until it charges");
                             seat.ctl.let_go();
-                            seat.leaving = Some(Leaving::new(now));
+                            seat.leaving = Some(Leaving::new(now, false));
                         }
                         // Never on the tick it started, so the tray has seen the flat battery and
                         // said so before the controller's gone
                         if let Some(l) = seat.leaving
                             && now > l.since
-                            && (seat.host.all_delivered() || now >= l.deadline)
+                            && (l.asleep || now >= l.deadline)
                         {
                             seat.leaving = None;
-                            if let Some(peer) = seat.host.peer() {
-                                let acked = seat.host.all_delivered();
-                                info!(sta = %peer.fmt(), acked, "goodbye done, kicking");
-                                link.kick(&peer)?;
-                                link.shun(&peer, SLEEP_SHUN);
-                                seat.end_session(now, &mut desktop);
+                            let sta = seat.mac.fmt();
+                            match (l.forget, l.asleep) {
+                                (true, true) => info!(%sta, "forgotten; it wakes up in pairing mode"),
+                                (true, false) => {
+                                    warn!(%sta, "no sleep notice after the forget; it may still be paired")
+                                }
+                                (false, true) => info!(%sta, "asleep, letting go"),
+                                (false, false) => warn!(%sta, "didn't power off in time; kicking it instead"),
                             }
+                            // Asleep, its session may already be over; the kick only tidies up the
+                            // station, and a press of its button brings it straight back
+                            link.kick(&seat.mac)?;
+                            seat.sent_away = true;
+                            seat.end_session(now, &mut desktop);
                         }
                         let present = seat.host.peer().is_some();
                         if seat.up() {
@@ -573,19 +608,13 @@ fn run_once(args: &Args, start: Start, quit: &AtomicBool, sh: &mut Shared) -> Re
                         .iter_mut()
                         .filter_map(|s| s.connected(now, names.get(&s.mac).cloned(), link.quality(&s.mac)))
                         .collect();
-                    let shunned = link
-                        .shunned()
-                        .into_iter()
-                        .filter(|m| !seats.iter().any(|s| s.mac == *m && s.host.peer().is_some()))
-                        .map(|mac| Shunned { mac, name: names.get(&mac).cloned() })
-                        .collect();
                     sh.tray.update(Status {
                         controllers,
                         pairing: pair_until.is_some(),
                         ssid: Some(group.ssid.clone()),
                         channel: Some(channel),
                         joining: seats.iter().any(|s| s.joining.is_some()),
-                        shunned,
+                        sent_away: seats.iter().any(|s| s.sent_away),
                     });
                 }
             }

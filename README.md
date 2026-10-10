@@ -209,9 +209,13 @@ first letter of its name the menu hasn't used yet:
 - **Identify**: buzzes the controller twice, to tell which one it is.
 - **Rename...**: up to 15 characters, saved to `known-clients`.
 - **Enable / Disable audio**: its mic and headset over VBAN, see below. Remembered between runs.
-- **Disconnect**: says goodbye to the controller over Ozmo, drops it from Wi-Fi, then ignores
-  it for 30 s so it gives up and goes to sleep. A controller that connects flat gets the same.
-  Meanwhile it's listed, grayed out, as "(shunned)".
+- **Disconnect**: switches the controller off the way the SHIELD Tablet does, then drops it
+  from Wi-Fi; its NVIDIA button wakes it again. One that hasn't gone to sleep within 2 s is
+  only dropped. A controller that connects flat, or that Windows can't give a virtual pad,
+  gets the same.
+- **Forget**: after an OK, clears the controller's pairing the way the SHIELD app's Forget does,
+  then drops it from Wi-Fi. Its NVIDIA button wakes it in pairing mode; Pair controller to
+  use it again.
 
 The rest:
 - **Pair controller...**: pairs one more controller to the network as `--pair` does. Nobody's

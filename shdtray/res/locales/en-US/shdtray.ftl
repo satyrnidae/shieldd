@@ -27,8 +27,6 @@ controller-line = { $state ->
         [level] { $name }: Port #{ $port } ({ $pct }%)
        *[unknown] { $name }: Port #{ $port }
     }
-# Sent away to sleep, ignored for now
-controller-shunned = { $name } (shunned)
 controller-mac = MAC { $mac }
 controller-firmware = Firmware v{ $version }
 controller-identify = &Identify
@@ -36,6 +34,7 @@ controller-rename = &Rename...
 controller-audio-on = Enable &audio
 controller-audio-off = Disable &audio
 controller-disconnect = &Disconnect
+controller-forget = &Forget
 
 ## Icon tooltip
 
@@ -88,6 +87,12 @@ pair =
     Hold the NVIDIA button on the controller until its light flashes.
 
     Pairing stays open for 2 minutes, or until one controller pairs; pair again for each more. Controllers already connected stay connected.
+
+forget-title = shieldd: forget controller
+forget =
+    This erases the connection details from { $name }'s memory. It will need to be paired again to work with the network.
+
+    Forget it?
 
 reconfigure-title = shieldd: reconfigure network
 reconfigure =

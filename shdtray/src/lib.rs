@@ -37,8 +37,9 @@ pub struct Status {
     pub channel: Option<u8>,
     /// A controller is on its way in: associated, but not yet up with a battery reading
     pub joining: bool,
-    /// Sent away to sleep and ignored for now, listed after the connected ones
-    pub shunned: Vec<Shunned>,
+    /// A controller shieldd sent away on purpose, by Disconnect, Forget or for its battery,
+    /// hasn't come back yet
+    pub sent_away: bool,
 }
 
 /// How well a controller's link is holding up, as the bars by its line in the menu
@@ -52,12 +53,6 @@ pub enum Signal {
     Fair,
     /// All three, green
     Good,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct Shunned {
-    pub mac: [u8; 6],
-    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -91,5 +86,7 @@ pub enum Command {
     /// VBAN on or off for it
     Vban([u8; 6], bool),
     Disconnect([u8; 6]),
+    /// Clears its pairing; it has to pair again
+    Forget([u8; 6]),
     Exit,
 }

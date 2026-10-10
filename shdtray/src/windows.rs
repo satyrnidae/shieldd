@@ -55,7 +55,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::battery::{Battery, Gauge};
 use crate::tr;
-use crate::{About, Command, Connected, MAX_CONTROLLERS, Shunned, Signal, Status};
+use crate::{About, Command, Connected, MAX_CONTROLLERS, Signal, Status};
 use shdlib::names::MAX_NAME;
 use shdnet::mac::MacFmt;
 use windows::core::{BOOL, PCWSTR, PWSTR, w};
@@ -678,6 +678,7 @@ mod id {
     pub const RENAME: usize = 1;
     pub const VBAN: usize = 2;
     pub const DISCONNECT: usize = 3;
+    pub const FORGET: usize = 4;
 
     pub fn of(index: usize, action: usize) -> usize {
         CONTROLLER + index * PER_CONTROLLER + action
@@ -1003,6 +1004,7 @@ fn menu_and_boxes(hwnd: HWND) {
                 }
                 id::VBAN => Command::Vban(c.mac, !c.vban),
                 id::DISCONNECT => Command::Disconnect(c.mac),
+                id::FORGET if confirm_forget(hwnd, c) => Command::Forget(c.mac),
                 _ => return,
             }
         }
@@ -1227,10 +1229,6 @@ fn accel(text: &str) -> Option<char> {
     None
 }
 
-fn shunned_line(s: &Shunned) -> String {
-    tr!("controller-shunned", name = menu_text(&name_of(s.name.as_deref())))
-}
-
 /// The controller the icon follows: of those with a battery reading, one running down before
 /// one on the charger, charged or not, then the lowest percent shown
 fn lowest(controllers: &[Connected], pct: impl Fn(&[u8; 6]) -> Option<u8>) -> Option<&Connected> {
@@ -1277,15 +1275,14 @@ fn menu_items(s: &Status, pct: impl Fn(&[u8; 6]) -> Option<u8>) -> Vec<Item> {
                 if c.vban { tr!("controller-audio-off") } else { tr!("controller-audio-on") },
             ),
             Item::new(MF_STRING, id::of(n, id::DISCONNECT), tr!("controller-disconnect")),
+            Item::separator(),
+            Item::new(MF_STRING, id::of(n, id::FORGET), tr!("controller-forget")),
         ]);
         let line =
             Item { sub, signal: c.signal, ..Item::new(MF_STRING, 0, controller_line(c, pct(&c.mac), &mut used)) };
         items.push(line);
     }
-    for sh in &s.shunned {
-        items.push(Item::new(gray(false), 0, shunned_line(sh)));
-    }
-    if s.controllers.is_empty() && s.shunned.is_empty() {
+    if s.controllers.is_empty() {
         items.push(Item::new(gray(false), 0, tr!("menu-none-connected")));
     }
     items.extend([
@@ -1335,7 +1332,7 @@ impl State {
         // sleep, which would otherwise flash every time a flat one came back
         let disconnected = !s.pairing && !s.joining && s.controllers.is_empty();
         self.had_controller |= !s.controllers.is_empty();
-        let left = self.had_controller && s.shunned.is_empty();
+        let left = self.had_controller && !s.sent_away;
         if disconnected && !self.was_disconnected && (self.first || left) {
             self.flash_until = Some(now + FLASH_FOR);
         }
@@ -1744,6 +1741,12 @@ fn confirm_pair(hwnd: HWND) -> bool {
     message(hwnd, &tr!("pair"), &tr!("pair-title"), MB_OKCANCEL | MB_ICONINFORMATION) == IDOK
 }
 
+/// The controller forgets the network, so ask first
+fn confirm_forget(hwnd: HWND, c: &Connected) -> bool {
+    let text = tr!("forget", name = name_of(c.name.as_deref()));
+    message(hwnd, &text, &tr!("forget-title"), MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2) == IDOK
+}
+
 /// A new network throws every pairing away, so ask first
 fn confirm_reconfigure(hwnd: HWND) -> bool {
     let style = MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2;
@@ -2020,10 +2023,6 @@ mod tests {
 
     #[test]
     fn lines() {
-        let sh = |name: Option<&str>| Shunned { mac: [0; 6], name: name.map(Into::into) };
-        assert_eq!(shunned_line(&sh(Some("nVidiaBlake"))), "nVidiaBlake (shunned)");
-        assert_eq!(shunned_line(&sh(None)), "Controller (shunned)");
-        assert_eq!(shunned_line(&sh(Some("Pad&Co"))), "Pad&&Co (shunned)");
         let c = Connected { name: Some("Pad&Co".into()), port: Some(4), ..Default::default() };
         assert_eq!(controller_line(&c, None, &mut vec![]), "&Pad&&Co: Port #4");
         assert_eq!(controller_line(&up(2, "A", false), Some(40), &mut vec![]), "&A: Port #2 (40%)");
@@ -2044,7 +2043,6 @@ mod tests {
         let s = Status {
             // A's setup hasn't read its firmware yet
             controllers: vec![Connected { firmware: None, ..up(1, "A", false) }, up(2, "B", true)],
-            shunned: vec![Shunned { mac: [3; 6], name: None }],
             ..Default::default()
         };
         let items = menu_items(&s, |m| Some(m[0] * 10));
@@ -2061,7 +2059,6 @@ mod tests {
                 "",
                 "&A: Port #1 (10%)",
                 "&B: Port #2 (20%)",
-                "Controller (shunned)",
                 "",
                 "&Pair controller...",
                 "Re&configure network",
@@ -2081,12 +2078,13 @@ mod tests {
                 (id::of(1, id::RENAME), "&Rename..."),
                 (id::of(1, id::VBAN), "Disable &audio"),
                 (id::of(1, id::DISCONNECT), "&Disconnect"),
+                (0, ""),
+                (id::of(1, id::FORGET), "&Forget"),
             ]
         );
         assert!(!items[3].sub.iter().any(|i| i.text.starts_with("Firmware")));
         assert_eq!(id::controller(id::of(1, id::VBAN)), Some((1, id::VBAN)));
         assert_eq!(id::controller(id::EXIT), None);
-        assert!(items[5].flags.0 & MF_GRAYED.0 != 0 && items[5].sub.is_empty());
         // Pairing grays its line; with nothing at all there's a line to say so
         let none = menu_items(&Status { pairing: true, ..Default::default() }, |_| None);
         let at = |t: &str| none.iter().find(|i| i.text == t).unwrap().flags.0 & MF_GRAYED.0 != 0;

@@ -79,8 +79,8 @@ impl Link<'_> {
         self.bss.send_stream(self.chip, self.tx, dst, ethertype, payload)
     }
 
-    /// Disconnects `sta`. Deauth only; see shieldd's goodbye for the Ozmo side. The callback
-    /// gets the Disconnected right after it returns.
+    /// Disconnects `sta`. Deauth only; see shieldd's Controller::power_off and forget for the
+    /// Ozmo side. The callback gets the Disconnected right after it returns.
     pub fn kick(&mut self, sta: &Mac) -> Result<()> {
         self.deferred.extend(self.bss.kick(self.chip, self.tx, sta)?);
         Ok(())
@@ -92,13 +92,8 @@ impl Link<'_> {
     }
 
     /// See Bss::shun
-    pub fn shun(&mut self, sta: &Mac, d: Duration) {
-        self.bss.shun(sta, d)
-    }
-
-    /// See Bss::shunned
-    pub fn shunned(&self) -> Vec<Mac> {
-        self.bss.shunned()
+    pub fn shun(&mut self, sta: &Mac, quiet: Duration, max: Duration) {
+        self.bss.shun(sta, quiet, max)
     }
 
     /// Turns WPS push-button on with this credential, or off, without restarting the AP. It goes off
@@ -276,6 +271,7 @@ impl Radio {
                 let fc = u16::from_le_bytes([frame[0], frame[1]]);
                 let sa: Mac = frame[10..16].try_into().unwrap();
                 bss.note_rx(&sa, frame, p.dbm, p.rate);
+                bss.note_shunned(&sa, fc);
                 if rx::frame_kind(fc) == "probe-req" && bss.cfg.wants(frame) && !bss.is_shunned(&sa) {
                     tx.send(&chip.rtl, TxInfo::mgmt(), &bss.cfg.probe_resp(&sa))?;
                 }

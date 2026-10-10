@@ -4,7 +4,7 @@
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use ozproto::wire::ETHERTYPE;
+use ozproto::wire::{ETHERTYPE, keep_alive_time};
 use ozproto::{Config, Event, Host};
 use rtlusb::{Link, LinkQuality};
 use shdlib::vban;
@@ -17,23 +17,26 @@ use crate::hex;
 use crate::outputs::{Desktop, Gamepad};
 use crate::signal;
 
-/// XInput's four ports
 pub const MAX_SEATS: usize = shdtray::MAX_CONTROLLERS;
-/// How long a DISCONNECT goodbye gets to be acknowledged before the kick goes out anyway.
-/// The controller acks it and carries on, so it only goes first as a courtesy.
-const GOODBYE_WAIT: Duration = Duration::from_secs(1);
+/// How long a controller told to power off or forget gets to say it's going to sleep. The
+/// tablet's power-off took 66 ms; this leaves room for Ozmo retries.
+const LEAVE_WAIT: Duration = Duration::from_secs(2);
 
-/// A controller being sent away: a DISCONNECT goodbye, then a kick, a shun and the end of its
-/// session once it's acknowledged or GOODBYE_WAIT runs out
+/// A controller being sent away: told to power off or forget its pairing, then kicked once it
+/// says it's going to sleep, or at LEAVE_WAIT if it hasn't
 #[derive(Debug, Clone, Copy)]
 pub struct Leaving {
     pub since: Instant,
     pub deadline: Instant,
+    /// Its sleep notice is in: UPDATE_PARAM_REQ without a keepalive, or DISCONNECT
+    pub asleep: bool,
+    /// Forgetting its pairing rather than powering off
+    pub forget: bool,
 }
 
 impl Leaving {
-    pub fn new(now: Instant) -> Self {
-        Leaving { since: now, deadline: now + GOODBYE_WAIT }
+    pub fn new(now: Instant, forget: bool) -> Self {
+        Leaving { since: now, deadline: now + LEAVE_WAIT, asleep: false, forget }
     }
 }
 
@@ -52,6 +55,8 @@ pub struct Seat {
     /// Headset audio's next isoc frame number
     isoc_frame: u8,
     pub leaving: Option<Leaving>,
+    /// Sent away on purpose and not back yet: no disconnect flash for it
+    pub sent_away: bool,
     /// Since it associated, until it's up with a battery reading
     pub joining: Option<Instant>,
     /// JOIN_TIMEOUT ran out on it this session; no spinner for it again
@@ -78,6 +83,7 @@ impl Seat {
             heard_at: None,
             isoc_frame: 0,
             leaving: None,
+            sent_away: false,
             joining: None,
             join_gave_up: false,
             vban,
@@ -204,11 +210,19 @@ impl Seat {
         Ok(())
     }
 
+    /// Its sleep notice, which a power-off or forget waits for. True if one was.
+    fn going_to_sleep(&mut self) -> bool {
+        let Some(l) = self.leaving.as_mut() else { return false };
+        l.asleep = true;
+        true
+    }
+
     fn on_event(&mut self, ev: Event, now: Instant, desktop: &mut Desktop) {
         let sta = self.mac.fmt();
         match ev {
             Event::Connected { peer, session_id, .. } => {
                 info!(peer = %peer.fmt(), session_id, "controller connected");
+                self.sent_away = false;
                 self.release(desktop);
                 self.ctl.start(now, &mut self.host);
             }
@@ -239,9 +253,16 @@ impl Seat {
             Event::Farewell { ep, index, report } => {
                 debug!(%sta, ep, index, report = %hex(&report), "farewell report")
             }
-            Event::UpdateParam(p) => debug!(%sta, ?p, "update param"),
+            Event::UpdateParam(p) => {
+                debug!(%sta, ?p, "update param");
+                // Its last word before sleep once told to power off or forget: no keepalive
+                if keep_alive_time(p.keep_alive).is_none() && self.going_to_sleep() {
+                    info!(%sta, "controller going to sleep");
+                }
+            }
             Event::Disconnect => {
                 info!(%sta, "controller going to sleep");
+                self.going_to_sleep();
                 self.release(desktop);
             }
             // The controller asks for a 300 ms presleep and then routinely goes

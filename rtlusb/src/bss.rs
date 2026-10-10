@@ -136,8 +136,25 @@ pub struct Bss {
     /// Hold frames for a dozing station up to this long; None sends right away like ap_ignore_ps
     ps_hold: Option<Duration>,
     ps_stats: PsStats,
-    /// Ignored until then, see shun. Ordered, so shunned() lists them the same way each time.
-    shunned: BTreeMap<Mac, Instant>,
+    /// Ignored for now, see shun
+    shunned: HashMap<Mac, Shun>,
+}
+
+/// A station being ignored, see Bss::shun
+#[derive(Debug, Clone, Copy)]
+struct Shun {
+    since: Instant,
+    /// Over then, unless it's heard from again first
+    until: Instant,
+    quiet: Duration,
+    max: Duration,
+}
+
+impl Shun {
+    /// A frame from it at `now`: the quiet wait starts over, up to max
+    fn heard(&mut self, now: Instant) {
+        self.until = (now + self.quiet).min(self.since + self.max);
+    }
 }
 
 /// Frames from a station by rate: (rate, first tries, resends)
@@ -252,7 +269,7 @@ impl Bss {
             next_aid: 1,
             ps_hold: None,
             ps_stats: PsStats::default(),
-            shunned: BTreeMap::new(),
+            shunned: HashMap::new(),
         }
     }
 
@@ -264,26 +281,34 @@ impl Bss {
         self.on_leave(chip, *sta)
     }
 
-    /// Ignores `sta`'s probes, auth and association for `d`, so to it the AP is gone. A new
-    /// shun for the same station replaces its old one.
-    pub fn shun(&mut self, sta: &Mac, d: Duration) {
-        self.shunned.insert(*sta, Instant::now() + d);
-        info!(sta = sta.fmt(), ?d, "shunned");
-    }
-
-    /// Who's being ignored right now
-    pub fn shunned(&self) -> Vec<Mac> {
+    /// Ignores `sta`'s probes, auth and association, so to it the AP is gone, until it's been
+    /// quiet for `quiet`: it gave up and went to sleep. Each frame from it starts the wait over,
+    /// see note_shunned, but it's over at `max` regardless. A new shun for the same station
+    /// replaces its old one.
+    pub fn shun(&mut self, sta: &Mac, quiet: Duration, max: Duration) {
         let now = Instant::now();
-        self.shunned.iter().filter(|&(_, until)| now < *until).map(|(m, _)| *m).collect()
+        self.shunned.insert(*sta, Shun { since: now, until: (now + quiet).min(now + max), quiet, max });
+        info!(sta = sta.fmt(), ?quiet, ?max, "shunned");
     }
 
-    /// `sa` is being ignored. Lifts any expired shun.
+    /// A frame from `sa` with control field `fc`. If it's shunned, it's still trying, so its quiet
+    /// wait starts over.
+    pub fn note_shunned(&mut self, sa: &Mac, fc: u16) {
+        let now = Instant::now();
+        let Some(s) = self.shunned.get_mut(sa).filter(|s| now < s.until) else { return };
+        s.heard(now);
+        let since_ms = now.duration_since(s.since).as_millis() as u64;
+        trace!(sta = sa.fmt(), kind = crate::rx::frame_kind(fc), since_ms, "heard while shunned");
+    }
+
+    /// `sa` is being ignored. Lifts any shun that's over.
     pub fn is_shunned(&mut self, sa: &Mac) -> bool {
         let now = Instant::now();
-        self.shunned.retain(|m, until| {
-            let on = now < *until;
+        self.shunned.retain(|m, s| {
+            let on = now < s.until;
             if !on {
-                info!(sta = m.fmt(), "shun over");
+                let (after, capped) = (now.duration_since(s.since), s.until >= s.since + s.max);
+                info!(sta = m.fmt(), ?after, capped, "shun over");
             }
             on
         });
@@ -548,8 +573,6 @@ impl Bss {
     /// Sends the delayed msg 1 and resends msg 1 or 3 while the station hasn't answered, each
     /// time with a fresh replay counter. Call every few ms.
     pub fn tick(&mut self, chip: &Chip, tx: &mut Tx) -> Result<Vec<Event>> {
-        // Just to log the end of a shun on time
-        self.is_shunned(&[0; 6]);
         self.release_overdue(chip, tx)?;
         let mut out = Vec::new();
         self.wps_tick(chip, tx, &mut out)?;
@@ -1016,22 +1039,28 @@ mod tests {
     }
 
     #[test]
-    fn shuns_list_in_order() {
+    fn shuns_are_per_station_and_run_out() {
         let mut bss = Bss::new(cfg(), [0; 32]);
-        for m in [[9; 6], [2; 6], [5; 6]] {
-            bss.shun(&m, Duration::from_secs(60));
-        }
-        assert_eq!(bss.shunned(), vec![[2; 6], [5; 6], [9; 6]]);
+        let minute = Duration::from_secs(60);
+        bss.shun(&[2; 6], minute, minute);
+        bss.shun(&[3; 6], minute, minute);
+        bss.shun(&[4; 6], Duration::ZERO, minute);
+        assert!(bss.is_shunned(&[2; 6]) && bss.is_shunned(&[3; 6]));
+        assert!(!bss.is_shunned(&[4; 6]) && !bss.is_shunned(&[5; 6]));
     }
 
     #[test]
-    fn shuns_are_per_station_and_run_out() {
-        let mut bss = Bss::new(cfg(), [0; 32]);
-        bss.shun(&[2; 6], Duration::from_secs(60));
-        bss.shun(&[3; 6], Duration::from_secs(60));
-        bss.shun(&[4; 6], Duration::ZERO);
-        assert!(bss.is_shunned(&[2; 6]) && bss.is_shunned(&[3; 6]));
-        assert!(!bss.is_shunned(&[4; 6]) && !bss.is_shunned(&[5; 6]));
-        assert_eq!(bss.shunned(), vec![[2; 6], [3; 6]]);
+    fn a_shun_lasts_until_its_quiet_or_at_most_max() {
+        let t0 = Instant::now();
+        let s = |ms| t0 + Duration::from_millis(ms);
+        let mut shun = Shun { since: t0, until: s(8_000), quiet: Duration::from_secs(8), max: Duration::from_secs(60) };
+        // Probes 5.3 s apart keep it going
+        for at in [5_300, 10_600, 15_900] {
+            shun.heard(s(at));
+            assert_eq!(shun.until, s(at + 8_000));
+        }
+        // Still trying near the end: max wins
+        shun.heard(s(55_000));
+        assert_eq!(shun.until, s(60_000));
     }
 }

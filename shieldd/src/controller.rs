@@ -51,6 +51,13 @@ const MIC_EP: u8 = 0x83;
 const MAILBOX: u8 = 0xFD;
 /// Command whose answer is the best battery candidate: `01 32 d7 xx` in every tablet capture
 const STATUS_CMD: u8 = 0x01;
+/// Command, with its three zero bytes, that switches the controller off: the SHIELD Tablet's
+/// power-off (HANDOFF 4a). It answers, then sends UPDATE_PARAM_REQ with keepalive 0 and goes
+/// silent. A bare `03` only gets an answer.
+const POWER_OFF_CMD: [u8; 4] = [0x03, 0, 0, 0];
+/// Command, with its argument, that clears the controller's pairing: the SHIELD app's Forget
+/// (HANDOFF 4a). No answer; it goes silent, and wakes up in pairing mode.
+const FORGET_CMD: [u8; 2] = [0x11, 0x01];
 /// How often to re-ask STATUS_CMD while connected, so the charge pulse and tray follow the
 /// charger closely. It's two small control requests; one in flight at a time.
 const STATUS_EVERY: Duration = Duration::from_secs(1);
@@ -249,6 +256,10 @@ pub struct Controller {
     mic: Vec<u8>,
     /// From setup, see shdlib::firmware
     firmware: Option<String>,
+    /// Told to power off or forget its pairing; nothing else goes to it this session
+    sent_away: bool,
+    /// Power-off in flight: request ID and whether it's the GET half
+    off_pending: Option<(u8, bool)>,
 }
 
 impl Controller {
@@ -279,6 +290,8 @@ impl Controller {
             stream_pending: None,
             mic: Vec::new(),
             firmware: None,
+            sent_away: false,
+            off_pending: None,
         }
     }
 
@@ -289,7 +302,7 @@ impl Controller {
 
     /// The headset stream is open
     pub fn headset_open(&self) -> bool {
-        self.ready && self.streams_open[1]
+        self.ready && !self.sent_away && self.streams_open[1]
     }
 
     /// Mic samples, 16 kHz mono s16le, since the last call
@@ -300,6 +313,35 @@ impl Controller {
     /// Firmware version, as the SHIELD app shows it, once setup has asked
     pub fn firmware(&self) -> Option<&str> {
         self.firmware.as_deref()
+    }
+
+    /// Switches the controller off as the tablet does: SET POWER_OFF_CMD, then GET its answer.
+    /// Setup, status, audio and rumble stop for the rest of the session. False if it couldn't
+    /// go out.
+    pub fn power_off(&mut self, host: &mut Host) -> bool {
+        let Some(id) = self.send_away(host, &POWER_OFF_CMD) else { return false };
+        self.off_pending = Some((id, false));
+        true
+    }
+
+    /// Clears the controller's pairing as the SHIELD app's Forget does: SET FORGET_CMD, with no
+    /// answer to wait for. It has to pair again before it's any use. False if it couldn't go out.
+    pub fn forget(&mut self, host: &mut Host) -> bool {
+        self.send_away(host, &FORGET_CMD).is_some()
+    }
+
+    /// SET `cmd` on the mailbox and stop everything else, for power_off and forget. Its
+    /// request ID, if it went out.
+    fn send_away(&mut self, host: &mut Host, cmd: &[u8]) -> Option<u8> {
+        let id = self.next_req_id();
+        let data = [&[MAILBOX], cmd].concat();
+        if !host.submit(&Request::hid_set_report(id, HID_INTERFACE, usb::REPORT_FEATURE, data)) {
+            return None;
+        }
+        self.sent_away = true;
+        self.pending = None;
+        self.buzz.clear();
+        Some(id)
     }
 
     /// Two short buzzes, unless something else is buzzing
@@ -345,6 +387,10 @@ impl Controller {
     }
 
     pub fn poll(&mut self, now: Instant, host: &mut Host) {
+        // Anything more could land in the mailbox between the power-off and its answer
+        if self.sent_away {
+            return;
+        }
         self.poll_status(now, host);
         self.poll_streams(now, host);
         if self.buzz_until.is_none_or(|t| now >= t) {
@@ -422,7 +468,7 @@ impl Controller {
             warn!(req_id = id, "output report 0x01 never answered");
             self.output_pending = None;
         }
-        if !self.ready || self.output_pending.is_some() {
+        if !self.ready || self.sent_away || self.output_pending.is_some() {
             return false;
         }
         let values = if self.rumble_cut { [0; 3] } else { values };
@@ -518,6 +564,27 @@ impl Controller {
     }
 
     fn on_response(&mut self, now: Instant, req_id: u8, rcode: u8, msg: &Message, host: &mut Host) {
+        if let Some((id, get)) = self.off_pending
+            && id == req_id
+        {
+            self.off_pending = None;
+            if get {
+                let data = match msg {
+                    Message::VendorClass { data, .. } => crate::hex(trim_zeros(data, 1)),
+                    _ => String::new(),
+                };
+                debug!(rcode, %data, "power-off answer");
+            } else {
+                let id = self.next_req_id();
+                if host.submit(&Request::hid_get_report(id, HID_INTERFACE, usb::REPORT_FEATURE, MAILBOX)) {
+                    self.off_pending = Some((id, true));
+                }
+            }
+            return;
+        }
+        if self.sent_away {
+            return;
+        }
         if let Some((id, _, get)) = self.status_pending
             && id == req_id
         {
@@ -670,6 +737,34 @@ mod tests {
         // The mic SET_INTERFACE from the same capture, now sent by poll_streams
         let mic = Request::SetInterface { req_id: 0x13, interface: MIC_INTERFACE, alt: 1 };
         assert_eq!(mic.encode(0x13), hex("3106011305130301"));
+    }
+
+    #[test]
+    fn power_off_matches_the_tablet() {
+        // Its SET_REPORT from the tablet capture, HANDOFF 4a
+        assert_eq!(
+            Request::hid_set_report(
+                0x66,
+                HID_INTERFACE,
+                usb::REPORT_FEATURE,
+                [&[MAILBOX], &POWER_OFF_CMD[..]].concat()
+            )
+            .encode(0x66),
+            hex("310f016607662109fd030000fd03000000"),
+        );
+    }
+
+    #[test]
+    fn forget_matches_the_tablet() {
+        let mut c = Controller::new(false);
+        let mut h = Host::new(ozproto::Config::default());
+        // Its SET_REPORT from the tablet's Forget capture, HANDOFF 4a
+        let set =
+            Request::hid_set_report(0x96, HID_INTERFACE, usb::REPORT_FEATURE, [&[MAILBOX], &FORGET_CMD[..]].concat());
+        assert_eq!(set.encode(0x96), hex("310d019607962109fd030000fd1101"));
+        // No session, nothing goes out
+        assert!(!c.forget(&mut h));
+        assert!(!c.sent_away);
     }
 
     #[test]
