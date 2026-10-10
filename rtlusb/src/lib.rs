@@ -11,6 +11,7 @@ pub mod chip;
 pub mod efuse;
 pub mod fw;
 pub mod phy;
+pub mod quality;
 pub mod radio;
 pub mod regs;
 pub mod rx;
@@ -22,4 +23,5 @@ pub mod usb;
 pub mod wpa;
 pub mod wps;
 
+pub use quality::LinkQuality;
 pub use radio::{ApOptions, Link, Radio, RadioEvent};

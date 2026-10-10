@@ -20,7 +20,8 @@ use tracing::{debug, info, warn};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::Globalization::{GetUserPreferredUILanguages, MUI_LANGUAGE_NAME};
 use windows::Win32::Graphics::Gdi::{
-    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateBitmap, CreateDIBSection, DIB_RGB_COLORS, DeleteObject,
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateBitmap, CreateDIBSection, DIB_RGB_COLORS, DeleteObject, HBITMAP,
+    MONITOR_DEFAULTTONEAREST, MonitorFromPoint,
 };
 use windows::Win32::Media::Audio::{PlaySoundW, SND_ALIAS, SND_ASYNC, SND_NODEFAULT, SND_SYSTEM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -28,7 +29,8 @@ use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegG
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Controls::EM_LIMITTEXT;
 use windows::Win32::UI::HiDpi::{
-    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForSystem, GetSystemMetricsForDpi, SetThreadDpiAwarenessContext,
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForMonitor, GetDpiForSystem, GetSystemMetricsForDpi,
+    MDT_EFFECTIVE_DPI, SetThreadDpiAwarenessContext,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VK_SHIFT,
@@ -43,17 +45,17 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DS_MODALFRAME, DS_SETFONT, DefWindowProcW, DestroyIcon, DestroyMenu, DestroyWindow, DialogBoxIndirectParamW,
     DispatchMessageW, ES_AUTOHSCROLL, EndDialog, EndMenu, EnumThreadWindows, GetClassNameW, GetCursorPos,
     GetDlgItemTextW, GetMessageW, HICON, HMENU, ICONINFO, IDCANCEL, IDOK, KillTimer, MB_DEFBUTTON2, MB_ICONINFORMATION,
-    MB_ICONWARNING, MB_OK, MB_OKCANCEL, MB_SETFOREGROUND, MENU_ITEM_FLAGS, MESSAGEBOX_RESULT, MESSAGEBOX_STYLE,
-    MF_DISABLED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG, MessageBoxW, PostMessageW, PostQuitMessage,
-    RegisterClassW, RegisterWindowMessageW, SM_CXSMICON, SendDlgItemMessageW, SetDlgItemTextW, SetForegroundWindow,
-    SetTimer, TPM_RETURNCMD, TrackPopupMenu, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_COMMAND, WM_CONTEXTMENU,
-    WM_INITDIALOG, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_POPUP,
-    WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    MB_ICONWARNING, MB_OK, MB_OKCANCEL, MB_SETFOREGROUND, MENU_ITEM_FLAGS, MENUITEMINFOW, MESSAGEBOX_RESULT,
+    MESSAGEBOX_STYLE, MF_DISABLED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MIIM_BITMAP, MSG, MessageBoxW,
+    PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SM_CXSMICON, SendDlgItemMessageW,
+    SetDlgItemTextW, SetForegroundWindow, SetMenuItemInfoW, SetTimer, TPM_RETURNCMD, TrackPopupMenu, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WM_APP, WM_COMMAND, WM_CONTEXTMENU, WM_INITDIALOG, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WM_TIMER,
+    WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 
 use crate::battery::{Battery, Gauge};
 use crate::tr;
-use crate::{About, Command, Connected, MAX_CONTROLLERS, Shunned, Status};
+use crate::{About, Command, Connected, MAX_CONTROLLERS, Shunned, Signal, Status};
 use shdlib::names::MAX_NAME;
 use shdnet::mac::MacFmt;
 use windows::core::{BOOL, PCWSTR, PWSTR, w};
@@ -298,6 +300,49 @@ fn badge_svg(n: u8, p: &Palette) -> Option<String> {
     Some(svg.replace("<g opacity=\"0.2\">", "<g>").replacen("<circle ", &disc, 1).replace("#000000", p.stroke))
 }
 
+/// The menu's signal bars, Ikono's graph-asc
+const SIGNAL_SVG: &str = include_str!("../res/graph-asc-svgrepo-com.svg");
+/// The bars that aren't lit, pale enough on the light menu to read as off
+const SIGNAL_UNLIT: &str = "#C8C8C8";
+
+/// The signal bars for `s`, lit from the left: none, one red, two yellow or all three green.
+/// The menu isn't themed and stays light whatever the taskbar does, so the light palette.
+fn signal_svg(s: Signal) -> String {
+    let (lit, color) = match s {
+        Signal::Dropping => (0, SIGNAL_UNLIT),
+        Signal::Low => (1, LIGHT.red),
+        Signal::Fair => (2, LIGHT.yellow),
+        Signal::Good => (3, LIGHT.green),
+    };
+    let (head, bars) = signal_bars();
+    let mut out = head.to_owned();
+    for (place, p) in bars {
+        out.push_str("<path");
+        out.push_str(&p.replace("#000000", if place < lit { color } else { SIGNAL_UNLIT }));
+    }
+    out
+}
+
+/// The signal SVG split at each path: what's before the first, then each path, after its
+/// "<path", with its bar's place across, 0 the leftmost. The paths aren't in order across; a
+/// bar's place is where it starts, d="M<x> ...".
+fn signal_bars() -> (&'static str, Vec<(usize, &'static str)>) {
+    let mut parts = SIGNAL_SVG.split("<path");
+    let head = parts.next().unwrap_or_default();
+    let paths: Vec<&str> = parts.collect();
+    let x = |p: &str| -> f32 {
+        let d = p.split("d=\"M").nth(1).unwrap_or_default();
+        d.split([' ', 'L', 'V']).next().and_then(|n| n.parse().ok()).unwrap_or(0.0)
+    };
+    let mut across: Vec<(f32, usize)> = paths.iter().enumerate().map(|(i, p)| (x(p), i)).collect();
+    across.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut places = vec![0; paths.len()];
+    for (place, &(_, i)) in across.iter().enumerate() {
+        places[i] = place;
+    }
+    (head, places.into_iter().zip(paths).collect())
+}
+
 /// Taskbar colors for one theme
 struct Palette {
     stroke: &'static str,
@@ -421,6 +466,28 @@ fn render(pm: &Pixmap) -> Result<HICON> {
         })
         .collect();
     let side = size as i32;
+    let color = dib(side, &bgra)?;
+    // SAFETY: both bitmaps are deleted once the icon has its own copies
+    unsafe {
+        // All-zero AND mask: the alpha channel does the masking
+        let mask = CreateBitmap(side, side, 1, 1, None);
+        let info = ICONINFO { fIcon: true.into(), xHotspot: 0, yHotspot: 0, hbmMask: mask, hbmColor: color };
+        let icon = CreateIconIndirect(&info);
+        let _ = DeleteObject(color.into());
+        let _ = DeleteObject(mask.into());
+        icon.context("creating icon")
+    }
+}
+
+/// A menu item's image: a top-down 32-bit DIB, premultiplied BGRA as menus want it. The caller
+/// deletes it.
+fn menu_bitmap(pm: &Pixmap) -> Result<HBITMAP> {
+    let bgra: Vec<u8> = pm.pixels().iter().flat_map(|p| [p.blue(), p.green(), p.red(), p.alpha()]).collect();
+    dib(pm.width() as i32, &bgra)
+}
+
+/// A `side` square top-down 32-bit DIB section holding `bgra`
+fn dib(side: i32, bgra: &[u8]) -> Result<HBITMAP> {
     let bmi = BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
             biSize: size_of::<BITMAPINFOHEADER>() as u32,
@@ -433,19 +500,13 @@ fn render(pm: &Pixmap) -> Result<HICON> {
         },
         ..Default::default()
     };
-    // SAFETY: the DIB is size x size x 4 bytes, exactly bgra's length; both bitmaps are
-    // deleted once the icon has its own copies
+    assert_eq!(bgra.len(), (side * side * 4) as usize);
+    // SAFETY: the DIB is side x side x 4 bytes, exactly bgra's length
     unsafe {
         let mut bits = std::ptr::null_mut();
-        let color = CreateDIBSection(None, &bmi, DIB_RGB_COLORS, &mut bits, None, 0).context("icon bitmap")?;
+        let bmp = CreateDIBSection(None, &bmi, DIB_RGB_COLORS, &mut bits, None, 0).context("bitmap")?;
         std::ptr::copy_nonoverlapping(bgra.as_ptr(), bits.cast::<u8>(), bgra.len());
-        // All-zero AND mask: the alpha channel does the masking
-        let mask = CreateBitmap(side, side, 1, 1, None);
-        let info = ICONINFO { fIcon: true.into(), xHotspot: 0, yHotspot: 0, hbmMask: mask, hbmColor: color };
-        let icon = CreateIconIndirect(&info);
-        let _ = DeleteObject(color.into());
-        let _ = DeleteObject(mask.into());
-        icon.context("creating icon")
+        Ok(bmp)
     }
 }
 
@@ -587,11 +648,13 @@ struct Item {
     id: usize,
     text: String,
     sub: Vec<Item>,
+    /// Signal bars beside the text
+    signal: Option<Signal>,
 }
 
 impl Item {
     fn new(flags: MENU_ITEM_FLAGS, id: usize, text: impl Into<String>) -> Item {
-        Item { flags, id, text: text.into(), sub: Vec::new() }
+        Item { flags, id, text: text.into(), sub: Vec::new(), signal: None }
     }
 
     fn separator() -> Item {
@@ -877,6 +940,11 @@ fn run(rx: Receiver<Msg>, commands: Sender<Command>) -> Result<()> {
         }
     }
     TRAY_HWND.store(0, Ordering::Release);
+    // Only past the loop: EndMenu doesn't wait, so the menu may still have been up in quit
+    for (.., b) in SIGNAL_BITMAPS.take() {
+        // SAFETY: made by signal_bitmap; menu returned before the loop did
+        let _ = unsafe { DeleteObject(b.into()) };
+    }
     if let Some(mut st) = STATE.take() {
         st.hide();
         st.free_icons();
@@ -907,7 +975,7 @@ fn menu_and_boxes(hwnd: HWND) {
             return;
         };
         MENU_REOPEN.set(false);
-        MENU_SHOWN.set(Some(items.clone()));
+        MENU_SHOWN.set(Some(without_signal(&items)));
         let picked = track(hwnd, &items, at);
         MENU_SHOWN.set(None);
         if picked == 0 && MENU_REOPEN.replace(false) && !QUITTING.get() {
@@ -956,12 +1024,51 @@ fn menu_and_boxes(hwnd: HWND) {
     }
 }
 
+thread_local! {
+    /// Signal bars as menu images, by level and size, made on first use; freed at quit
+    static SIGNAL_BITMAPS: RefCell<Vec<(Signal, u32, HBITMAP)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The signal bars for `s` as a `size` square menu image, rendered the first time
+fn signal_bitmap(s: Signal, size: u32) -> Option<HBITMAP> {
+    let cached = SIGNAL_BITMAPS.with_borrow(|c| c.iter().find(|(m, n, _)| (*m, *n) == (s, size)).map(|e| e.2));
+    if cached.is_some() {
+        return cached;
+    }
+    let b = rasterize(&signal_svg(s), size).and_then(|pm| menu_bitmap(&pm));
+    let b = b.inspect_err(|e| warn!("signal bars: {e:#}")).ok()?;
+    SIGNAL_BITMAPS.with_borrow_mut(|c| c.push((s, size, b)));
+    Some(b)
+}
+
+/// A small icon's side at `dpi`: the tray icon's, and the menu's images
+fn small_icon_size(dpi: u32) -> u32 {
+    // SAFETY: plain query
+    unsafe { GetSystemMetricsForDpi(SM_CXSMICON, dpi) }.max(16) as u32
+}
+
+/// `items` without their signal bars, for telling whether an open menu's stale
+fn without_signal(items: &[Item]) -> Vec<Item> {
+    items.iter().map(|i| Item { signal: None, sub: without_signal(&i.sub), ..i.clone() }).collect()
+}
+
 /// Pops up `items` at `at` until something's picked or it's closed; 0 for nothing
 fn track(hwnd: HWND, items: &[Item], at: POINT) -> usize {
+    // The image size for the monitor it opens on, which may not be at the system's DPI
+    // SAFETY: plain queries
+    let dpi = unsafe {
+        let (mut x, mut y) = (0, 0);
+        let monitor = MonitorFromPoint(at, MONITOR_DEFAULTTONEAREST);
+        match GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut x, &mut y) {
+            Ok(()) => x,
+            Err(_) => GetDpiForSystem(),
+        }
+    };
+    let size = small_icon_size(dpi);
     // SAFETY: the menus are ours and destroyed below, submenus with the top; the strings outlive
-    // AppendMenuW, which copies them
+    // AppendMenuW, which copies them; the bitmaps are cached until quit
     unsafe {
-        let Some(m) = build_menu(items) else { return 0 };
+        let Some(m) = build_menu(items, size) else { return 0 };
         // Without the window in front, the menu won't close on a click elsewhere
         let _ = SetForegroundWindow(hwnd);
         // A menu underlines its shortcut letters only after keyboard input, and the window's UI
@@ -978,20 +1085,29 @@ fn track(hwnd: HWND, items: &[Item], at: POINT) -> usize {
 ///
 /// # Safety
 /// The caller destroys what it returns.
-unsafe fn build_menu(items: &[Item]) -> Option<HMENU> {
+unsafe fn build_menu(items: &[Item], size: u32) -> Option<HMENU> {
     // SAFETY: as the caller promises; a submenu that fails goes with its parent
     unsafe {
         let m = CreatePopupMenu().ok()?;
-        for i in items {
+        for (n, i) in items.iter().enumerate() {
             let text = wide(&i.text);
             let (flags, id) = match i.sub.is_empty() {
                 true => (i.flags, i.id),
-                false => match build_menu(&i.sub) {
+                false => match build_menu(&i.sub, size) {
                     Some(sub) => (i.flags | MF_POPUP, sub.0 as usize),
                     None => (i.flags | MF_GRAYED, 0),
                 },
             };
             let _ = AppendMenuW(m, flags, id, PCWSTR(text.as_ptr()));
+            if let Some(b) = i.signal.and_then(|s| signal_bitmap(s, size)) {
+                let info = MENUITEMINFOW {
+                    cbSize: size_of::<MENUITEMINFOW>() as u32,
+                    fMask: MIIM_BITMAP,
+                    hbmpItem: b,
+                    ..Default::default()
+                };
+                let _ = SetMenuItemInfoW(m, n as u32, true, &info);
+            }
         }
         Some(m)
     }
@@ -1159,7 +1275,8 @@ fn menu_items(s: &Status, pct: impl Fn(&[u8; 6]) -> Option<u8>) -> Vec<Item> {
             ),
             Item::new(MF_STRING, id::of(n, id::DISCONNECT), tr!("controller-disconnect")),
         ];
-        let line = Item { sub, ..Item::new(MF_STRING, 0, controller_line(c, pct(&c.mac), &mut used)) };
+        let line =
+            Item { sub, signal: c.signal, ..Item::new(MF_STRING, 0, controller_line(c, pct(&c.mac), &mut used)) };
         items.push(line);
     }
     for sh in &s.shunned {
@@ -1183,8 +1300,8 @@ impl State {
     fn load_icons(&mut self) -> Result<()> {
         self.free_icons();
         let palette = if self.light { &LIGHT } else { &DARK };
-        // SAFETY: plain queries
-        let size = unsafe { GetSystemMetricsForDpi(SM_CXSMICON, GetDpiForSystem()) }.max(16) as u32;
+        // SAFETY: plain query
+        let size = small_icon_size(unsafe { GetDpiForSystem() });
         for icon in Icon::all() {
             let badges = BADGES.map(Some).filter(|_| icon.takes_badge());
             for badge in std::iter::once(None).chain(badges) {
@@ -1491,7 +1608,10 @@ impl State {
             self.frame_at = Instant::now();
             self.show(next, NIM_MODIFY, None);
         }
-        let stale = MENU_SHOWN.with_borrow(|shown| shown.as_ref().is_some_and(|items| *items != self.menu_items()));
+        // Not for the signal bars alone: reopening would collapse an open submenu each time a link
+        // flickers. They catch up the next time the menu opens.
+        let stale = MENU_SHOWN
+            .with_borrow(|shown| shown.as_ref().is_some_and(|items| *items != without_signal(&self.menu_items())));
         if stale {
             MENU_REOPEN.set(true);
             // SAFETY: plain call; closes the menu this thread has open
@@ -1744,8 +1864,79 @@ mod tests {
                 }
             }
             status_strip.save_png(out.join("status_strip.png")).unwrap();
+            // The menu's always light, so its signal bars are the same either way
+            if theme == "light" {
+                let mut signal_strip = Pixmap::new(4 * SIZE + 3 * GAP, SIZE).unwrap();
+                signal_strip.fill(resvg::tiny_skia::Color::from_rgba8(0x80, 0x80, 0x80, 0xFF));
+                let menu_bg = resvg::tiny_skia::Color::from_rgba8(0xF9, 0xF9, 0xF9, 0xFF);
+                for (i, s) in SIGNALS.into_iter().enumerate() {
+                    let mut pm = Pixmap::new(SIZE, SIZE).unwrap();
+                    pm.fill(menu_bg);
+                    let fg = rasterize(&signal_svg(s), SIZE).unwrap();
+                    pm.draw_pixmap(0, 0, fg.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
+                    pm.save_png(out.join(format!("signal_{}.png", format!("{s:?}").to_lowercase()))).unwrap();
+                    let x = (i as u32 * (SIZE + GAP)) as i32;
+                    signal_strip.draw_pixmap(x, 0, pm.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
+                }
+                signal_strip.save_png(out.join("signal_strip.png")).unwrap();
+            }
             strip.save_png(out.join("pairing_strip.png")).unwrap();
             spinner_strip.save_png(out.join("spinner_strip.png")).unwrap();
+        }
+    }
+
+    const SIGNALS: [Signal; 4] = [Signal::Dropping, Signal::Low, Signal::Fair, Signal::Good];
+
+    /// Each bar's color, left to right
+    fn bars(s: Signal) -> Vec<String> {
+        let svg = signal_svg(s);
+        let places = signal_bars().1.into_iter().map(|(place, _)| place);
+        let mut bars: Vec<(usize, String)> = places
+            .zip(svg.split("<path").skip(1))
+            .map(|(place, p)| (place, p.split("stroke=\"").nth(1).unwrap().split('"').next().unwrap().to_owned()))
+            .collect();
+        bars.sort();
+        bars.into_iter().map(|(_, c)| c).collect()
+    }
+
+    #[test]
+    fn menu_items_carry_their_bars() {
+        use windows::Win32::UI::WindowsAndMessaging::GetMenuItemInfoW;
+        let s = Status { controllers: vec![up(1, "A", false)], ..Default::default() };
+        let items = menu_items(&s, |_| Some(50));
+        let at = items.iter().position(|i| i.signal.is_some()).unwrap();
+        // SAFETY: our menu, destroyed below; info outlives the call
+        unsafe {
+            let m = build_menu(&items, 16).unwrap();
+            let mut info =
+                MENUITEMINFOW { cbSize: size_of::<MENUITEMINFOW>() as u32, fMask: MIIM_BITMAP, ..Default::default() };
+            GetMenuItemInfoW(m, at as u32, true, &mut info).unwrap();
+            // The cached one, rendered once
+            assert_eq!(Some(info.hbmpItem), signal_bitmap(Signal::Good, 16));
+            assert_eq!(SIGNAL_BITMAPS.with_borrow(Vec::len), 1);
+            let _ = DestroyMenu(m);
+        }
+        // A change in the bars alone doesn't make an open menu stale
+        let mut weaker = s.clone();
+        weaker.controllers[0].signal = Some(Signal::Low);
+        let weaker = menu_items(&weaker, |_| Some(50));
+        assert_ne!(weaker, items);
+        assert_eq!(without_signal(&weaker), without_signal(&items));
+    }
+
+    #[test]
+    fn signal_bars_light_from_the_left() {
+        let (u, r, y, g) = (SIGNAL_UNLIT, LIGHT.red, LIGHT.yellow, LIGHT.green);
+        assert_eq!(bars(Signal::Dropping), [u, u, u]);
+        assert_eq!(bars(Signal::Low), [r, u, u]);
+        assert_eq!(bars(Signal::Fair), [y, y, u]);
+        assert_eq!(bars(Signal::Good), [g, g, g]);
+        for s in SIGNALS {
+            let pm = rasterize(&signal_svg(s), 16).unwrap();
+            assert!(pm.pixels().iter().any(|px| px.alpha() > 0), "{s:?} is blank");
+            let b = menu_bitmap(&pm).unwrap();
+            // SAFETY: just made, used by nothing
+            let _ = unsafe { DeleteObject(b.into()) };
         }
     }
 
@@ -1813,7 +2004,14 @@ mod tests {
 
     fn up(mac: u8, name: &str, vban: bool) -> Connected {
         let battery = Battery { charging: false, band: 50, reading: 0xD500, critical: false, must_charge: false };
-        Connected { mac: [mac; 6], name: Some(name.into()), port: Some(mac), battery: Some(battery), vban }
+        Connected {
+            mac: [mac; 6],
+            name: Some(name.into()),
+            port: Some(mac),
+            battery: Some(battery),
+            vban,
+            signal: Some(Signal::Good),
+        }
     }
 
     #[test]
@@ -1846,6 +2044,10 @@ mod tests {
         };
         let items = menu_items(&s, |m| Some(m[0] * 10));
         let texts: Vec<&str> = items.iter().map(|i| i.text.as_str()).collect();
+        // The bars go on each controller's line and nowhere else
+        let signals: Vec<_> = items.iter().filter_map(|i| i.signal).collect();
+        assert_eq!(signals, [Signal::Good, Signal::Good]);
+        assert_eq!(items[3].signal, Some(Signal::Good));
         assert_eq!(
             texts,
             [

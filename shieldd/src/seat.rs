@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use ozproto::wire::ETHERTYPE;
 use ozproto::{Config, Event, Host};
-use rtlusb::Link;
+use rtlusb::{Link, LinkQuality};
 use shdlib::vban;
 use shdnet::mac::{Mac, MacFmt};
 use shdtray::Connected;
@@ -15,6 +15,7 @@ use tracing::{debug, info, trace, warn};
 use crate::controller::{Controller, HEADSET_EP, Report};
 use crate::hex;
 use crate::outputs::{Desktop, Gamepad};
+use crate::signal;
 
 /// XInput's four ports
 pub const MAX_SEATS: usize = shdtray::MAX_CONTROLLERS;
@@ -46,6 +47,8 @@ pub struct Seat {
     /// Rumble waiting for the controller to take the previous one
     rumble: Option<[u16; 3]>,
     pub last_rx: Option<Instant>,
+    /// Its last frame, for the signal bars; unlike last_rx, never cleared
+    heard_at: Option<Instant>,
     /// Headset audio's next isoc frame number
     isoc_frame: u8,
     pub leaving: Option<Leaving>,
@@ -57,6 +60,8 @@ pub struct Seat {
     pub vban: bool,
     /// Its virtual pad couldn't be plugged in, and why; radio.rs sends it away
     pub pad_failed: Option<String>,
+    /// The signal bars the tray shows for it
+    signal: signal::Shown,
 }
 
 impl Seat {
@@ -70,12 +75,14 @@ impl Seat {
             pad: Gamepad::new(),
             rumble: None,
             last_rx: None,
+            heard_at: None,
             isoc_frame: 0,
             leaving: None,
             joining: None,
             join_gave_up: false,
             vban,
             pad_failed: None,
+            signal: signal::Shown::default(),
         }
     }
 
@@ -90,14 +97,34 @@ impl Seat {
         self.host.peer().is_some() && self.ctl.battery().is_some()
     }
 
-    /// What the tray lists for it, if it has a session
-    pub fn connected(&mut self, name: Option<String>) -> Option<Connected> {
-        self.host.peer()?;
-        Some(Connected { mac: self.mac, name, port: self.pad.port(), battery: self.ctl.battery(), vban: self.vban })
+    /// What the tray lists for it, if it has a session; `q` is its link quality from rtlusb
+    pub fn connected(&mut self, now: Instant, name: Option<String>, q: Option<LinkQuality>) -> Option<Connected> {
+        if self.host.peer().is_none() {
+            self.signal.reset();
+            return None;
+        }
+        let was = self.signal.shown();
+        let heard = self.heard_at.is_some_and(|t| now.duration_since(t) <= signal::HEARD_WITHIN);
+        let signal = self.signal.update(now, signal::of(q.as_ref(), heard));
+        if was != Some(signal) {
+            let q = q.unwrap_or_default();
+            let (dbm, tx_fail, rx_retry, rx_dup) = (q.dbm, q.tx_fail, q.rx_retry, q.rx_dup);
+            let vban = self.vban;
+            info!(sta = %self.mac.fmt(), ?signal, ?dbm, tx_fail, rx_retry, rx_dup, vban, "signal");
+        }
+        Some(Connected {
+            mac: self.mac,
+            name,
+            port: self.pad.port(),
+            battery: self.ctl.battery(),
+            vban: self.vban,
+            signal: Some(signal),
+        })
     }
 
     pub fn on_frame(&mut self, now: Instant, payload: &[u8], desktop: &mut Desktop) {
         self.last_rx = Some(now);
+        self.heard_at = Some(now);
         for ev in self.host.on_frame(now, self.mac, payload) {
             self.on_event(ev, now, desktop);
         }

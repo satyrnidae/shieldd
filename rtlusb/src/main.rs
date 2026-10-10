@@ -204,6 +204,8 @@ fn ap_cmd(
             };
             if p.c2h {
                 tx.on_c2h(p.frame);
+                // For Bss::note_tx and the signal bars; nothing here wants them
+                tx.take_reports();
                 return Ok(());
             }
             let f = p.frame;

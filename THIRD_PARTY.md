@@ -106,7 +106,8 @@ Installed separately by the user; nothing from them ships with this project.
 ### Ikono Bold Line Icons
 - **Used for:** the tray icons, `shdtray/res/battery-*-svgrepo-com.svg` and
   `shdtray/res/loading-spinner-svgrepo-com.svg`, embedded in `shdtray` and recolored per theme at
-  runtime. `battery-empty` is the outline of the set's battery icons.
+  runtime. `battery-empty` is the outline of the set's battery icons. Also the menu's signal bars,
+  `shdtray/res/graph-asc-svgrepo-com.svg`, recolored per level.
 - **License:** MIT.
 - **Author:** Will Kelly. Retrieved via SVG Repo, https://www.svgrepo.com
 

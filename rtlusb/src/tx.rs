@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 use nusb::transfer::{Buffer, Bulk, Out};
+use shdnet::mac::Mac;
 use tracing::{debug, trace};
 
 use crate::usb::Rtl;
@@ -139,6 +140,7 @@ struct Pending {
     sn: u8,
     sent: Instant,
     fc: u16,
+    dst: Mac,
 }
 
 /// Firmware TX reports since the last take_stats
@@ -158,13 +160,15 @@ pub struct Tx {
     next_sn: u8,
     pending: VecDeque<Pending>,
     stats: TxStats,
+    /// Each report since the last take_reports: who it was to, and whether it failed
+    reports: Vec<(Mac, bool)>,
 }
 
 impl Tx {
     pub fn new(rtl: &Rtl) -> Result<Self> {
         let eps =
             rtl.bulk_out.iter().map(|&a| Ok((a, rtl.interface().endpoint::<Bulk, Out>(a)?))).collect::<Result<_>>()?;
-        Ok(Self { eps, next_sn: 0, pending: VecDeque::new(), stats: TxStats::default() })
+        Ok(Self { eps, next_sn: 0, pending: VecDeque::new(), stats: TxStats::default(), reports: Vec::new() })
     }
 
     fn ep(&mut self, addr: u8) -> &mut nusb::Endpoint<Bulk, Out> {
@@ -175,7 +179,7 @@ impl Tx {
     pub fn send(&mut self, rtl: &Rtl, mut info: TxInfo, frame: &[u8]) -> Result<()> {
         // Unicast only: nothing ACKs a broadcast
         if info.track && info.qsel != QSEL_BEACON && frame.len() >= 10 && frame[4] & 1 == 0 {
-            info.report = Some(self.track(u16::from_le_bytes([frame[0], frame[1]])));
+            info.report = Some(self.track(u16::from_le_bytes([frame[0], frame[1]]), frame[4..10].try_into().unwrap()));
         }
         let mut buf = Buffer::new(DESC_SIZE + frame.len());
         buf.extend_from_slice(&desc(info, frame));
@@ -199,9 +203,9 @@ impl Tx {
 }
 
 impl Tx {
-    /// Counts a frame with control field `fc` in flight and returns its sn. Skips any sn still
-    /// pending: a frame whose report got lost would otherwise take the next one's report.
-    fn track(&mut self, fc: u16) -> u8 {
+    /// Counts a frame with control field `fc` to `dst` in flight and returns its sn. Skips any sn
+    /// still pending: a frame whose report got lost would otherwise take the next one's report.
+    fn track(&mut self, fc: u16, dst: Mac) -> u8 {
         if self.pending.len() >= MAX_PENDING {
             self.pending.pop_front();
             self.stats.unreported += 1;
@@ -211,7 +215,7 @@ impl Tx {
             .find(|&sn| self.pending.iter().all(|p| p.sn != sn))
             .expect("fewer than SNS pending");
         self.next_sn = sn;
-        self.pending.push_back(Pending { sn, sent: Instant::now(), fc });
+        self.pending.push_back(Pending { sn, sent: Instant::now(), fc, dst });
         sn
     }
 
@@ -229,6 +233,7 @@ impl Tx {
             return true;
         };
         let p = self.pending.remove(i).expect("found above");
+        self.reports.push((p.dst, failed));
         self.stats.retries += retries as u32;
         self.stats.max_retries = self.stats.max_retries.max(retries);
         if failed {
@@ -246,6 +251,11 @@ impl Tx {
             }
         }
         true
+    }
+
+    /// Reports since the last call, by destination, for Bss::note_tx
+    pub fn take_reports(&mut self) -> Vec<(Mac, bool)> {
+        std::mem::take(&mut self.reports)
     }
 
     /// Data frames sent in the last `window` without a report yet: roughly what's sitting in the chip
@@ -306,23 +316,29 @@ mod tests {
 
     #[test]
     fn lost_reports_dont_share_an_sn() {
-        let mut tx = Tx { eps: Vec::new(), next_sn: 0, pending: VecDeque::new(), stats: TxStats::default() };
-        let lost = tx.track(0x0088);
+        let mut tx = Tx {
+            eps: Vec::new(),
+            next_sn: 0,
+            pending: VecDeque::new(),
+            stats: TxStats::default(),
+            reports: Vec::new(),
+        };
+        let lost = tx.track(0x0088, [2; 6]);
         // A full lap of sns later, the lost one's still pending and gets skipped
-        let sns: Vec<u8> = (0..SNS - 1).map(|_| tx.track(0x0088)).collect();
+        let sns: Vec<u8> = (0..SNS - 1).map(|_| tx.track(0x0088, [2; 6])).collect();
         assert!(!sns.contains(&lost));
         for &sn in &sns {
             assert!(tx.on_c2h(&report(sn)));
         }
         assert_eq!(tx.pending.len(), 1);
         assert_eq!(tx.pending[0].sn, lost);
-        let next = tx.track(0x0088);
+        let next = tx.track(0x0088, [2; 6]);
         assert_ne!(next, lost);
         assert!(tx.on_c2h(&report(next)));
         assert_eq!(tx.pending.iter().map(|p| p.sn).collect::<Vec<_>>(), [lost]);
         // Full: the oldest goes as unreported and its sn's free again
         for _ in 0..SNS {
-            tx.track(0x0088);
+            tx.track(0x0088, [2; 6]);
         }
         assert_eq!(tx.pending.len(), MAX_PENDING);
         assert_eq!(tx.stats.unreported, 1);

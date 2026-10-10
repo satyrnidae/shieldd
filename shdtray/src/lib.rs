@@ -41,6 +41,19 @@ pub struct Status {
     pub shunned: Vec<Shunned>,
 }
 
+/// How well a controller's link is holding up, as the bars by its line in the menu
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Signal {
+    /// About to drop, or nothing heard from it lately: no bars
+    Dropping,
+    /// One red bar
+    Low,
+    /// OK: two yellow bars
+    Fair,
+    /// All three, green
+    Good,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Shunned {
     pub mac: [u8; 6],
@@ -59,6 +72,8 @@ pub struct Connected {
     pub battery: Option<Battery>,
     /// Its mic and headset are on the VBAN streams
     pub vban: bool,
+    /// Its link's signal bars; shieldd's radio host always says. None shows none.
+    pub signal: Option<Signal>,
 }
 
 /// Picked from the menu. The ones for a controller carry its MAC.

@@ -14,6 +14,7 @@ use tracing::{debug, info, trace, warn};
 use crate::ap::{ApConfig, WpsConfig};
 use crate::bss::{Bss, Event};
 use crate::chip::Chip;
+use crate::quality::LinkQuality;
 use crate::tx::{Tx, TxInfo};
 use crate::{phy, rx, survey, wpa};
 
@@ -110,6 +111,11 @@ impl Link<'_> {
     /// See Bss::is_associated
     pub fn is_associated(&self, sta: &Mac) -> bool {
         self.bss.is_associated(sta)
+    }
+
+    /// See Bss::quality
+    pub fn quality(&self, sta: &Mac) -> Option<LinkQuality> {
+        self.bss.quality(sta)
     }
 }
 
@@ -228,6 +234,15 @@ impl Radio {
                     debug!(direct, dropped, "downlink backed up, frames dropped, last 5 s");
                 }
                 debug!(direct, on_wake, timed_out, max_wait_ms, stream, "power save, last 5 s");
+                // Which rates its resends come at, and whether our streaming had the air
+                for (sta, rates) in bss.take_rx_rates() {
+                    let rates: Vec<String> = rates
+                        .iter()
+                        .map(|&(r, first, again)| format!("{} {first}/{again}", rx::rate_name(r)))
+                        .collect();
+                    let rates = rates.join(", ");
+                    debug!(sta = sta.fmt(), rates, stream, "rx by rate, first tries/resends, last 5 s");
+                }
                 let s = tx.take_stats();
                 let (acked, failed, unreported, retries, max_retries) =
                     (s.acked, s.failed, s.unreported, s.retries, s.max_retries);
@@ -245,6 +260,9 @@ impl Radio {
                 if !tx.on_c2h(p.frame) {
                     trace!(c2h = ?p.frame, "C2H");
                 }
+                for (dst, failed) in tx.take_reports() {
+                    bss.note_tx(&dst, failed);
+                }
                 return Ok(());
             }
             let Some(p) = p else {
@@ -257,6 +275,7 @@ impl Radio {
             if frame.len() >= 16 {
                 let fc = u16::from_le_bytes([frame[0], frame[1]]);
                 let sa: Mac = frame[10..16].try_into().unwrap();
+                bss.note_rx(&sa, frame, p.dbm, p.rate);
                 if rx::frame_kind(fc) == "probe-req" && bss.cfg.wants(frame) && !bss.is_shunned(&sa) {
                     tx.send(&chip.rtl, TxInfo::mgmt(), &bss.cfg.probe_resp(&sa))?;
                 }

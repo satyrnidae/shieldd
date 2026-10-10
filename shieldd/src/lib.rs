@@ -33,6 +33,8 @@ mod radio;
 mod receiver;
 #[cfg(windows)]
 mod seat;
+#[cfg(windows)]
+mod signal;
 #[cfg(target_os = "linux")]
 mod transmit;
 

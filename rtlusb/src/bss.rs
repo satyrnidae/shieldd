@@ -17,6 +17,7 @@ use tracing::{debug, info, trace, warn};
 
 use crate::ap::{ApConfig, RSN, WMM_PARAM};
 use crate::chip::Chip;
+use crate::quality::LinkQuality;
 use crate::sec::{CAM_ENTRIES, FIRST_PAIRWISE_ENTRY};
 use crate::tx::{RATE_6M, Tx, TxInfo};
 use crate::wpa::{self, Pmk};
@@ -104,6 +105,10 @@ struct Sta {
     held: VecDeque<Held>,
     /// Its pairwise key's CAM entry, once the 4-way handshake is done
     cam: Option<u8>,
+    /// Since it authenticated
+    quality: LinkQuality,
+    /// Frames from it by rate since the last take_rx_rates: first tries, resends
+    rx_rates: BTreeMap<u8, (u32, u32)>,
 }
 
 /// Power save counters since the last take_ps_stats
@@ -135,6 +140,12 @@ pub struct Bss {
     shunned: BTreeMap<Mac, Instant>,
 }
 
+/// Frames from a station by rate: (rate, first tries, resends)
+pub type RxRates = Vec<(u8, u32, u32)>;
+
+/// Frame control's retry bit: a resend
+const FC_RETRY: u16 = 0x0800;
+
 fn fc_of(f: &[u8]) -> u16 {
     u16::from_le_bytes([f[0], f[1]])
 }
@@ -159,6 +170,62 @@ impl Bss {
     pub fn set_wps(&mut self, chip: &Chip, tx: &mut Tx, wps: Option<crate::ap::WpsConfig>) -> Result<()> {
         self.cfg.wps = wps;
         chip.download_beacon(tx, &self.cfg.beacon())
+    }
+
+    /// Frame `f` from `sta`, if it's one of ours, with its signal and rate. Before handle, which
+    /// moves last_seq on.
+    pub fn note_rx(&mut self, sta: &Mac, f: &[u8], dbm: Option<i8>, rate: u8) {
+        let sequenced = self.sequenced(f);
+        let Some(s) = self.stas.get_mut(sta) else { return };
+        let fc = fc_of(f);
+        let retry = fc & FC_RETRY != 0;
+        // Only for the debug log; not part of the signal bars
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            let n = s.rx_rates.entry(rate).or_default();
+            if retry {
+                n.1 += 1;
+            } else {
+                n.0 += 1;
+            }
+        }
+        let dup = retry && sequenced && s.last_seq == Some(u16::from_le_bytes([f[22], f[23]]));
+        s.quality.on_rx(dbm, retry, dup);
+    }
+
+    /// Data to us from a station, not null: the frames handle passes to on_data, which keeps
+    /// last_seq for them. Shared with note_rx, so its dups count the same frames.
+    fn sequenced(&self, f: &[u8]) -> bool {
+        if f.len() < 28 {
+            return false;
+        }
+        let fc = fc_of(f);
+        let (ty, sub) = ((fc >> 2) & 3, (fc >> 4) & 0xf);
+        ty == 2 && sub & 0x4 == 0 && fc & 0x0300 == 0x0100 && addr(f, 4) == self.cfg.bssid
+    }
+
+    /// A TX report for a frame to `sta`, if it's one of ours
+    pub fn note_tx(&mut self, sta: &Mac, failed: bool) {
+        if let Some(s) = self.stas.get_mut(sta) {
+            s.quality.on_tx(failed);
+        }
+    }
+
+    /// Each station's frames by rate since the last call: (rate, first tries, resends)
+    pub fn take_rx_rates(&mut self) -> Vec<(Mac, RxRates)> {
+        let mut out: Vec<_> = self
+            .stas
+            .iter_mut()
+            .filter(|(_, s)| !s.rx_rates.is_empty())
+            .map(|(m, s)| (*m, std::mem::take(&mut s.rx_rates).into_iter().map(|(r, (a, b))| (r, a, b)).collect()))
+            .collect();
+        out.sort_by_key(|(m, _)| *m);
+        out
+    }
+
+    /// How well `sta` is getting through, for any station from authentication on. A new
+    /// authentication starts it over; a report for a frame sent before that still counts.
+    pub fn quality(&self, sta: &Mac) -> Option<LinkQuality> {
+        self.stas.get(sta).map(|s| s.quality)
     }
 
     /// Past the 4-way handshake, so data to it can go out
@@ -315,6 +382,8 @@ impl Bss {
                 dozing: false,
                 held: VecDeque::new(),
                 cam: None,
+                quality: LinkQuality::default(),
+                rx_rates: BTreeMap::new(),
             };
             self.stas.insert(sa, sta);
             info!(sta = sa.fmt(), "authenticated");
@@ -664,7 +733,7 @@ impl Bss {
         if ty == 0 && to_us {
             // A retry of something we already answered: only our ACK got lost
             let seq = u16::from_le_bytes([f[22], f[23]]);
-            if fc & 0x0800 != 0 && self.stas.get(&sa).is_some_and(|s| s.last_mgmt_seq == Some(seq)) {
+            if fc & FC_RETRY != 0 && self.stas.get(&sa).is_some_and(|s| s.last_mgmt_seq == Some(seq)) {
                 debug!(sta = sa.fmt(), sub, "management retry dropped");
                 return Ok(None);
             }
@@ -680,7 +749,8 @@ impl Bss {
             }
             return res;
         }
-        if ty == 2 && to_us && fc & 0x0300 == 0x0100 {
+        // Null and QoS null data only signal power save, above
+        if self.sequenced(f) {
             return self.on_data(chip, tx, sa, f, decrypted);
         }
         Ok(None)
@@ -689,14 +759,11 @@ impl Bss {
     fn on_data(&mut self, chip: &Chip, tx: &mut Tx, sa: Mac, f: &[u8], decrypted: bool) -> Result<Option<Event>> {
         let fc = fc_of(f);
         let sub = (fc >> 4) & 0xf;
-        if sub & 0x4 != 0 {
-            return Ok(None); // Null / QoS null: power save signaling only
-        }
         let Some(sta) = self.stas.get_mut(&sa) else {
             return Ok(None);
         };
         let seq = u16::from_le_bytes([f[22], f[23]]);
-        if fc & 0x0800 != 0 && sta.last_seq == Some(seq) {
+        if fc & FC_RETRY != 0 && sta.last_seq == Some(seq) {
             return Ok(None); // Retransmission we already have
         }
         sta.last_seq = Some(seq);
@@ -873,6 +940,8 @@ mod tests {
             dozing: false,
             held: VecDeque::new(),
             cam: None,
+            quality: LinkQuality::default(),
+            rx_rates: BTreeMap::new(),
         };
         let f = bss.data_frame(&[2; 6], &sta, true, 0x892e, &[0xee]);
         assert_eq!(&f[0..2], &[0x88, 0x42]);
@@ -896,7 +965,40 @@ mod tests {
             dozing: false,
             held: VecDeque::new(),
             cam,
+            quality: LinkQuality::default(),
+            rx_rates: BTreeMap::new(),
         }
+    }
+
+    /// A data frame from station 2 to `to`, ToDS, with its retry bit and sequence control
+    fn data_from_2(to: Mac, retry: bool, seq: u16, null: bool) -> Vec<u8> {
+        let fc: u16 = 0x0008 | 0x0100 | if retry { FC_RETRY } else { 0 } | if null { 0x0040 } else { 0 };
+        let mut f = vec![0; 28];
+        f[0..2].copy_from_slice(&fc.to_le_bytes());
+        f[4..10].copy_from_slice(&to);
+        f[10..16].copy_from_slice(&[2; 6]);
+        f[22..24].copy_from_slice(&seq.to_le_bytes());
+        f
+    }
+
+    #[test]
+    fn a_resend_of_data_we_have_is_a_dup() {
+        let mut bss = Bss::new(cfg(), [0; 32]);
+        let mut s = sta(None);
+        s.last_seq = Some(0x120);
+        bss.stas.insert([2; 6], s);
+        let dup = |bss: &mut Bss, f: &[u8]| {
+            let before = bss.quality(&[2; 6]).unwrap().rx_dup;
+            bss.note_rx(&[2; 6], f, None, 0);
+            bss.quality(&[2; 6]).unwrap().rx_dup > before
+        };
+        assert!(dup(&mut bss, &data_from_2([1; 6], true, 0x120, false)));
+        assert!(!dup(&mut bss, &data_from_2([1; 6], true, 0x130, false)), "a resend we never had the first of");
+        assert!(!dup(&mut bss, &data_from_2([1; 6], false, 0x120, false)), "not marked a resend");
+        assert!(!dup(&mut bss, &data_from_2([9; 6], true, 0x120, false)), "not to us");
+        assert!(!dup(&mut bss, &data_from_2([1; 6], true, 0x120, true)), "null data");
+        let resends = bss.quality(&[2; 6]).unwrap().rx_retry;
+        assert!(resends > 0.0, "every retry bit counts toward the resends, dup or not");
     }
 
     #[test]

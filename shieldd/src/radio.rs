@@ -569,8 +569,10 @@ fn run_once(args: &Args, start: Start, quit: &AtomicBool, sh: &mut Shared) -> Re
                             seat.last_rx = None;
                         }
                     }
-                    let controllers =
-                        seats.iter_mut().filter_map(|s| s.connected(names.get(&s.mac).cloned())).collect();
+                    let controllers = seats
+                        .iter_mut()
+                        .filter_map(|s| s.connected(now, names.get(&s.mac).cloned(), link.quality(&s.mac)))
+                        .collect();
                     let shunned = link
                         .shunned()
                         .into_iter()
