@@ -187,11 +187,12 @@ bolt while it charges, the bolt flashing green for
 5 s when it's plugged in; an all-green full battery once it's charged, like the controller's
 light turning green, which it reads from the charger letting go after a top-off, or from one
 plugged in full getting no top-off within 30 s; and an all-red one with a flashing warning mark
-when it's critical. A crossed-out signal flashes red for 5 s at startup and when a
+when it's critical. A crossed-out signal flashes red for 5 s at startup and when the
 last controller drops off on its own rather than sent away. A spinner turns while one is
 joining with none up yet, and a Wi-Fi signal lights up blue, a bar at a time, while pairing.
-Critical and empty battery notifications name the controller. A controller joining or leaving
-Wi-Fi plays Windows' Device Connect or Device Disconnect sound, as a USB device would.
+Critical and empty battery notifications name the controller. With more than one controller
+connected, a blue badge in the icon's lower right corner says how many. A controller joining or
+leaving Wi-Fi plays Windows' Device Connect or Device Disconnect sound, as a USB device would.
 
 Click for a menu. Its title shows the version, how many controllers are connected, and the
 group's name and channel; clicking the version opens an About box with the build date, license and

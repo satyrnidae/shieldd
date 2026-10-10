@@ -105,6 +105,14 @@ const FLASH_FRAME: Duration = Duration::from_millis(800);
 /// time a controller leaves on its own, rather than sent away; the charging bolt each time
 /// charging starts
 const FLASH_FOR: Duration = Duration::from_secs(5);
+/// How many controllers the corner badge can count: one has none, and four is all there can be
+const BADGES: std::ops::RangeInclusive<u8> = 2..=4;
+/// The badge's side, as a share of the icon's
+const BADGE_SCALE: f32 = 5.0 / 8.0;
+/// Where the ring around each Phosphor digit ends, the pen back at (128, 216). The number's
+/// first move is relative to that.
+const BADGE_RING_END: &str = "Zm0,192a88,88,0,1,1,88-88A88.09957,88.09957,0,0,1,128,216Z";
+
 /// The wifi icon's elements, by class, in the order they light up: the dot, then the arcs
 /// inside out
 const PAIRING_ORDER: [&str; 4] = ["path-1", "path-4", "path-3", "path-2"];
@@ -241,6 +249,48 @@ impl Icon {
             _ => rasterize(&self.svg(p), size),
         }
     }
+
+    /// One of the battery icons, as opposed to the signal, pairing and spinner ones
+    fn is_battery(self) -> bool {
+        !matches!(self, Icon::Disconnected | Icon::DisconnectedRed | Icon::Pairing(_) | Icon::Spinner(_))
+    }
+
+    /// Whether it can carry a count badge: not with nothing connected
+    fn takes_badge(self) -> bool {
+        !matches!(self, Icon::Disconnected | Icon::DisconnectedRed)
+    }
+
+    /// As pixmap, with the count badge in the lower right corner, if any
+    fn badged(self, p: &Palette, size: u32, badge: Option<u8>) -> Result<Pixmap> {
+        let Some(n) = badge else { return self.pixmap(p, size) };
+        // A battery's narrow enough to step aside to the left, out from under the badge
+        let mut pm = match self.is_battery() {
+            true => fit(&self.svg(p), size, false),
+            false => self.pixmap(p, size),
+        }?;
+        let svg = badge_svg(n, p).with_context(|| format!("no badge for {n}"))?;
+        let side = ((size as f32 * BADGE_SCALE).round() as u32).max(1);
+        let b = rasterize(&svg, side)?;
+        let at = (size - side) as i32;
+        pm.draw_pixmap(at, at, b.as_ref(), &resvg::tiny_skia::PixmapPaint::default(), Transform::identity(), None);
+        Ok(pm)
+    }
+}
+
+/// The count badge for `n` controllers, from Phosphor's duotone digits: the disc in blue at
+/// full strength, the ring around it dropped, and the number in the stroke color
+fn badge_svg(n: u8, p: &Palette) -> Option<String> {
+    let svg = match n {
+        2 => include_str!("../res/number-circle-two-duotone-svgrepo-com.svg"),
+        3 => include_str!("../res/number-circle-three-duotone-svgrepo-com.svg"),
+        4 => include_str!("../res/number-circle-four-duotone-svgrepo-com.svg"),
+        _ => return None,
+    };
+    let (head, number) = svg.split_once(BADGE_RING_END)?;
+    let d = head.rfind("d=\"")? + 3;
+    let svg = format!("{}M128,216{number}", &head[..d]);
+    let disc = format!("<circle fill=\"{}\" ", p.blue);
+    Some(svg.replace("<g opacity=\"0.2\">", "<g>").replacen("<circle ", &disc, 1).replace("#000000", p.stroke))
 }
 
 /// Taskbar colors for one theme
@@ -321,12 +371,17 @@ fn light_taskbar() -> bool {
 /// The drawing itself, stroke included, fit to a `size` square and centered; the canvas has
 /// margins
 fn rasterize(svg: &str, size: u32) -> Result<Pixmap> {
+    fit(svg, size, true)
+}
+
+/// As rasterize, but against the left edge unless `center`
+fn fit(svg: &str, size: u32, center: bool) -> Result<Pixmap> {
     let tree = usvg::Tree::from_str(svg, &usvg::Options::default()).context("parsing icon")?;
     let mut pm = Pixmap::new(size, size).context("icon pixmap")?;
     let bb = tree.root().abs_stroke_bounding_box();
     let side = size as f32;
     let scale = side / bb.width().max(bb.height());
-    let tx = (side - bb.width() * scale) / 2.0 - bb.x() * scale;
+    let tx = if center { (side - bb.width() * scale) / 2.0 } else { 0.0 } - bb.x() * scale;
     let ty = (side - bb.height() * scale) / 2.0 - bb.y() * scale;
     resvg::render(&tree, Transform::from_row(scale, 0.0, 0.0, scale, tx, ty), &mut pm.as_mut());
     Ok(pm)
@@ -688,7 +743,10 @@ struct State {
     rx: Receiver<Msg>,
     light: bool,
     last_theme: Instant,
-    icons: Vec<(Icon, HICON)>,
+    /// Every icon, with each count badge it takes
+    icons: Vec<(Icon, Option<u8>, HICON)>,
+    /// The count badge to show, with more than one controller connected
+    badge: Option<u8>,
     /// What's on screen, if the icon is shown
     shown: Option<Icon>,
     status: Status,
@@ -751,6 +809,7 @@ fn run(rx: Receiver<Msg>, commands: Sender<Command>) -> Result<()> {
         light: light_taskbar(),
         last_theme: Instant::now(),
         icons: Vec::new(),
+        badge: None,
         shown: None,
         status: Status::default(),
         watches: HashMap::new(),
@@ -1068,14 +1127,17 @@ impl State {
         // SAFETY: plain queries
         let size = unsafe { GetSystemMetricsForDpi(SM_CXSMICON, GetDpiForSystem()) }.max(16) as u32;
         for icon in Icon::all() {
-            self.icons.push((icon, render(&icon.pixmap(palette, size)?)?));
+            let badges = BADGES.map(Some).filter(|_| icon.takes_badge());
+            for badge in std::iter::once(None).chain(badges) {
+                self.icons.push((icon, badge, render(&icon.badged(palette, size, badge)?)?));
+            }
         }
         debug!(size, light = self.light, "tray icons rendered");
         Ok(())
     }
 
     fn free_icons(&mut self) {
-        for (_, h) in self.icons.drain(..) {
+        for (_, _, h) in self.icons.drain(..) {
             // SAFETY: created by load_icons, no longer referenced
             let _ = unsafe { DestroyIcon(h) };
         }
@@ -1151,6 +1213,8 @@ impl State {
             }
         }
 
+        let n = s.controllers.len();
+        self.badge = u8::try_from(n).ok().filter(|n| BADGES.contains(n));
         let pct = |m: &[u8; 6]| self.watches.get(m).and_then(|w| w.pct);
         let up = lowest(&s.controllers, pct).cloned();
         self.focus = up.as_ref().map(|c| c.mac);
@@ -1245,7 +1309,8 @@ impl State {
     }
 
     fn show(&mut self, icon: Icon, msg: NOTIFY_ICON_MESSAGE, tip: Option<&str>) {
-        let Some(&(_, h)) = self.icons.iter().find(|(i, _)| *i == icon) else { return };
+        let badge = self.badge.filter(|_| icon.takes_badge());
+        let Some(&(.., h)) = self.icons.iter().find(|(i, b, _)| (*i, *b) == (icon, badge)) else { return };
         let mut d = self.data();
         d.uFlags = NIF_ICON | NIF_SHOWTIP | NIF_MESSAGE;
         d.uCallbackMessage = WM_TRAY;
@@ -1463,8 +1528,8 @@ fn about(hwnd: HWND) {
          RTL8812AU/8821AU driver and its halmac layer, (c) Realtek Corporation, and from ozwpan, \
          (c) 2011 Ozmo Inc., all under GPL-2.0. Embeds Realtek's RTL8821A firmware, (c) 2010 Realtek \
          Semiconductor Corporation, unmodified under its own redistribution license, provided AS IS \
-         without warranty. Tray icons from Ikono Bold Line Icons, (c) Will Kelly, and Clarity, (c) VMware, \
-         Inc., both MIT. Rust crates under MIT, Apache-2.0, BSD and similar licenses.\n\n\
+         without warranty. Tray icons from Ikono Bold Line Icons, (c) Will Kelly, Clarity, (c) VMware, \
+         Inc., and Phosphor, (c) Phosphor Icons, all MIT. Rust crates under MIT, Apache-2.0, BSD and similar licenses.\n\n\
          Full license texts and copyright notices are in LICENSE and THIRD_PARTY.md, which come with \
          the source.\n\n\
          Most of shieldd was written by an AI model, Anthropic's Claude, under its maintainer's \
@@ -1523,6 +1588,7 @@ fn confirm_reconfigure(hwnd: HWND) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use resvg::tiny_skia::PixmapPaint;
 
     #[test]
     fn pairing_frames_light_one_at_a_time() {
@@ -1566,21 +1632,31 @@ mod tests {
         exe.ancestors().nth(3).unwrap().join("tests").join("icons")
     }
 
-    /// Every icon in both themes, on its taskbar color, for eyeballing: one PNG each, a strip
-    /// of the status icons and one of the pairing animation
+    /// Every icon in both themes, on its taskbar color, for eyeballing: one PNG each, and strips
+    /// of the status icons, the pairing animation and the spinner. Each strip's first row is
+    /// plain, then a row for each count badge; the icons that take none leave those rows empty.
     #[test]
     fn renders_icons_to_target() {
         const SIZE: u32 = 64;
         const GAP: u32 = 8;
+        let badges: Vec<Option<u8>> = std::iter::once(None).chain(BADGES.map(Some)).collect();
+        let rows = badges.len() as u32;
         let dir = icon_dir();
         for (theme, p, bg) in [("light", &LIGHT, [0xEE, 0xEE, 0xEE]), ("dark", &DARK, [0x20, 0x20, 0x20])] {
             let out = dir.join(theme);
             std::fs::create_dir_all(&out).unwrap();
             let bg = resvg::tiny_skia::Color::from_rgba8(bg[0], bg[1], bg[2], 0xFF);
             let strip_of = |n: u32| {
-                let mut s = Pixmap::new(n * SIZE + (n - 1) * GAP, SIZE).unwrap();
+                let mut s = Pixmap::new(n * SIZE + (n - 1) * GAP, rows * SIZE + (rows - 1) * GAP).unwrap();
                 s.fill(resvg::tiny_skia::Color::from_rgba8(0x80, 0x80, 0x80, 0xFF));
                 s
+            };
+            let on_bg = |icon: Icon, badge: Option<u8>| {
+                let mut pm = Pixmap::new(SIZE, SIZE).unwrap();
+                pm.fill(bg);
+                let fg = icon.badged(p, SIZE, badge).unwrap();
+                pm.draw_pixmap(0, 0, fg.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
+                pm
             };
             let statuses = Icon::FIXED.iter().filter(|i| !matches!(i, Icon::Pairing(_))).count() as u32;
             let mut status_strip = strip_of(statuses);
@@ -1590,11 +1666,10 @@ mod tests {
             let mut spinner_strip = strip_of(8);
             let mut next_status = 0;
             for icon in Icon::all() {
-                let mut pm = Pixmap::new(SIZE, SIZE).unwrap();
-                pm.fill(bg);
-                let fg = icon.pixmap(p, SIZE).unwrap();
-                let paint = resvg::tiny_skia::PixmapPaint::default();
-                pm.draw_pixmap(0, 0, fg.as_ref(), &paint, Transform::identity(), None);
+                if !matches!(icon, Icon::Spinner(n) if n % spun != 0) {
+                    let name = format!("{icon:?}").to_lowercase().replace('(', "_").replace(')', "");
+                    on_bg(icon, None).save_png(out.join(format!("{name}.png"))).unwrap();
+                }
                 let (s, i) = match icon {
                     Icon::Spinner(n) if n % spun == 0 => (&mut spinner_strip, u32::from(n / spun)),
                     // Only the strip for the rest of the turn
@@ -1605,14 +1680,39 @@ mod tests {
                         (&mut status_strip, next_status - 1)
                     }
                 };
-                let name = format!("{icon:?}").to_lowercase().replace('(', "_").replace(')', "");
-                pm.save_png(out.join(format!("{name}.png"))).unwrap();
-                s.draw_pixmap((i * (SIZE + GAP)) as i32, 0, pm.as_ref(), &paint, Transform::identity(), None);
+                for (row, &badge) in badges.iter().enumerate().filter(|(_, b)| b.is_none() || icon.takes_badge()) {
+                    let (x, y) = ((i * (SIZE + GAP)) as i32, (row as u32 * (SIZE + GAP)) as i32);
+                    s.draw_pixmap(
+                        x,
+                        y,
+                        on_bg(icon, badge).as_ref(),
+                        &PixmapPaint::default(),
+                        Transform::identity(),
+                        None,
+                    );
+                }
             }
             status_strip.save_png(out.join("status_strip.png")).unwrap();
             strip.save_png(out.join("pairing_strip.png")).unwrap();
             spinner_strip.save_png(out.join("spinner_strip.png")).unwrap();
         }
+    }
+
+    #[test]
+    fn badges_drop_the_ring() {
+        for n in BADGES {
+            let svg = badge_svg(n, &DARK).unwrap();
+            assert!(!svg.contains("A104") && !svg.contains("a88"), "{n}: the ring's still there");
+            assert!(svg.contains(&format!("<circle fill=\"{}\"", DARK.blue)) && !svg.contains("opacity"));
+            assert!(svg.contains(DARK.stroke) && !svg.contains("#000000"));
+            let pm = rasterize(&svg, 32).unwrap();
+            assert!(pm.pixels().iter().any(|px| px.alpha() > 0), "{n} is blank");
+        }
+        assert!(badge_svg(1, &DARK).is_none() && badge_svg(5, &DARK).is_none());
+        let pm = Icon::Full.badged(&DARK, 32, Some(3)).unwrap();
+        // The disc is in the corner, where the plain icon has none of its blue
+        let blue = |pm: &Pixmap| pm.pixel(28, 28).unwrap().demultiply().blue();
+        assert!(blue(&pm) > 0xC0 && blue(&Icon::Full.pixmap(&DARK, 32).unwrap()) < 0x40);
     }
 
     #[test]
