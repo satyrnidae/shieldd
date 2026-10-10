@@ -12,12 +12,12 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+use shdnet::mac::Mac;
+
 use crate::usb::{self, SeqState};
 use crate::wire::{
     self, ConnectReq, ConnectRsp, Element, Elements, Header, UpdateParam, app, base_control, ctl, elt, status,
 };
-
-pub type Mac = [u8; 6];
 
 /// Unacknowledged frames the host may have in flight (`OZ_MAX_QUEUED_FRAMES`)
 const MAX_UNACKED: usize = 4;

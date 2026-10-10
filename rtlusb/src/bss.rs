@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use rand::RngCore;
-use shieldutl::mac::fmt_mac;
+use shdnet::mac::{Mac, MacFmt};
 use tracing::{debug, info, trace, warn};
 
 use crate::ap::{ApConfig, RSN, WMM_PARAM};
@@ -21,8 +21,6 @@ use crate::sec::{CAM_ENTRIES, FIRST_PAIRWISE_ENTRY};
 use crate::tx::{RATE_6M, Tx, TxInfo};
 use crate::wpa::{self, Pmk};
 use crate::wps;
-
-pub type Mac = [u8; 6];
 
 const EAPOL_RESEND: Duration = Duration::from_millis(500);
 const EAPOL_TRIES: u32 = 5;
@@ -195,7 +193,7 @@ impl Bss {
     pub fn kick(&mut self, chip: &Chip, tx: &mut Tx, sta: &Mac) -> Result<Option<Event>> {
         // 3: deauthenticated because the sender is leaving the BSS
         self.send_deauth(chip, tx, sta, 3)?;
-        info!(sta = fmt_mac(sta), "kicked");
+        info!(sta = sta.fmt(), "kicked");
         self.on_leave(chip, *sta)
     }
 
@@ -203,7 +201,7 @@ impl Bss {
     /// shun for the same station replaces its old one.
     pub fn shun(&mut self, sta: &Mac, d: Duration) {
         self.shunned.insert(*sta, Instant::now() + d);
-        info!(sta = fmt_mac(sta), ?d, "shunned");
+        info!(sta = sta.fmt(), ?d, "shunned");
     }
 
     /// Who's being ignored right now
@@ -218,7 +216,7 @@ impl Bss {
         self.shunned.retain(|m, until| {
             let on = now < *until;
             if !on {
-                info!(sta = fmt_mac(m), "shun over");
+                info!(sta = m.fmt(), "shun over");
             }
             on
         });
@@ -319,7 +317,7 @@ impl Bss {
                 cam: None,
             };
             self.stas.insert(sa, sta);
-            info!(sta = fmt_mac(&sa), "authenticated");
+            info!(sta = sa.fmt(), "authenticated");
         }
         Ok(())
     }
@@ -330,7 +328,7 @@ impl Bss {
             return Ok(None);
         };
         let Some(sta) = self.stas.get_mut(&sa) else {
-            debug!(sta = fmt_mac(&sa), "association without authentication");
+            debug!(sta = sa.fmt(), "association without authentication");
             return Ok(None);
         };
         sta.wmm = has_wmm(ies);
@@ -353,7 +351,7 @@ impl Bss {
             f.extend(wps::assoc_resp_ie());
         }
         tx.send(&chip.rtl, TxInfo::mgmt(), &f)?;
-        info!(sta = fmt_mac(&sa), aid, wmm, reassoc, wps = wps_join, "associated");
+        info!(sta = sa.fmt(), aid, wmm, reassoc, wps = wps_join, "associated");
 
         if let Some(w) = self.cfg.wps.as_ref().filter(|_| wps_join) {
             let reg = wps::Registrar::new(w.device.clone(), w.credential.clone(), sa);
@@ -380,7 +378,7 @@ impl Bss {
         if let Some(entry) = old.cam {
             chip.clear_cam(entry)?;
         }
-        info!(sta = fmt_mac(&sa), "left");
+        info!(sta = sa.fmt(), "left");
         if matches!(old.state, State::Wps { .. } | State::WpsDone { .. }) {
             return Ok(None);
         }
@@ -420,7 +418,7 @@ impl Bss {
         let sta = self.stas.get(sa).expect("station exists");
         let f = self.data_frame(sa, sta, false, ETHERTYPE_EAPOL, &key);
         tx.send(&chip.rtl, TxInfo::data(7, RATE_6M, false), &f)?;
-        debug!(sta = fmt_mac(sa), msg = if ptk.is_some() { 3 } else { 1 }, replay, "EAPOL sent");
+        debug!(sta = sa.fmt(), msg = if ptk.is_some() { 3 } else { 1 }, replay, "EAPOL sent");
         Ok(())
     }
 
@@ -445,10 +443,10 @@ impl Bss {
                 // Msg 2: derive the PTK from its SNonce, which also checks the passphrase
                 let p = wpa::ptk(&self.pmk, &self.cfg.bssid, &sa, &anonce, &key.nonce);
                 if !wpa::verify_mic(&p.kck, eapol) {
-                    warn!(sta = fmt_mac(&sa), "msg 2 MIC mismatch; wrong passphrase?");
+                    warn!(sta = sa.fmt(), "msg 2 MIC mismatch; wrong passphrase?");
                     return Ok(None);
                 }
-                debug!(sta = fmt_mac(&sa), "msg 2 ok");
+                debug!(sta = sa.fmt(), "msg 2 ok");
                 let replay = replay + 1;
                 self.send_eapol(chip, tx, &sa, &anonce, replay, Some(&p))?;
                 let due = Instant::now() + EAPOL_RESEND;
@@ -459,12 +457,12 @@ impl Bss {
             Some(p) => {
                 let (kck, tk) = (p.kck, p.tk);
                 if key.key_info & wpa::KI_SECURE == 0 || !wpa::verify_mic(&kck, eapol) {
-                    warn!(sta = fmt_mac(&sa), "bad msg 4");
+                    warn!(sta = sa.fmt(), "bad msg 4");
                     return Ok(None);
                 }
                 // A reassociation keeps its entry, which gets the new key
                 let Some(entry) = self.stas.get(&sa).and_then(|s| s.cam).or_else(|| self.free_cam()) else {
-                    warn!(sta = fmt_mac(&sa), "no key CAM entry free; turning it away");
+                    warn!(sta = sa.fmt(), "no key CAM entry free; turning it away");
                     self.send_deauth(chip, tx, &sa, REASON_PREV_AUTH_INVALID)?;
                     return self.on_leave(chip, sa);
                 };
@@ -472,7 +470,7 @@ impl Bss {
                 let sta = self.stas.get_mut(&sa).expect("station exists");
                 sta.cam = Some(entry);
                 sta.state = State::Connected;
-                info!(sta = fmt_mac(&sa), "4-way handshake done, keys installed");
+                info!(sta = sa.fmt(), "4-way handshake done, keys installed");
                 Ok(Some(Event::Connected(sa)))
             }
         }
@@ -512,7 +510,7 @@ impl Bss {
             self.send_eapol(chip, tx, &mac, &anonce, replay, ptk.as_ref())?;
         }
         for mac in drop {
-            warn!(sta = fmt_mac(&mac), "handshake timed out");
+            warn!(sta = mac.fmt(), "handshake timed out");
             self.send_deauth(chip, tx, &mac, REASON_4WAY_TIMEOUT)?;
             if let Some(e) = self.on_leave(chip, mac)? {
                 out.push(e);
@@ -571,7 +569,7 @@ impl Bss {
             wps::Action::Delivered => {
                 self.wps_finish(chip, tx, sa, id)?;
                 info!(
-                    sta = fmt_mac(&sa),
+                    sta = sa.fmt(),
                     manufacturer = enrollee.manufacturer,
                     model = enrollee.model,
                     name = enrollee.device_name,
@@ -581,7 +579,7 @@ impl Bss {
             }
             wps::Action::Fail(why) => {
                 self.wps_finish(chip, tx, sa, id)?;
-                warn!(sta = fmt_mac(&sa), "WPS failed: {why}");
+                warn!(sta = sa.fmt(), "WPS failed: {why}");
                 Ok(Some(Event::PairingFailed(sa, why)))
             }
         }
@@ -618,12 +616,12 @@ impl Bss {
             }
         }
         for (mac, p) in resend {
-            debug!(sta = fmt_mac(&mac), id = p[1], "EAP request sent");
+            debug!(sta = mac.fmt(), id = p[1], "EAP request sent");
             self.send_eap(chip, tx, &mac, &p)?;
         }
         for (mac, id) in give_up {
             self.wps_finish(chip, tx, mac, id)?;
-            warn!(sta = fmt_mac(&mac), "WPS timed out");
+            warn!(sta = mac.fmt(), "WPS timed out");
             out.push(Event::PairingFailed(mac, "timed out".into()));
         }
         for mac in finished {
@@ -650,7 +648,7 @@ impl Bss {
             let pm = fc & 0x1000 != 0;
             if pm != s.dozing {
                 s.dozing = pm;
-                trace!(sta = fmt_mac(&sa), dozing = pm, "power management");
+                trace!(sta = sa.fmt(), dozing = pm, "power management");
             }
             // Its frame with PM clear: awake right now, so out with anything held
             if !pm && !s.held.is_empty() {
@@ -660,14 +658,14 @@ impl Bss {
         }
 
         if ty == 0 && to_us && self.is_shunned(&sa) {
-            trace!(sta = fmt_mac(&sa), sub, "shunned, ignored");
+            trace!(sta = sa.fmt(), sub, "shunned, ignored");
             return Ok(None);
         }
         if ty == 0 && to_us {
             // A retry of something we already answered: only our ACK got lost
             let seq = u16::from_le_bytes([f[22], f[23]]);
             if fc & 0x0800 != 0 && self.stas.get(&sa).is_some_and(|s| s.last_mgmt_seq == Some(seq)) {
-                debug!(sta = fmt_mac(&sa), sub, "management retry dropped");
+                debug!(sta = sa.fmt(), sub, "management retry dropped");
                 return Ok(None);
             }
             let res = match sub {
@@ -707,7 +705,7 @@ impl Bss {
         let mut end = f.len() - 4;
         if fc & 0x4000 != 0 {
             if !decrypted {
-                debug!(sta = fmt_mac(&sa), "protected frame the hardware didn't decrypt");
+                debug!(sta = sa.fmt(), "protected frame the hardware didn't decrypt");
                 return Ok(None);
             }
             at += 8; // CCMP header
@@ -754,9 +752,9 @@ impl Bss {
         payload: &[u8],
         stream: bool,
     ) -> Result<()> {
-        let Some(sta) = self.stas.get(sta_addr) else { anyhow::bail!("no station {}", fmt_mac(sta_addr)) };
+        let Some(sta) = self.stas.get(sta_addr) else { anyhow::bail!("no station {}", sta_addr.fmt()) };
         if !matches!(sta.state, State::Connected) {
-            anyhow::bail!("station {} isn't connected", fmt_mac(sta_addr));
+            anyhow::bail!("station {} isn't connected", sta_addr.fmt());
         }
         if !stream && tx.data_in_flight(IN_FLIGHT_WINDOW) >= MAX_IN_FLIGHT {
             self.ps_stats.dropped += 1;

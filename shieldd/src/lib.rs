@@ -13,7 +13,7 @@
 //!
 //! Two binaries share this: `shieldd`, the console one, and `shieldw`, a windowless one for
 //! running at login (`--install`) that lives in its own crate. Hosting, both log to a file too.
-//! See background.rs, and shieldutl's logs.rs.
+//! See background.rs, and shdlib's logs.rs.
 
 #[cfg(windows)]
 mod background;
@@ -43,11 +43,11 @@ use anyhow::Result;
 use clap::Parser;
 use tracing::error;
 
-pub use shieldutl::settings_dir;
+pub use shdlib::settings_dir;
 
 /// For the tray's About box
 #[cfg(windows)]
-const ABOUT: shieldtray::About = shieldtray::About {
+const ABOUT: shdtray::About = shdtray::About {
     version: env!("CARGO_PKG_VERSION"),
     authors: env!("CARGO_PKG_AUTHORS"),
     built: env!("SHIELDD_BUILD_DATE"),
@@ -150,7 +150,7 @@ impl Args {
 type Quit = std::sync::Arc<std::sync::atomic::AtomicBool>;
 
 /// Both binaries' main; `windowless` is shieldw, in its own crate, which only logs to the file.
-/// See shieldutl's logs.rs.
+/// See shdlib's logs.rs.
 pub fn run(windowless: bool) -> Result<()> {
     let parsed = Args::try_parse();
     // A host takes the instance before it touches the log file, and only the instance starts a
@@ -168,8 +168,8 @@ pub fn run(windowless: bool) -> Result<()> {
         _ => windowless.then_some(false),
     };
     // rtlusb's info covers the AP, pairing and channel survey; its noisy stats are debug
-    shieldutl::logs::init(shieldutl::logs::Setup {
-        default_filter: "shieldd=info,rtlusb=info,shieldtray=info,shieldutl=info",
+    shdlib::logs::init(shdlib::logs::Setup {
+        default_filter: "shieldd=info,rtlusb=info,shdtray=info,shdlib=info",
         console: !windowless,
         file: to_file.map(|rotate| (settings_dir().join("logs"), rotate)),
     })?;

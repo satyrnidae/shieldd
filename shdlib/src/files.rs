@@ -61,7 +61,7 @@ mod tests {
 
     #[test]
     fn names_dodge_every_form() {
-        let dir = std::env::temp_dir().join(format!("shieldutl-names-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("shdlib-names-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let exts = ["log", "log.gz"];
         assert_eq!(free_name(&dir, "s", &exts), dir.join("s.log"));
@@ -76,7 +76,7 @@ mod tests {
     #[test]
     fn gzipped_round_trip() {
         use std::io::Read;
-        let dir = std::env::temp_dir().join(format!("shieldutl-files-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("shdlib-files-test-{}", std::process::id()));
         let path = dir.join("sub").join("x.gz");
         commit(&stage_gz(&path, b"hello").unwrap(), &path).unwrap();
         let mut back = String::new();

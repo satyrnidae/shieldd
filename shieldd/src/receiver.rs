@@ -9,11 +9,12 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use shdlink::media;
+use shdnet::mac::Mac;
 use tracing::{debug, info, trace, warn};
 use vigem_client::{XButtons, XGamepad};
 
 use crate::controller::key;
-use crate::outputs::{Desktop, Gamepad, Source};
+use crate::outputs::{Desktop, Gamepad};
 
 /// No packets this long: let go of everything. Same as shield_rx.py.
 const STALE: Duration = Duration::from_millis(500);
@@ -65,7 +66,7 @@ fn trigger(v: f32) -> u8 {
 }
 
 /// The one transmitter, as Desktop's source
-const TRANSMITTER: Source = [0; 6];
+const TRANSMITTER: Mac = [0; 6];
 
 /// Runs until ctrl+c.
 pub fn run(listen: SocketAddr, mouse_scale: (f32, f32), quit: &AtomicBool) -> Result<()> {

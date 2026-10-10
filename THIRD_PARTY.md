@@ -104,8 +104,8 @@ Installed separately by the user; nothing from them ships with this project.
 ## Icons
 
 ### Ikono Bold Line Icons
-- **Used for:** the tray icons, `shieldtray/res/battery-*-svgrepo-com.svg` and
-  `shieldtray/res/loading-spinner-svgrepo-com.svg`, embedded in `shieldtray` and recolored per theme at
+- **Used for:** the tray icons, `shdtray/res/battery-*-svgrepo-com.svg` and
+  `shdtray/res/loading-spinner-svgrepo-com.svg`, embedded in `shdtray` and recolored per theme at
   runtime. `battery-empty` is the outline of the set's battery icons.
 - **License:** MIT.
 - **Author:** Will Kelly. Retrieved via SVG Repo, https://www.svgrepo.com
@@ -135,8 +135,8 @@ SOFTWARE.
 ```
 
 ### Clarity Project Icons
-- **Used for:** the tray icons while no controller is connected, `shieldtray/res/disconnected-svgrepo-com.svg`,
-  and while pairing, `shieldtray/res/wifi-svgrepo-com.svg`, embedded in `shieldtray` and recolored per theme
+- **Used for:** the tray icons while no controller is connected, `shdtray/res/disconnected-svgrepo-com.svg`,
+  and while pairing, `shdtray/res/wifi-svgrepo-com.svg`, embedded in `shdtray` and recolored per theme
   at runtime.
 - **License:** MIT.
 - **Author:** VMware. Retrieved via SVG Repo, https://www.svgrepo.com
@@ -167,7 +167,7 @@ SOFTWARE.
 
 ### Phosphor Icons
 - **Used for:** the tray icon's count badge with more than one controller connected,
-  `shieldtray/res/number-circle-{two,three,four}-duotone-svgrepo-com.svg`, embedded in `shieldtray` and
+  `shdtray/res/number-circle-{two,three,four}-duotone-svgrepo-com.svg`, embedded in `shdtray` and
   recolored per theme at runtime, the ring around each number dropped.
 - **License:** MIT.
 - **Author:** Phosphor Icons. Retrieved via SVG Repo, https://www.svgrepo.com

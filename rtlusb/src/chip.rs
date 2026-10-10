@@ -4,6 +4,7 @@ use std::thread::sleep;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use shdnet::mac::MacFmt;
 use tracing::{debug, info, warn};
 
 use crate::efuse::{self, Efuse};
@@ -139,7 +140,7 @@ impl Chip {
         let btcoex = rtl.r32(WL_BT_PWR_CTRL)? & BT_FUNC_EN != 0;
         let cond = PhyCond::new(cut, &efuse, btcoex);
         info!(
-            mac = shieldutl::mac::fmt_mac(&efuse.mac),
+            mac = efuse.mac.fmt(),
             cut,
             btcoex,
             speed = ?rtl.speed,

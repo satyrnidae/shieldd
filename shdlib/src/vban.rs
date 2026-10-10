@@ -19,6 +19,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use tracing::{debug, info, warn};
 
+use shdnet::mac::Mac;
+
 pub const MIC_STREAM: &str = "ShieldMic";
 pub const PAD_STREAM: &str = "ShieldPad";
 /// Voicemeeter's VBAN listen port
@@ -109,20 +111,17 @@ const MIX_MAX: usize = MIC_SAMPLES * 8;
 /// than out in one burst that Voicemeeter's jitter buffer chokes on.
 const MIX_BURST: usize = 2;
 
-/// Which controller a mic is: its MAC
-pub type Source = [u8; 6];
-
 /// Each controller's mic samples, until every mic still sending has a packet's worth. Those
 /// are summed, saturating, into one.
 #[derive(Default)]
 struct Mixer {
     /// Samples waiting, and when that mic last sent any
-    mics: HashMap<Source, (VecDeque<i16>, Instant)>,
+    mics: HashMap<Mac, (VecDeque<i16>, Instant)>,
 }
 
 impl Mixer {
     /// Adds `src`'s samples; returns the packets' worth now mixed
-    fn push(&mut self, src: Source, pcm: &[u8], now: Instant) -> Vec<Vec<i16>> {
+    fn push(&mut self, src: Mac, pcm: &[u8], now: Instant) -> Vec<Vec<i16>> {
         let (q, last) = self.mics.entry(src).or_insert_with(|| (VecDeque::new(), now));
         q.extend(pcm.as_chunks::<2>().0.iter().map(|&b| i16::from_le_bytes(b)));
         *last = now;
@@ -160,7 +159,7 @@ struct Mic {
 }
 
 impl Mic {
-    fn push(&mut self, src: Source, pcm: &[u8], now: Instant) {
+    fn push(&mut self, src: Mac, pcm: &[u8], now: Instant) {
         for chunk in self.mixer.push(src, pcm, now) {
             self.send(&chunk);
         }
@@ -335,12 +334,12 @@ impl Vban {
     }
 
     /// Mic samples from controller `src`, 16 kHz mono s16le, mixed with the others'
-    pub fn push_mic(&mut self, src: Source, pcm: &[u8], now: Instant) {
+    pub fn push_mic(&mut self, src: Mac, pcm: &[u8], now: Instant) {
         self.mic.push(src, pcm, now);
     }
 
     /// Drops what `src`'s mic had waiting; for when VBAN goes off for it
-    pub fn forget_mic(&mut self, src: &Source) {
+    pub fn forget_mic(&mut self, src: &Mac) {
         self.mic.mixer.mics.remove(src);
     }
 

@@ -15,7 +15,7 @@ use unic_langid::LanguageIdentifier;
 pub use fluent_bundle::FluentArgs;
 
 /// Every language there's text for, en-US first
-const LOCALES: &[(&str, &str)] = &[("en-US", include_str!("../locales/en-US/shieldtray.ftl"))];
+const LOCALES: &[(&str, &str)] = &[("en-US", include_str!("../locales/en-US/shdtray.ftl"))];
 
 /// The user's languages that have text, most preferred first, ending with en-US
 static BUNDLES: OnceLock<Vec<FluentBundle<FluentResource>>> = OnceLock::new();

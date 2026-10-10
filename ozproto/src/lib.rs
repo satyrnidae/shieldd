@@ -9,4 +9,4 @@ pub mod session;
 pub mod usb;
 pub mod wire;
 
-pub use session::{Config, Event, Host, Mac};
+pub use session::{Config, Event, Host};

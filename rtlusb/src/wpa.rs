@@ -5,7 +5,7 @@ use aes_kw::KekAes128;
 use anyhow::{Context, Result};
 use hmac::{Hmac, Mac};
 use sha1::Sha1;
-use shieldutl::psk::Psk;
+use shdlib::psk::Psk;
 
 type HmacSha1 = Hmac<Sha1>;
 

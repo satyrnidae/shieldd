@@ -7,11 +7,11 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-pub use shieldutl::psk::Psk;
+pub use shdlib::psk::Psk;
 use tracing::{info, warn};
 
-use shieldutl::files::{commit, free_name, seal_file, seal_text, stage, stage_gz};
-use shieldutl::wipe;
+use shdlib::files::{commit, free_name, seal_file, seal_text, stage, stage_gz};
+use shdlib::wipe;
 
 #[derive(Debug, Clone)]
 pub struct Group {
@@ -147,7 +147,7 @@ fn backup_path(path: &Path) -> Result<PathBuf> {
     let written = std::fs::metadata(path).and_then(|m| m.modified()).unwrap_or_else(|_| std::time::SystemTime::now());
     let stem = path.file_stem().context("conf path has no file name")?.to_string_lossy();
     let ext = path.extension().map_or_else(|| "gz".to_owned(), |x| format!("{}.gz", x.to_string_lossy()));
-    let base = format!("{stem}.{}", shieldutl::civil::stamp(written));
+    let base = format!("{stem}.{}", shdlib::civil::stamp(written));
     Ok(free_name(&path.with_file_name("backup"), &base, &[&ext]))
 }
 

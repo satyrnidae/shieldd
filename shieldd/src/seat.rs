@@ -7,10 +7,9 @@ use anyhow::Result;
 use ozproto::wire::ETHERTYPE;
 use ozproto::{Config, Event, Host};
 use rtlusb::Link;
-use rtlusb::bss::Mac;
-use shieldtray::Connected;
-use shieldutl::mac::fmt_mac;
-use shieldutl::vban;
+use shdlib::vban;
+use shdnet::mac::{Mac, MacFmt};
+use shdtray::Connected;
 use tracing::{debug, info, trace, warn};
 
 use crate::controller::{Controller, HEADSET_EP, Report};
@@ -141,7 +140,7 @@ impl Seat {
         if let Some(v) = self.rumble
             && self.ctl.set_output(now, &mut self.host, v)
         {
-            debug!(sta = %fmt_mac(&self.mac), large = v[0] >> 8, small = v[2] >> 8, "rumble");
+            debug!(sta = %self.mac.fmt(), large = v[0] >> 8, small = v[2] >> 8, "rumble");
             self.rumble = None;
         }
     }
@@ -163,10 +162,10 @@ impl Seat {
             // Kicked for a flat battery, the session's still open and still sending, headset
             // audio included. Nowhere to go, and not worth an error each tick.
             if !link.is_connected(&dst) {
-                trace!(dst = %fmt_mac(&dst), "tx dropped, not connected");
+                trace!(dst = %dst.fmt(), "tx dropped, not connected");
                 continue;
             }
-            trace!(dst = %fmt_mac(&dst), frame = %hex(&frame), "tx");
+            trace!(dst = %dst.fmt(), frame = %hex(&frame), "tx");
             // Isoc audio is never retransmitted by Ozmo either; a late unit is no use
             if frame.first().is_some_and(|c| c & ozproto::wire::ctl::ISOC != 0) {
                 link.send_stream(&dst, ETHERTYPE, &frame)?;
@@ -178,16 +177,16 @@ impl Seat {
     }
 
     fn on_event(&mut self, ev: Event, now: Instant, desktop: &mut Desktop) {
-        let sta = fmt_mac(&self.mac);
+        let sta = self.mac.fmt();
         match ev {
             Event::Connected { peer, session_id, .. } => {
-                info!(peer = %fmt_mac(&peer), session_id, "controller connected");
+                info!(peer = %peer.fmt(), session_id, "controller connected");
                 self.release(desktop);
                 self.ctl.start(now, &mut self.host);
             }
             Event::Resumed { session_id } => info!(%sta, session_id, "controller resumed session"),
             Event::Rejected { peer, status } => {
-                warn!(peer = %fmt_mac(&peer), status, "connect rejected")
+                warn!(peer = %peer.fmt(), status, "connect rejected")
             }
             Event::Usb(msg) => {
                 let was_ready = self.ctl.ready();

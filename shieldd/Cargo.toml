@@ -8,17 +8,18 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+shdnet.workspace = true
 ozproto.workspace = true
 shdlink.workspace = true
-shieldtray.workspace = true
-shieldutl = { workspace = true, features = ["gzip", "logs", "vban"] }
+shdtray.workspace = true
+shdlib = { workspace = true, features = ["gzip", "logs", "vban"] }
 anyhow.workspace = true
 clap.workspace = true
 tracing.workspace = true
 
 [build-dependencies]
 # The About box's build date
-shieldutl.workspace = true
+shdlib.workspace = true
 
 [dev-dependencies]
 # Reading backups back in tests

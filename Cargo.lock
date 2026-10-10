@@ -720,6 +720,9 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 [[package]]
 name = "ozproto"
 version = "0.2.0+alpha"
+dependencies = [
+ "shdnet",
+]
 
 [[package]]
 name = "pbkdf2"
@@ -889,7 +892,8 @@ dependencies = [
  "rand",
  "sha1",
  "sha2",
- "shieldutl",
+ "shdlib",
+ "shdnet",
  "tracing",
 ]
 
@@ -986,8 +990,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "shdlib"
+version = "0.2.0+alpha"
+dependencies = [
+ "anyhow",
+ "flate2",
+ "shdlib",
+ "shdnet",
+ "tracing",
+ "tracing-subscriber",
+ "windows",
+]
+
+[[package]]
 name = "shdlink"
 version = "0.2.0+alpha"
+
+[[package]]
+name = "shdnet"
+version = "0.2.0+alpha"
+
+[[package]]
+name = "shdtray"
+version = "0.2.0+alpha"
+dependencies = [
+ "anyhow",
+ "fluent-bundle",
+ "fluent-syntax",
+ "resvg",
+ "shdlib",
+ "shdnet",
+ "tracing",
+ "unic-langid",
+ "windows",
+]
 
 [[package]]
 name = "shieldd"
@@ -1002,37 +1038,12 @@ dependencies = [
  "ozproto",
  "rand",
  "rtlusb",
+ "shdlib",
  "shdlink",
- "shieldtray",
- "shieldutl",
+ "shdnet",
+ "shdtray",
  "tracing",
  "vigem-client",
- "windows",
-]
-
-[[package]]
-name = "shieldtray"
-version = "0.2.0+alpha"
-dependencies = [
- "anyhow",
- "fluent-bundle",
- "fluent-syntax",
- "resvg",
- "shieldutl",
- "tracing",
- "unic-langid",
- "windows",
-]
-
-[[package]]
-name = "shieldutl"
-version = "0.2.0+alpha"
-dependencies = [
- "anyhow",
- "flate2",
- "shieldutl",
- "tracing",
- "tracing-subscriber",
  "windows",
 ]
 

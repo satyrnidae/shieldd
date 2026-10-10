@@ -8,10 +8,11 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use nusb::transfer::{Bulk, In, TransferError};
+use shdnet::mac::{Mac, MacFmt};
 use tracing::{debug, info, trace, warn};
 
 use crate::ap::{ApConfig, WpsConfig};
-use crate::bss::{Bss, Event, Mac};
+use crate::bss::{Bss, Event};
 use crate::chip::Chip;
 use crate::tx::{Tx, TxInfo};
 use crate::{phy, rx, survey, wpa};
@@ -183,7 +184,7 @@ impl Radio {
             let mut tx = Tx::new(&chip.rtl)?;
             chip.enable_sec_engine()?;
             chip.start_ap(&mut tx, &cfg)?;
-            info!(ssid = cfg.ssid, bssid = shieldutl::mac::fmt_mac(&bssid), channel = opts.channel, "AP up");
+            info!(ssid = cfg.ssid, bssid = bssid.fmt(), channel = opts.channel, "AP up");
             let mut bss = Bss::new(cfg, opts.pmk);
             bss.set_ps_hold(opts.ps_hold);
             bss.install_gtk(&chip)?;

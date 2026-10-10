@@ -10,6 +10,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use shdnet::mac::Mac;
 use tracing::{debug, info, warn};
 use vigem_client::{Client, TargetId, XButtons, XGamepad, Xbox360Wired};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -49,9 +50,6 @@ const MOUSE_BITS: u8 = 0x0f;
 
 /// Set in `Gamepad::rumble` while a value is waiting to be taken
 const RUMBLE_NEW: u32 = 1 << 16;
-
-/// Whose input it is, for Desktop: a controller's MAC
-pub type Source = [u8; 6];
 
 //region Gamepad
 
@@ -176,7 +174,7 @@ impl Drop for Gamepad {
 /// any controller holds it.
 #[derive(Debug, Default)]
 struct Held {
-    by: HashMap<Source, u8>,
+    by: HashMap<Mac, u8>,
 }
 
 impl Held {
@@ -185,7 +183,7 @@ impl Held {
     }
 
     /// Sets `src`'s bits; returns everyone's together before and after
-    fn set(&mut self, src: Source, bits: u8) -> (u8, u8) {
+    fn set(&mut self, src: Mac, bits: u8) -> (u8, u8) {
         let was = self.all();
         if bits == 0 {
             self.by.remove(&src);
@@ -210,7 +208,7 @@ struct Pointer {
 pub struct Desktop {
     keys: Held,
     buttons: Held,
-    pointers: HashMap<Source, Pointer>,
+    pointers: HashMap<Mac, Pointer>,
     /// Next repeat while a REPEATING key is held, and the interval after it
     next_repeat: Option<(Instant, Duration)>,
     /// Trackpad counts -> pixels, x and y
@@ -229,14 +227,14 @@ impl Desktop {
     }
 
     /// Lets go of whatever `src` alone holds, and forgets its finger. For when its input stops.
-    pub fn release(&mut self, src: &Source) {
+    pub fn release(&mut self, src: &Mac) {
         self.set_keys(src, 0);
         self.set_mouse_buttons(src, 0);
         self.pointers.remove(src);
     }
 
     /// Relative move in trackpad counts, scaled to pixels
-    pub fn move_counts(&mut self, src: &Source, dx: f32, dy: f32) {
+    pub fn move_counts(&mut self, src: &Mac, dx: f32, dy: f32) {
         let (sx, sy) = self.mouse_scale;
         let p = self.pointers.entry(*src).or_default();
         let x = dx * sx + p.carry.0;
@@ -248,7 +246,7 @@ impl Desktop {
         }
     }
 
-    pub fn trackpad(&mut self, src: &Source, t: &Trackpad) {
+    pub fn trackpad(&mut self, src: &Mac, t: &Trackpad) {
         let p = self.pointers.entry(*src).or_default();
         if t.touch {
             let last = p.touch.replace((t.x, t.y));
@@ -264,7 +262,7 @@ impl Desktop {
     }
 
     /// Controller key bits; media keys go out on each edge of everyone's together
-    pub fn set_keys(&mut self, src: &Source, keys: u8) {
+    pub fn set_keys(&mut self, src: &Mac, keys: u8) {
         let (was, keys) = self.keys.set(*src, keys & MEDIA_BITS);
         let changed = was ^ keys;
         if changed == 0 {
@@ -306,7 +304,7 @@ impl Desktop {
     }
 
     /// Mouse button bits as in MOUSE_BUTTONS; events go out on each edge of everyone's together
-    pub fn set_mouse_buttons(&mut self, src: &Source, buttons: u8) {
+    pub fn set_mouse_buttons(&mut self, src: &Mac, buttons: u8) {
         let (was, buttons) = self.buttons.set(*src, buttons & MOUSE_BITS);
         let changed = was ^ buttons;
         let inputs: Vec<INPUT> = MOUSE_BUTTONS
@@ -321,7 +319,7 @@ impl Desktop {
 impl Drop for Desktop {
     fn drop(&mut self) {
         // Never leave a key or mouse button held
-        let sources: Vec<Source> = self.keys.by.keys().chain(self.buttons.by.keys()).copied().collect();
+        let sources: Vec<Mac> = self.keys.by.keys().chain(self.buttons.by.keys()).copied().collect();
         for src in sources {
             self.release(&src);
         }

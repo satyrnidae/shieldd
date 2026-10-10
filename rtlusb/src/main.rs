@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use shdnet::mac::{Mac, MacFmt};
 use tracing::{info, warn};
 
 use rtlusb::chip::Chip;
@@ -81,10 +82,10 @@ enum Cmd {
 fn main() -> Result<()> {
     // Before the log, so --help and a typo don't start a new one
     let args = Args::parse();
-    shieldutl::logs::init(shieldutl::logs::Setup {
-        default_filter: "rtlusb=info,shieldutl=info",
+    shdlib::logs::init(shdlib::logs::Setup {
+        default_filter: "rtlusb=info,shdlib=info",
         console: true,
-        file: Some((shieldutl::settings_dir().join("logs").join("rtlusb"), true)),
+        file: Some((shdlib::settings_dir().join("logs").join("rtlusb"), true)),
     })?;
     match args.cmd {
         Cmd::Efuse { dump } => efuse_cmd(dump),
@@ -112,7 +113,7 @@ fn efuse_cmd(dump: Option<PathBuf>) -> Result<()> {
     efuse::hexdump(&log);
     let e = efuse::Efuse::parse(&log);
     println!("efuse VID:PID {:04x}:{:04x}", e.vid, e.pid);
-    println!("MAC {}", shieldutl::mac::fmt_mac(&e.mac));
+    println!("MAC {}", e.mac.fmt());
 
     if let Some(dir) = dump {
         std::fs::create_dir_all(&dir)?;
@@ -188,7 +189,7 @@ fn ap_cmd(
         let mut tx = tx::Tx::new(&chip.rtl)?;
         chip.enable_sec_engine()?;
         chip.start_ap(&mut tx, &cfg)?;
-        info!(ssid = cfg.ssid, bssid = shieldutl::mac::fmt_mac(&bssid), channel, "beaconing, Ctrl-C to stop");
+        info!(ssid = cfg.ssid, bssid = bssid.fmt(), channel, "beaconing, Ctrl-C to stop");
         let mut bss = bss::Bss::new(cfg, pmk);
         bss.install_gtk(&chip)?;
 
@@ -226,7 +227,7 @@ fn ap_cmd(
                     ozmo_frames += 1;
                     if ozmo_frames <= 20 || ozmo_frames.is_multiple_of(500) {
                         info!(
-                            sta = shieldutl::mac::fmt_mac(&sta),
+                            sta = sta.fmt(),
                             ethertype = format!("{ethertype:#06x}"),
                             len = payload.len(),
                             head = format!("{:02x?}", &payload[..payload.len().min(16)]),
@@ -262,8 +263,8 @@ fn print_frame(p: &rx::RxPkt, t0: Instant) {
     }
     let fc = u16::from_le_bytes([f[0], f[1]]);
     let kind = rx::frame_kind(fc);
-    let a1 = &f[4..10];
-    let a2 = f.get(10..16);
+    let a1: Mac = f[4..10].try_into().unwrap();
+    let a2 = f.get(10..16).and_then(|a| Mac::try_from(a).ok());
     let flags: String = [(0x1000, 'P'), (0x0800, 'R'), (0x4000, 'W')]
         .iter()
         .filter(|(bit, _)| fc & bit != 0)
@@ -275,8 +276,8 @@ fn print_frame(p: &rx::RxPkt, t0: Instant) {
         rx::rate_name(p.rate),
         p.dbm.map_or("?".into(), |d| d.to_string()),
         kind,
-        shieldutl::mac::fmt_mac(a1),
-        a2.map_or("-".into(), shieldutl::mac::fmt_mac),
+        a1.fmt(),
+        a2.map_or("-".into(), |a| a.fmt()),
     );
     if !flags.is_empty() {
         line += &format!(" [{flags}]");

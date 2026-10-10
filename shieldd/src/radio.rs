@@ -22,14 +22,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use ozproto::Mac;
 use ozproto::wire::ETHERTYPE;
 use rtlusb::ap::WpsConfig;
 use rtlusb::wps::{Credential, Device};
 use rtlusb::{ApOptions, Link, Radio, RadioEvent};
-use shieldtray::{self as tray, Command, Shunned, Status, Tray, tr};
-use shieldutl::mac::fmt_mac;
-use shieldutl::vban::{self, Vban};
+use shdlib::vban::{self, Vban};
+use shdnet::mac::{Mac, MacFmt};
+use shdtray::{self as tray, Command, Shunned, Status, Tray, tr};
 use tracing::{debug, info, trace, warn};
 
 use crate::outputs::Desktop;
@@ -142,13 +141,13 @@ impl Shared {
         }
         self.sync_vban();
         if changed {
-            let text: String = self.vban_on.iter().map(|m| format!("{}\n", fmt_mac(m))).collect();
+            let text: String = self.vban_on.iter().map(|m| format!("{}\n", m.fmt())).collect();
             let saved = std::fs::create_dir_all(crate::settings_dir()).and_then(|()| match text.is_empty() {
                 true => std::fs::remove_file(Self::vban_file()),
                 false => std::fs::write(Self::vban_file(), text),
             });
             if let Err(e) = saved {
-                debug!("remembering VBAN for {}: {e}", fmt_mac(mac));
+                debug!("remembering VBAN for {}: {e}", mac.fmt());
             }
         }
         self.vban_on.contains(mac)
@@ -158,7 +157,7 @@ impl Shared {
     fn rename(&self, mac: &Mac, name: &str) -> bool {
         match known_clients::save(&self.conf, mac, name) {
             Ok(()) => {
-                info!(sta = %fmt_mac(mac), name, "renamed");
+                info!(sta = %mac.fmt(), name, "renamed");
                 true
             }
             Err(e) => {
@@ -306,16 +305,16 @@ fn seat_for<'a>(
     if seats.len() >= MAX_SEATS {
         match seats.iter().position(|s| s.host.peer().is_none() && !link.is_associated(&s.mac)) {
             Some(i) => {
-                info!(gone = %fmt_mac(&seats[i].mac), new = %fmt_mac(&mac), "seat handed over");
+                info!(gone = %seats[i].mac.fmt(), new = %mac.fmt(), "seat handed over");
                 seats.remove(i);
             }
             None => {
-                warn!(sta = %fmt_mac(&mac), "a fifth controller; sending it away");
+                warn!(sta = %mac.fmt(), "a fifth controller; sending it away");
                 link.kick(&mac)?;
                 link.shun(&mac, SLEEP_SHUN);
                 sh.tray.problem(
                     &tr!("problem-too-many-title"),
-                    &tr!("problem-too-many", max = MAX_SEATS, mac = fmt_mac(&mac)),
+                    &tr!("problem-too-many", max = MAX_SEATS, mac = mac.fmt()),
                 );
                 return Ok(None);
             }
@@ -367,7 +366,7 @@ fn run_once(args: &Args, start: Start, quit: &AtomicBool, sh: &mut Shared) -> Re
     // A new group surveys for its channel; that's the one the controllers will remember
     group.channel = radio.channel();
     let channel = group.channel;
-    let bssid = fmt_mac(&radio.bssid());
+    let bssid = radio.bssid().fmt();
     // Saved before anyone pairs, so a controller that does is never left on a group shieldd forgot
     let mut save_due = match reconfigure {
         true => save_group(args, sh, &group, Instant::now(), false),
@@ -396,7 +395,7 @@ fn run_once(args: &Args, start: Start, quit: &AtomicBool, sh: &mut Shared) -> Re
         let now = Instant::now();
         match ev {
             RadioEvent::Data { src, ethertype: ETHERTYPE, payload } => {
-                trace!(src = %fmt_mac(&src), frame = %hex(payload), "rx");
+                trace!(src = %src.fmt(), frame = %hex(payload), "rx");
                 if let Some(seat) = seat_for(&mut seats, src, args, sh, link)? {
                     seat.on_frame(now, payload, &mut desktop);
                 }
@@ -410,7 +409,7 @@ fn run_once(args: &Args, start: Start, quit: &AtomicBool, sh: &mut Shared) -> Re
                 }
             }
             RadioEvent::Connected(sta) => {
-                info!(sta = %fmt_mac(&sta), "Wi-Fi link up");
+                info!(sta = %sta.fmt(), "Wi-Fi link up");
                 linked.insert(sta);
                 // Its pad's first plug-in plays Windows' own sound a moment later; one's enough
                 if seat_mut(&mut seats, &sta).is_some_and(|s| s.pad.plugged()) {
@@ -424,7 +423,7 @@ fn run_once(args: &Args, start: Start, quit: &AtomicBool, sh: &mut Shared) -> Re
                 }
                 // Not for one turned away before it ever connected
                 if linked.remove(&sta) {
-                    info!(sta = %fmt_mac(&sta), "Wi-Fi link down");
+                    info!(sta = %sta.fmt(), "Wi-Fi link down");
                     tray::device_sound(false);
                 }
             }
@@ -440,10 +439,10 @@ fn run_once(args: &Args, start: Start, quit: &AtomicBool, sh: &mut Shared) -> Re
                     }
                     names.insert(sta, name);
                 }
-                info!(sta = %fmt_mac(&sta), ssid = group.ssid, "paired; waiting for the controller to rejoin");
+                info!(sta = %sta.fmt(), ssid = group.ssid, "paired; waiting for the controller to rejoin");
             }
             RadioEvent::PairingFailed(sta, why) => {
-                warn!(sta = %fmt_mac(&sta), "pairing failed: {why}; still listening, hold the button again")
+                warn!(sta = %sta.fmt(), "pairing failed: {why}; still listening, hold the button again")
             }
             RadioEvent::Tick => {
                 if quit.load(Ordering::Relaxed) {
@@ -469,7 +468,7 @@ fn run_once(args: &Args, start: Start, quit: &AtomicBool, sh: &mut Shared) -> Re
                     }
                     for seat in &mut seats {
                         let Some(why) = seat.pad_failed.take() else { continue };
-                        warn!(sta = %fmt_mac(&seat.mac), "no virtual pad for it: {why}; sending it away");
+                        warn!(sta = %seat.mac.fmt(), "no virtual pad for it: {why}; sending it away");
                         sh.tray.problem(&tr!("problem-pad-title"), &tr!("problem-pad", error = why.as_str()));
                         if let Some(peer) = seat.host.peer() {
                             link.kick(&peer)?;
@@ -518,7 +517,7 @@ fn run_once(args: &Args, start: Start, quit: &AtomicBool, sh: &mut Shared) -> Re
                                     && s.leaving.is_none()
                                     && s.host.say_goodbye()
                                 {
-                                    info!(sta = %fmt_mac(&mac), "disconnecting from the tray; saying goodbye first");
+                                    info!(sta = %mac.fmt(), "disconnecting from the tray; saying goodbye first");
                                     s.leaving = Some(Leaving::new(now));
                                 }
                             }
@@ -527,7 +526,7 @@ fn run_once(args: &Args, start: Start, quit: &AtomicBool, sh: &mut Shared) -> Re
                     for seat in &mut seats {
                         // Before the tray update, so it says "charge it" rather than "critical"
                         if seat.leaving.is_none() && seat.ctl.must_charge(now) && seat.host.say_goodbye() {
-                            let sta = fmt_mac(&seat.mac);
+                            let sta = seat.mac.fmt();
                             warn!(%sta, "battery too low to use; sending the controller away until it charges");
                             seat.ctl.let_go();
                             seat.leaving = Some(Leaving::new(now));
@@ -541,7 +540,7 @@ fn run_once(args: &Args, start: Start, quit: &AtomicBool, sh: &mut Shared) -> Re
                             seat.leaving = None;
                             if let Some(peer) = seat.host.peer() {
                                 let acked = seat.host.all_delivered();
-                                info!(sta = %fmt_mac(&peer), acked, "goodbye done, kicking");
+                                info!(sta = %peer.fmt(), acked, "goodbye done, kicking");
                                 link.kick(&peer)?;
                                 link.shun(&peer, SLEEP_SHUN);
                                 seat.end_session(now, &mut desktop);
@@ -552,7 +551,7 @@ fn run_once(args: &Args, start: Start, quit: &AtomicBool, sh: &mut Shared) -> Re
                             seat.joining = None;
                             seat.join_gave_up = false;
                         } else if seat.joining.is_some_and(|t| now.duration_since(t) >= JOIN_TIMEOUT) {
-                            warn!(sta = %fmt_mac(&seat.mac), "controller hasn't come up in {JOIN_TIMEOUT:?}");
+                            warn!(sta = %seat.mac.fmt(), "controller hasn't come up in {JOIN_TIMEOUT:?}");
                             seat.joining = None;
                             seat.join_gave_up = present;
                         } else if present && seat.joining.is_none() && !seat.join_gave_up {
@@ -565,7 +564,7 @@ fn run_once(args: &Args, start: Start, quit: &AtomicBool, sh: &mut Shared) -> Re
                         if let Some(t) = seat.last_rx
                             && now.duration_since(t) > STALE
                         {
-                            debug!(sta = %fmt_mac(&seat.mac), "no frames for {STALE:?}, releasing outputs");
+                            debug!(sta = %seat.mac.fmt(), "no frames for {STALE:?}, releasing outputs");
                             seat.release(&mut desktop);
                             seat.last_rx = None;
                         }

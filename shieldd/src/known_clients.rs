@@ -9,10 +9,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use tracing::{info, warn};
 
-use shieldutl::files;
-pub use shieldutl::names::clean;
-
-type Mac = [u8; 6];
+use shdlib::files;
+pub use shdlib::names::clean;
+use shdnet::mac::{Mac, MacFmt};
 
 fn path(conf: &Path) -> PathBuf {
     conf.with_file_name("known-clients")
@@ -50,7 +49,7 @@ fn parse(text: &str) -> HashMap<Mac, String> {
 /// `text` with `mac`'s line saying `name`: the first line for it rewritten, any later ones dropped,
 /// or a new line at the end. Comments and everything else stay as they were.
 fn set_line(text: &str, mac: &Mac, name: &str) -> String {
-    let line = format!("{} {name}", shieldutl::mac::fmt_mac(mac));
+    let line = format!("{} {name}", mac.fmt());
     let mut out = String::with_capacity(text.len() + line.len() + 1);
     let mut done = false;
     for l in text.lines() {

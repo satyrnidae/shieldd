@@ -3,7 +3,7 @@
 //! use. Shown as long as shieldd runs, disconnected or not.
 //!
 //! Battery icons are Ikono Bold Line Icons, turned upright; the disconnected and pairing ones
-//! are from Clarity. All from shieldtray/res/, MIT, see THIRD_PARTY.md. Rendered at the tray's
+//! are from Clarity. All from shdtray/res/, MIT, see THIRD_PARTY.md. Rendered at the tray's
 //! size and colored for the taskbar's light or dark theme.
 
 use std::cell::{Cell, RefCell};
@@ -53,7 +53,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::battery::{Battery, Gauge};
 use crate::tr;
 use crate::{About, Command, Connected, Shunned, Status};
-use shieldutl::names::MAX_NAME;
+use shdlib::names::MAX_NAME;
+use shdnet::mac::MacFmt;
 use windows::core::{BOOL, PCWSTR, PWSTR, w};
 
 //region Icons
@@ -928,10 +929,10 @@ fn menu_and_boxes(hwnd: HWND) {
     if vban_on && !QUITTING.get() {
         let text = tr!(
             "vban-on",
-            mic_stream = shieldutl::vban::MIC_STREAM,
-            mic_port = shieldutl::vban::MIC_PORT,
-            pad_stream = shieldutl::vban::PAD_STREAM,
-            pad_port = shieldutl::vban::PAD_PORT,
+            mic_stream = shdlib::vban::MIC_STREAM,
+            mic_port = shdlib::vban::MIC_PORT,
+            pad_stream = shdlib::vban::PAD_STREAM,
+            pad_port = shdlib::vban::PAD_PORT,
         );
         message(hwnd, &text, &tr!("vban-on-title"), MB_OK | MB_ICONINFORMATION);
     }
@@ -1123,7 +1124,7 @@ fn menu_items(s: &Status, pct: impl Fn(&[u8; 6]) -> Option<u8>) -> Vec<Item> {
     let mut used: Vec<char> = [&pair, &reconfigure, &exit].into_iter().filter_map(|t| accel(t)).collect();
     for (n, c) in s.controllers.iter().enumerate() {
         let sub = vec![
-            Item::new(title, 0, tr!("controller-mac", mac = shieldutl::mac::fmt_mac(&c.mac))),
+            Item::new(title, 0, tr!("controller-mac", mac = c.mac.fmt())),
             Item::separator(),
             Item::new(MF_STRING, id::of(n, id::IDENTIFY), tr!("controller-identify")),
             Item::new(MF_STRING, id::of(n, id::RENAME), tr!("controller-rename")),
@@ -1440,7 +1441,7 @@ const RENAME_EDIT: i32 = 100;
 /// Asks for a new name for `c`. Returns it cleaned up, or None if cancelled or left blank.
 fn rename(hwnd: HWND, c: &Connected) -> Option<String> {
     RENAME_TEXT.set(wide(c.name.as_deref().unwrap_or("")));
-    let prompt = tr!("rename-prompt", mac = shieldutl::mac::fmt_mac(&c.mac), max = MAX_NAME);
+    let prompt = tr!("rename-prompt", mac = c.mac.fmt(), max = MAX_NAME);
     let template = rename_template(&prompt);
     // SAFETY: a complete template, DWORD-aligned, that outlives the call; rename_proc is 'static
     let r = unsafe {
@@ -1451,7 +1452,7 @@ fn rename(hwnd: HWND, c: &Connected) -> Option<String> {
         return None;
     }
     let text = RENAME_TEXT.take();
-    shieldutl::names::clean(&String::from_utf16_lossy(&text))
+    shdlib::names::clean(&String::from_utf16_lossy(&text))
 }
 
 extern "system" fn rename_proc(dlg: HWND, msg: u32, wp: WPARAM, _: LPARAM) -> isize {
@@ -1610,7 +1611,7 @@ mod tests {
     /// target/tests/icons, next to the profile folder this test binary runs from
     fn icon_dir() -> std::path::PathBuf {
         let exe = std::env::current_exe().unwrap();
-        // target/<profile>/deps/shieldtray-<hash>.exe
+        // target/<profile>/deps/shdtray-<hash>.exe
         exe.ancestors().nth(3).unwrap().join("tests").join("icons")
     }
 

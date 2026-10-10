@@ -1,6 +1,6 @@
 [package]
-name = "shieldutl"
-description = "Small pieces shared by rtlusb and shieldd: MAC formatting, base64, and psk= values with their DPAPI seal"
+name = "shdlib"
+description = "Small pieces the other crates share: base64, and psk= values with their DPAPI seal"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -15,6 +15,7 @@ gzip = ["dep:flate2"]
 vban = ["dep:tracing"]
 
 [dependencies]
+shdnet.workspace = true
 anyhow.workspace = true
 flate2 = { version = "1.1", optional = true }
 tracing = { workspace = true, optional = true }
@@ -27,4 +28,4 @@ features = ["Win32_Foundation", "Win32_Security_Cryptography"]
 
 # Its own tests cover the gzip helpers too
 [dev-dependencies]
-shieldutl = { path = ".", features = ["gzip"] }
+shdlib = { path = ".", features = ["gzip"] }

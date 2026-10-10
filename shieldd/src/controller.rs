@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use ozproto::Host;
 use ozproto::usb::{self, Message, Request};
-use shieldtray::Battery;
+use shdtray::Battery;
 use tracing::{debug, info, warn};
 
 const HID_INTERFACE: u16 = 0;

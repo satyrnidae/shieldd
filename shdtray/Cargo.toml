@@ -1,5 +1,5 @@
 [package]
-name = "shieldtray"
+name = "shdtray"
 description = "shieldd's tray: what it shows and sends back, and the Windows tray itself"
 version.workspace = true
 edition.workspace = true
@@ -7,10 +7,11 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+shdnet.workspace = true
 anyhow.workspace = true
-# UI text, from locales/*/shieldtray.ftl
+# UI text, from locales/*/shdtray.ftl
 fluent-bundle = "0.16.0"
-shieldutl = { workspace = true, features = ["vban"] }
+shdlib = { workspace = true, features = ["vban"] }
 tracing.workspace = true
 unic-langid = "0.9.6"
 
@@ -19,7 +20,7 @@ unic-langid = "0.9.6"
 fluent-syntax = "0.12.0"
 
 [target.'cfg(windows)'.dependencies]
-# Icons from shieldtray/res/*.svg; no text or raster images in them
+# Icons from shdtray/res/*.svg; no text or raster images in them
 resvg = { version = "0.48", default-features = false }
 
 [target.'cfg(windows)'.dependencies.windows]

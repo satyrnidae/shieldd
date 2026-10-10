@@ -252,9 +252,10 @@ An older path, kept because it still works:
 
 | Path | What |
 | --- | --- |
-| `shieldtray/` | The tray: what it shows and sends back, the battery gauge, the Windows tray, its icon SVGs in `res/`, and its text in `locales/` |
+| `shdtray/` | The tray: what it shows and sends back, the battery gauge, the Windows tray, its icon SVGs in `res/`, and its text in `locales/` |
 | `shieldw/` | shieldd without a console window, for running at login |
-| `shieldutl/` | Shared by rtlusb and shieldd: MAC formatting, base64, `psk=` values and their DPAPI seal |
+| `shdlib/` | Shared by the other crates: base64, `psk=` values and their DPAPI seal |
+| `shdnet/` | MAC addresses and how they're shown; no dependencies, so ozproto can use it |
 | `ozproto/` | Ozmo protocol: wire format and host session state machine, no I/O |
 | `rtlusb/` | Userspace RTL8811AU driver over WinUSB: init, firmware, PHY, AP, WPA2, WPS |
 | `shieldd/` | The host: radio, controller setup, outputs, pairing, tray, login start, WSL bridge receiver |
@@ -262,9 +263,9 @@ An older path, kept because it still works:
 | `tools/` | rtw88 table generator, Python |
 
 The tray's text, its menu, tooltips, dialogs and notices, is in Fluent files,
-`shieldtray/locales/<language>/shieldtray.ftl`, picked by Windows' display language with US
+`shdtray/locales/<language>/shdtray.ftl`, picked by Windows' display language with US
 English as the fallback. To add a language, copy `en-US`, translate it, and add it to `LOCALES`
-in `shieldtray/src/l10n.rs`; anything left out stays English. CLI help, errors and logs are
+in `shdtray/src/l10n.rs`; anything left out stays English. CLI help, errors and logs are
 English only.
 
 `rtlusb.exe efuse | rx | ap` are bring-up tools for the adapter: dump efuse, print received
