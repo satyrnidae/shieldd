@@ -8,8 +8,15 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+# UI text, from locales/*/shieldtray.ftl
+fluent-bundle = "0.16.0"
 shieldutl = { workspace = true, features = ["vban"] }
 tracing.workspace = true
+unic-langid = "0.9.6"
+
+[dev-dependencies]
+# The message ids in each .ftl, for the tests
+fluent-syntax = "0.12.0"
 
 [target.'cfg(windows)'.dependencies]
 # Icons from shieldtray/res/*.svg; no text or raster images in them
@@ -19,6 +26,7 @@ resvg = { version = "0.48", default-features = false }
 workspace = true
 features = [
     "Win32_Foundation",
+    "Win32_Globalization",
     "Win32_Graphics_Gdi",
     "Win32_Media_Audio",
     "Win32_System_LibraryLoader",

@@ -252,7 +252,7 @@ An older path, kept because it still works:
 
 | Path | What |
 | --- | --- |
-| `shieldtray/` | The tray: what it shows and sends back, the battery gauge, the Windows tray, and its icon SVGs in `res/` |
+| `shieldtray/` | The tray: what it shows and sends back, the battery gauge, the Windows tray, its icon SVGs in `res/`, and its text in `locales/` |
 | `shieldw/` | shieldd without a console window, for running at login |
 | `shieldutl/` | Shared by rtlusb and shieldd: MAC formatting, base64, `psk=` values and their DPAPI seal |
 | `ozproto/` | Ozmo protocol: wire format and host session state machine, no I/O |
@@ -260,6 +260,12 @@ An older path, kept because it still works:
 | `shieldd/` | The host: radio, controller setup, outputs, pairing, tray, login start, WSL bridge receiver |
 | `shdlink/` | Packet format shared by `--transmit` and `--receiver` |
 | `tools/` | rtw88 table generator, Python |
+
+The tray's text, its menu, tooltips, dialogs and notices, is in Fluent files,
+`shieldtray/locales/<language>/shieldtray.ftl`, picked by Windows' display language with US
+English as the fallback. To add a language, copy `en-US`, translate it, and add it to `LOCALES`
+in `shieldtray/src/l10n.rs`; anything left out stays English. CLI help, errors and logs are
+English only.
 
 `rtlusb.exe efuse | rx | ap` are bring-up tools for the adapter: dump efuse, print received
 frames, or run a bare AP. Each run logs to `%LOCALAPPDATA%\shieldd\logs\rtlusb\latest.log` too,

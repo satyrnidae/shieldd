@@ -75,7 +75,7 @@ pub struct Args {
     conf: PathBuf,
     /// Trackpad counts -> screen pixels. Sets X to this and Y to 1.5x it,
     /// since the pad's Y resolution is coarser.
-    #[arg(long, default_value_t = 6.0)]
+    #[arg(long, default_value_t = 3.0)]
     mouse_scale: f32,
     /// Horizontal scale on its own, overriding --mouse-scale
     #[arg(long)]

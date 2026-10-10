@@ -5,6 +5,7 @@
 
 #[cfg_attr(not(windows), allow(dead_code, reason = "only the Windows tray uses it so far"))]
 mod battery;
+pub mod l10n;
 #[cfg(windows)]
 mod windows;
 

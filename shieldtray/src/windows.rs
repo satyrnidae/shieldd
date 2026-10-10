@@ -18,6 +18,7 @@ use resvg::tiny_skia::{Pixmap, Transform};
 use resvg::usvg;
 use tracing::{debug, info, warn};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Globalization::{GetUserPreferredUILanguages, MUI_LANGUAGE_NAME};
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateBitmap, CreateDIBSection, DIB_RGB_COLORS, DeleteObject,
 };
@@ -41,17 +42,19 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DS_MODALFRAME, DS_SETFONT, DefWindowProcW, DestroyIcon, DestroyMenu, DestroyWindow, DialogBoxIndirectParamW,
     DispatchMessageW, ES_AUTOHSCROLL, EndDialog, EndMenu, EnumThreadWindows, GetClassNameW, GetCursorPos,
     GetDlgItemTextW, GetMessageW, HICON, HMENU, ICONINFO, IDCANCEL, IDOK, KillTimer, MB_DEFBUTTON2, MB_ICONINFORMATION,
-    MB_ICONWARNING, MB_OK, MB_OKCANCEL, MB_SETFOREGROUND, MENU_ITEM_FLAGS, MF_DISABLED, MF_GRAYED, MF_POPUP,
-    MF_SEPARATOR, MF_STRING, MSG, MessageBoxW, PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW,
-    SM_CXSMICON, SendDlgItemMessageW, SetDlgItemTextW, SetForegroundWindow, SetTimer, TPM_RETURNCMD, TrackPopupMenu,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_COMMAND, WM_CONTEXTMENU, WM_INITDIALOG, WM_LBUTTONUP, WM_NULL,
-    WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    MB_ICONWARNING, MB_OK, MB_OKCANCEL, MB_SETFOREGROUND, MENU_ITEM_FLAGS, MESSAGEBOX_RESULT, MESSAGEBOX_STYLE,
+    MF_DISABLED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG, MessageBoxW, PostMessageW, PostQuitMessage,
+    RegisterClassW, RegisterWindowMessageW, SM_CXSMICON, SendDlgItemMessageW, SetDlgItemTextW, SetForegroundWindow,
+    SetTimer, TPM_RETURNCMD, TrackPopupMenu, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_COMMAND, WM_CONTEXTMENU,
+    WM_INITDIALOG, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_POPUP,
+    WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 
 use crate::battery::{Battery, Gauge};
+use crate::tr;
 use crate::{About, Command, Connected, Shunned, Status};
 use shieldutl::names::MAX_NAME;
-use windows::core::{BOOL, PCWSTR, w};
+use windows::core::{BOOL, PCWSTR, PWSTR, w};
 
 //region Icons
 
@@ -510,6 +513,24 @@ pub fn device_sound(connected: bool) {
     let _ = unsafe { PlaySoundW(alias, None, SND_ALIAS | SND_ASYNC | SND_NODEFAULT | SND_SYSTEM) };
 }
 
+/// The user's display languages as BCP 47 tags, most preferred first. None if Windows won't say.
+pub(crate) fn ui_languages() -> Vec<String> {
+    let (mut count, mut len) = (0u32, 0u32);
+    // SAFETY: a size query, then a buffer of that size; both counts are ours
+    unsafe {
+        if GetUserPreferredUILanguages(MUI_LANGUAGE_NAME, &mut count, None, &mut len).is_err() {
+            return Vec::new();
+        }
+        let mut buf = vec![0u16; len as usize];
+        if GetUserPreferredUILanguages(MUI_LANGUAGE_NAME, &mut count, Some(PWSTR(buf.as_mut_ptr())), &mut len).is_err()
+        {
+            return Vec::new();
+        }
+        // NUL between each, two at the end
+        buf.split(|&c| c == 0).filter(|t| !t.is_empty()).map(String::from_utf16_lossy).collect()
+    }
+}
+
 /// From Tray::start, for the menu's title and the About box
 static ABOUT: std::sync::OnceLock<About> = std::sync::OnceLock::new();
 
@@ -905,28 +926,14 @@ fn menu_and_boxes(hwnd: HWND) {
     let vban_on = matches!(cmd, Command::Vban(_, true)) && !s.controllers.iter().any(|c| c.vban);
     let _ = commands.send(cmd);
     if vban_on && !QUITTING.get() {
-        let text = format!(
-            "Controller audio over VBAN, for Voicemeeter:\n\n\
-             Mic: stream {}, sent to 127.0.0.1 port {}\n\
-             Headset: stream {}, received on port {}\n\n\
-             Point an incoming stream at the first and an outgoing one at the second, PCM 16-bit. \
-             Every controller with VBAN on shares them: their mics are mixed, and each headset plays \
-             the same audio.",
-            shieldutl::vban::MIC_STREAM,
-            shieldutl::vban::MIC_PORT,
-            shieldutl::vban::PAD_STREAM,
-            shieldutl::vban::PAD_PORT,
+        let text = tr!(
+            "vban-on",
+            mic_stream = shieldutl::vban::MIC_STREAM,
+            mic_port = shieldutl::vban::MIC_PORT,
+            pad_stream = shieldutl::vban::PAD_STREAM,
+            pad_port = shieldutl::vban::PAD_PORT,
         );
-        let text = wide(&text);
-        // SAFETY: text outlives the call
-        unsafe {
-            MessageBoxW(
-                Some(hwnd),
-                PCWSTR(text.as_ptr()),
-                w!("shieldd: VBAN on"),
-                MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND,
-            )
-        };
+        message(hwnd, &text, &tr!("vban-on-title"), MB_OK | MB_ICONINFORMATION);
     }
 }
 
@@ -1002,19 +1009,45 @@ fn menu_text(s: &str) -> String {
     s.replace('&', "&&")
 }
 
-fn menu_name(name: Option<&str>) -> String {
-    menu_text(name.unwrap_or("Controller"))
+/// What to call a controller: its name, or a stand-in without one
+fn name_of(name: Option<&str>) -> String {
+    name.map_or_else(|| tr!("controller-unnamed"), Into::into)
+}
+
+/// The tooltip with something connected: a line per controller, its name, port and level, lowest
+/// first and the ones without a reading last. Windows cuts it at 127 characters, which four
+/// long names charging can just about reach.
+fn tip_lines(controllers: &[Connected], pct: impl Fn(&[u8; 6]) -> Option<u8>) -> String {
+    let mut lines: Vec<_> = controllers.iter().map(|c| (c, c.battery.zip(pct(&c.mac)))).collect();
+    lines.sort_by_key(|(_, r)| r.map_or(u16::MAX, |(_, p)| p.into()));
+    lines
+        .iter()
+        .map(|(c, r)| {
+            let level = r.map_or_else(|| tr!("tip-no-reading"), |(b, p)| level(&b, p));
+            let port = c.port.map_or_else(|| "none".into(), |p| p.to_string());
+            tr!("tip-line", name = name_of(c.name.as_deref()), port = port, level = level)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// A connected controller's line of the menu, with a shortcut letter not in `used`
 fn controller_line(c: &Connected, pct: Option<u8>, used: &mut Vec<char>) -> String {
-    let name = shortcut(c.name.as_deref().unwrap_or("Controller"), used);
+    let name = shortcut(&name_of(c.name.as_deref()), used);
     let port = c.port.map_or_else(|| "?".into(), |p| p.to_string());
-    match (c.battery, pct) {
-        (Some(b), Some(p)) if b.charging && p >= 100 => format!("{name}: Port #{port} ({p}%) (charged)"),
-        (Some(b), Some(p)) if b.charging => format!("{name}: Port #{port} ({p}%) (charging)"),
-        (Some(_), Some(p)) => format!("{name}: Port #{port} ({p}%)"),
-        _ => format!("{name}: Port #{port}"),
+    let state = match (c.battery, pct) {
+        (Some(b), Some(p)) => charge_state(&b, p),
+        _ => "unknown",
+    };
+    tr!("controller-line", state = state, name = name, port = port, pct = pct.unwrap_or(0))
+}
+
+/// The `$state` a battery's level is shown with
+fn charge_state(b: &Battery, pct: u8) -> &'static str {
+    match b.charging {
+        true if pct >= 100 => "charged",
+        true => "charging",
+        false => "level",
     }
 }
 
@@ -1054,16 +1087,12 @@ fn accel(text: &str) -> Option<char> {
 }
 
 fn shunned_line(s: &Shunned) -> String {
-    format!("{} (shunned)", menu_name(s.name.as_deref()))
+    tr!("controller-shunned", name = menu_text(&name_of(s.name.as_deref())))
 }
 
 /// A battery's level for the icon's tooltip
 fn level(b: &Battery, pct: u8) -> String {
-    match b.charging {
-        true if pct >= 100 => format!("{pct}% (charged)"),
-        true => format!("{pct}% (charging)"),
-        false => format!("{pct}%"),
-    }
+    tr!("battery-level", state = charge_state(b, pct), pct = pct)
 }
 
 /// The controller with a battery reading and the lowest percent shown, which the icon follows
@@ -1076,30 +1105,34 @@ fn menu_items(s: &Status, pct: impl Fn(&[u8; 6]) -> Option<u8>) -> Vec<Item> {
     let gray = |on: bool| if on { MF_STRING } else { MF_STRING | MF_GRAYED };
     let title = MF_STRING | MF_DISABLED;
     let mut items = vec![
-        Item::new(MF_STRING, id::ABOUT, format!("shieldd (v{})", about_info().version)),
-        Item::new(title, 0, format!(" > {} connected.", s.controllers.len())),
+        Item::new(MF_STRING, id::ABOUT, tr!("menu-title", version = about_info().version)),
+        Item::new(title, 0, format!(" > {}", tr!("menu-connected", count = s.controllers.len()))),
     ];
     if let Some(ssid) = &s.ssid {
         let ssid = menu_text(ssid);
         let line = match s.channel {
-            Some(c) => format!(" > {ssid}, ch.{c}"),
+            Some(c) => format!(" > {}", tr!("menu-network", ssid = ssid, channel = c)),
             None => format!(" > {ssid}"),
         };
         items.push(Item::new(title, 0, line));
     }
     items.push(Item::separator());
-    let pair = if s.controllers.is_empty() { "&Pair controller..." } else { "Re-&pair controller..." };
-    let (reconfigure, exit) = ("Re&configure network", "E&xit");
+    let pair = if s.controllers.is_empty() { tr!("menu-pair") } else { tr!("menu-repair") };
+    let (reconfigure, exit) = (tr!("menu-reconfigure"), tr!("menu-exit"));
     // Controllers get the letters the rest leave
-    let mut used: Vec<char> = [pair, reconfigure, exit].into_iter().filter_map(accel).collect();
+    let mut used: Vec<char> = [&pair, &reconfigure, &exit].into_iter().filter_map(|t| accel(t)).collect();
     for (n, c) in s.controllers.iter().enumerate() {
         let sub = vec![
-            Item::new(title, 0, format!("MAC {}", shieldutl::mac::fmt_mac(&c.mac))),
+            Item::new(title, 0, tr!("controller-mac", mac = shieldutl::mac::fmt_mac(&c.mac))),
             Item::separator(),
-            Item::new(MF_STRING, id::of(n, id::IDENTIFY), "&Identify"),
-            Item::new(MF_STRING, id::of(n, id::RENAME), "&Rename..."),
-            Item::new(MF_STRING, id::of(n, id::VBAN), if c.vban { "Disable &audio" } else { "Enable &audio" }),
-            Item::new(MF_STRING, id::of(n, id::DISCONNECT), "&Disconnect"),
+            Item::new(MF_STRING, id::of(n, id::IDENTIFY), tr!("controller-identify")),
+            Item::new(MF_STRING, id::of(n, id::RENAME), tr!("controller-rename")),
+            Item::new(
+                MF_STRING,
+                id::of(n, id::VBAN),
+                if c.vban { tr!("controller-audio-off") } else { tr!("controller-audio-on") },
+            ),
+            Item::new(MF_STRING, id::of(n, id::DISCONNECT), tr!("controller-disconnect")),
         ];
         let line = Item { sub, ..Item::new(MF_STRING, 0, controller_line(c, pct(&c.mac), &mut used)) };
         items.push(line);
@@ -1108,7 +1141,7 @@ fn menu_items(s: &Status, pct: impl Fn(&[u8; 6]) -> Option<u8>) -> Vec<Item> {
         items.push(Item::new(gray(false), 0, shunned_line(sh)));
     }
     if s.controllers.is_empty() && s.shunned.is_empty() {
-        items.push(Item::new(gray(false), 0, "No controllers connected"));
+        items.push(Item::new(gray(false), 0, tr!("menu-none-connected")));
     }
     items.extend([
         Item::separator(),
@@ -1201,15 +1234,12 @@ impl State {
                 w.charge_flash_until = Some(now + FLASH_FOR);
             }
             w.was_charging = b.charging;
-            let name = c.name.as_deref().unwrap_or("Controller");
+            let name = name_of(c.name.as_deref());
             if alert {
-                alerts.push((
-                    format!("{name} battery critical"),
-                    format!("{shown}% left. Rumble is off; charge it now."),
-                ));
+                alerts.push((tr!("alert-critical-title", name = &name), tr!("alert-critical", pct = shown)));
             }
             if tell_must_charge {
-                alerts.push((format!("{name} battery empty"), "Disconnected; plug it in to use it.".into()));
+                alerts.push((tr!("alert-empty-title", name = &name), tr!("alert-empty")));
             }
         }
 
@@ -1220,10 +1250,10 @@ impl State {
         self.focus = up.as_ref().map(|c| c.mac);
         if s.pairing {
             let icon = self.animate(Icon::Pairing(0), now);
-            self.show(icon, msg, Some("SHIELD controller: pairing"));
+            self.show(icon, msg, Some(&tr!("tip-pairing")));
         } else if s.joining && up.is_none() {
             let icon = self.animate(Icon::Spinner(0), now);
-            self.show(icon, msg, Some("SHIELD controller: connecting..."));
+            self.show(icon, msg, Some(&tr!("tip-joining")));
         } else if let Some(c) = up {
             let b = c.battery.expect("lowest has a reading");
             let shown = self.watches.get(&c.mac).and_then(|w| w.pct).unwrap_or(0);
@@ -1234,28 +1264,16 @@ impl State {
                 Icon::Charging | Icon::Charged if self.charge_flashing(now) => self.animate(Icon::Charging, now),
                 _ => settled,
             };
-            let mut up: Vec<_> =
-                s.controllers.iter().filter_map(|c| Some((c, c.battery?, self.watches.get(&c.mac)?.pct?))).collect();
-            let tip = match up.len() {
-                1 => format!("SHIELD controller: {}", level(&b, shown)),
-                _ => {
-                    up.sort_by_key(|(_, _, p)| *p);
-                    let lines: Vec<_> = up
-                        .iter()
-                        .map(|(c, b, p)| format!("{}: {}", c.name.as_deref().unwrap_or("Controller"), level(b, *p)))
-                        .collect();
-                    format!("SHIELD controllers\n{}", lines.join("\n"))
-                }
-            };
+            let tip = tip_lines(&s.controllers, |m| self.watches.get(m).and_then(|w| w.pct));
             self.show(icon, msg, Some(&tip));
         } else {
             let tip = match s.controllers.is_empty() {
-                false => "SHIELD controller: connected, no battery reading",
-                true => "SHIELD controller: not connected",
+                false => tip_lines(&s.controllers, |m| self.watches.get(m).and_then(|w| w.pct)),
+                true => tr!("tip-disconnected"),
             };
             // Flashing only with nothing connected, and only for a bit
             let icon = if self.flashing(now) { self.animate(Icon::Disconnected, now) } else { Icon::Disconnected };
-            self.show(icon, msg, Some(tip));
+            self.show(icon, msg, Some(&tip));
         }
         for (title, text) in alerts {
             self.notify(&title, &text, true);
@@ -1422,7 +1440,7 @@ const RENAME_EDIT: i32 = 100;
 /// Asks for a new name for `c`. Returns it cleaned up, or None if cancelled or left blank.
 fn rename(hwnd: HWND, c: &Connected) -> Option<String> {
     RENAME_TEXT.set(wide(c.name.as_deref().unwrap_or("")));
-    let prompt = format!("Name for {}, up to {MAX_NAME} characters:", shieldutl::mac::fmt_mac(&c.mac));
+    let prompt = tr!("rename-prompt", mac = shieldutl::mac::fmt_mac(&c.mac), max = MAX_NAME);
     let template = rename_template(&prompt);
     // SAFETY: a complete template, DWORD-aligned, that outlives the call; rename_proc is 'static
     let r = unsafe {
@@ -1499,14 +1517,21 @@ fn rename_template(prompt: &str) -> Vec<u32> {
     w.extend([4, 0, 0, 220, 62]);
     // No menu, the default class
     w.extend([0, 0]);
-    text(&mut w, "shieldd: rename controller");
+    text(&mut w, &tr!("rename-title"));
     w.push(9);
     text(&mut w, "Segoe UI");
     item(&mut w, 0, [7, 7, 206, 9], 0xFFFF, STATIC, prompt);
     let edit = (WS_BORDER | WS_TABSTOP).0 | ES_AUTOHSCROLL as u32;
     item(&mut w, edit, [7, 19, 206, 14], RENAME_EDIT as u16, EDIT, "");
-    item(&mut w, WS_TABSTOP.0 | BS_DEFPUSHBUTTON as u32, [109, 41, 50, 14], IDOK.0 as u16, BUTTON, "OK");
-    item(&mut w, WS_TABSTOP.0 | BS_PUSHBUTTON as u32, [163, 41, 50, 14], IDCANCEL.0 as u16, BUTTON, "Cancel");
+    item(&mut w, WS_TABSTOP.0 | BS_DEFPUSHBUTTON as u32, [109, 41, 50, 14], IDOK.0 as u16, BUTTON, &tr!("dialog-ok"));
+    item(
+        &mut w,
+        WS_TABSTOP.0 | BS_PUSHBUTTON as u32,
+        [163, 41, 50, 14],
+        IDCANCEL.0 as u16,
+        BUTTON,
+        &tr!("dialog-cancel"),
+    );
     if w.len() % 2 == 1 {
         w.push(0);
     }
@@ -1517,70 +1542,27 @@ fn rename_template(prompt: &str) -> Vec<u32> {
 fn about(hwnd: HWND) {
     let info = about_info();
     let author = info.authors.replace(':', ", ");
-    let text = format!(
-        "shieldd v{version}\n\
-         Built {built}\n\
-         Copyright (C) 2026 {author}\n\n\
-         Native Windows host for the 2015 NVIDIA SHIELD controller.\n\n\
-         shieldd comes with ABSOLUTELY NO WARRANTY. It is free software, and you are welcome to \
-         redistribute it under the terms of the GNU General Public License, version 2 only.\n\n\
-         Includes code derived from rtw88, (c) 2018-2024 Realtek Corporation, from Realtek's \
-         RTL8812AU/8821AU driver and its halmac layer, (c) Realtek Corporation, and from ozwpan, \
-         (c) 2011 Ozmo Inc., all under GPL-2.0. Embeds Realtek's RTL8821A firmware, (c) 2010 Realtek \
-         Semiconductor Corporation, unmodified under its own redistribution license, provided AS IS \
-         without warranty. Tray icons from Ikono Bold Line Icons, (c) Will Kelly, Clarity, (c) VMware, \
-         Inc., and Phosphor, (c) Phosphor Icons, all MIT. Rust crates under MIT, Apache-2.0, BSD and similar licenses.\n\n\
-         Full license texts and copyright notices are in LICENSE and THIRD_PARTY.md, which come with \
-         the source.\n\n\
-         Most of shieldd was written by an AI model, Anthropic's Claude, under its maintainer's \
-         direction and testing.",
-        version = info.version,
-        built = info.built,
-    );
-    let text = wide(&text);
-    // SAFETY: text outlives the call
-    unsafe {
-        MessageBoxW(
-            Some(hwnd),
-            PCWSTR(text.as_ptr()),
-            w!("About shieldd"),
-            MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND,
-        )
-    };
+    let text = tr!("about", version = info.version, built = info.built, author = author);
+    message(hwnd, &text, &tr!("about-title"), MB_OK | MB_ICONINFORMATION);
 }
 
 /// How to pair, before turning it on
 fn confirm_pair(hwnd: HWND, connected: bool) -> bool {
-    let text = wide(
-        "Hold the NVIDIA button on the controller until its light flashes.\n\n\
-         Pairing stays open for 2 minutes, or until one controller pairs; pair again for each more. \
-         Controllers already connected stay connected.",
-    );
-    let title = if connected { w!("shieldd: re-pair controller") } else { w!("shieldd: pair controller") };
-    // SAFETY: text outlives the call
-    let r = unsafe {
-        MessageBoxW(Some(hwnd), PCWSTR(text.as_ptr()), title, MB_OKCANCEL | MB_ICONINFORMATION | MB_SETFOREGROUND)
-    };
-    r == IDOK
+    let title = if connected { tr!("repair-title") } else { tr!("pair-title") };
+    message(hwnd, &tr!("pair"), &title, MB_OKCANCEL | MB_ICONINFORMATION) == IDOK
 }
 
 /// A new network throws every pairing away, so ask first
 fn confirm_reconfigure(hwnd: HWND) -> bool {
-    let text = wide(
-        "The network will be made over with a new name and passphrase. All paired controllers will be \
-         disconnected, and each will need to be paired again.\n\n\
-         Pairing opens right after, for the first of them.\n\nReconfigure the network?",
-    );
-    // SAFETY: text outlives the call
-    let r = unsafe {
-        MessageBoxW(
-            Some(hwnd),
-            PCWSTR(text.as_ptr()),
-            w!("shieldd: reconfigure network"),
-            MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2 | MB_SETFOREGROUND,
-        )
-    };
-    r == IDOK
+    let style = MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2;
+    message(hwnd, &tr!("reconfigure"), &tr!("reconfigure-title"), style) == IDOK
+}
+
+/// A message box in front, until it's closed
+fn message(hwnd: HWND, text: &str, title: &str, style: MESSAGEBOX_STYLE) -> MESSAGEBOX_RESULT {
+    let (text, title) = (wide(text), wide(title));
+    // SAFETY: text and title outlive the call
+    unsafe { MessageBoxW(Some(hwnd), PCWSTR(text.as_ptr()), PCWSTR(title.as_ptr()), style | MB_SETFOREGROUND) }
 }
 
 //endregion

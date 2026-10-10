@@ -27,7 +27,7 @@ use ozproto::wire::ETHERTYPE;
 use rtlusb::ap::WpsConfig;
 use rtlusb::wps::{Credential, Device};
 use rtlusb::{ApOptions, Link, Radio, RadioEvent};
-use shieldtray::{self as tray, Command, Shunned, Status, Tray};
+use shieldtray::{self as tray, Command, Shunned, Status, Tray, tr};
 use shieldutl::mac::fmt_mac;
 use shieldutl::vban::{self, Vban};
 use tracing::{debug, info, trace, warn};
@@ -128,7 +128,7 @@ impl Shared {
                 // Who wants it stays remembered; the next toggle tries again
                 Err(e) => {
                     warn!("VBAN: {e:#}");
-                    self.tray.problem("VBAN failed", &format!("{e:#}"));
+                    self.tray.problem(&tr!("problem-vban-title"), &format!("{e:#}"));
                 }
             }
         }
@@ -163,7 +163,7 @@ impl Shared {
             }
             Err(e) => {
                 warn!("renaming the controller: {e:#}");
-                self.tray.problem("Couldn't rename the controller", &format!("{e:#}"));
+                self.tray.problem(&tr!("problem-rename-title"), &format!("{e:#}"));
                 false
             }
         }
@@ -192,12 +192,8 @@ impl Shared {
                         }
                         // Between runs that failed, the adapter may well be in already
                         match rtlusb::usb::present() {
-                            true => self
-                                .tray
-                                .problem("Pairing shortly", "Pairing starts when shieldd tries the adapter again."),
-                            false => self
-                                .tray
-                                .problem("Waiting for the adapter", "Pairing starts once the adapter is plugged in."),
+                            true => self.tray.problem(&tr!("problem-pair-soon-title"), &tr!("problem-pair-soon")),
+                            false => self.tray.problem(&tr!("problem-no-adapter-title"), &tr!("problem-no-adapter")),
                         }
                     }
                     Command::Rename(mac, name) => {
@@ -288,10 +284,7 @@ fn save_group(args: &Args, sh: &mut Shared, group: &p2pconf::Group, now: Instant
         Err(e) => {
             // Hosted until shieldd exits, restarts included
             warn!("saving the new group failed: {e:#}; retrying every {SAVE_RETRY:?}");
-            sh.tray.problem(
-                "Couldn't save the new network",
-                &format!("{e:#}\n\nControllers paired to it work until shieldd exits. Retrying."),
-            );
+            sh.tray.problem(&tr!("problem-save-title"), &tr!("problem-save", error = format!("{e:#}")));
             sh.unsaved = Some(group.clone());
             Some(now + SAVE_RETRY)
         }
@@ -321,8 +314,8 @@ fn seat_for<'a>(
                 link.kick(&mac)?;
                 link.shun(&mac, SLEEP_SHUN);
                 sh.tray.problem(
-                    "Too many controllers",
-                    &format!("Only {MAX_SEATS} can be connected at once; {} was sent away.", fmt_mac(&mac)),
+                    &tr!("problem-too-many-title"),
+                    &tr!("problem-too-many", max = MAX_SEATS, mac = fmt_mac(&mac)),
                 );
                 return Ok(None);
             }
@@ -462,7 +455,7 @@ fn run_once(args: &Args, start: Start, quit: &AtomicBool, sh: &mut Shared) -> Re
                     pair_until = None;
                     link.set_wps(None)?;
                     warn!("no controller paired within {PAIR_WINDOW:?}; pairing is off");
-                    sh.tray.problem("No controller paired", "Nothing paired in 2 minutes; pairing is off again.");
+                    sh.tray.problem(&tr!("problem-nothing-paired-title"), &tr!("problem-nothing-paired"));
                 }
                 if now.duration_since(last_slow) >= SLOW_POLL {
                     last_slow = now;
@@ -477,8 +470,7 @@ fn run_once(args: &Args, start: Start, quit: &AtomicBool, sh: &mut Shared) -> Re
                     for seat in &mut seats {
                         let Some(why) = seat.pad_failed.take() else { continue };
                         warn!(sta = %fmt_mac(&seat.mac), "no virtual pad for it: {why}; sending it away");
-                        let text = format!("{why}\n\nThe controller was sent away.");
-                        sh.tray.problem("Couldn't add a virtual pad", &text);
+                        sh.tray.problem(&tr!("problem-pad-title"), &tr!("problem-pad", error = why.as_str()));
                         if let Some(peer) = seat.host.peer() {
                             link.kick(&peer)?;
                             link.shun(&peer, SLEEP_SHUN);
@@ -497,7 +489,7 @@ fn run_once(args: &Args, start: Start, quit: &AtomicBool, sh: &mut Shared) -> Re
                                     pair_until = Some(now + PAIR_WINDOW);
                                     info!("pairing from the tray: hold the NVIDIA button until the light flashes");
                                 }
-                                Err(e) => sh.tray.problem("Can't pair", &format!("{e:#}")),
+                                Err(e) => sh.tray.problem(&tr!("problem-pair-title"), &format!("{e:#}")),
                             },
                             Command::Pair => {}
                             Command::Reconfigure => {
