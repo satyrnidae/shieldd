@@ -17,7 +17,7 @@ use crate::hex;
 use crate::outputs::{Desktop, Gamepad};
 
 /// XInput's four ports
-pub const MAX_SEATS: usize = 4;
+pub const MAX_SEATS: usize = shdtray::MAX_CONTROLLERS;
 /// How long a DISCONNECT goodbye gets to be acknowledged before the kick goes out anyway.
 /// The controller acks it and carries on, so it only goes first as a courtesy.
 const GOODBYE_WAIT: Duration = Duration::from_secs(1);

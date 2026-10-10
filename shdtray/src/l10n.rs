@@ -1,5 +1,5 @@
-//! UI text, from the Fluent files under locales/, one per language, embedded: the tray's and the
-//! notices shieldd sends to it. CLI help, errors and logs stay English.
+//! UI text, from the Fluent files under res/locales/, one per language, embedded: the tray's and
+//! the notices shieldd sends to it. CLI help, errors and logs stay English.
 //!
 //! The user's Windows display languages pick the text, most preferred first. Anything a language
 //! leaves out falls back to en-US.
@@ -15,13 +15,13 @@ use unic_langid::LanguageIdentifier;
 pub use fluent_bundle::FluentArgs;
 
 /// Every language there's text for, en-US first
-const LOCALES: &[(&str, &str)] = &[("en-US", include_str!("../locales/en-US/shdtray.ftl"))];
+const LOCALES: &[(&str, &str)] = &[("en-US", include_str!("../res/locales/en-US/shdtray.ftl"))];
 
 /// The user's languages that have text, most preferred first, ending with en-US
 static BUNDLES: OnceLock<Vec<FluentBundle<FluentResource>>> = OnceLock::new();
 
 /// The text for a Fluent message, in the user's language: `tr!("menu-exit")`, or with
-/// variables, `tr!("tip-line", name = n, port = p, level = l)`
+/// variables, `tr!("alert-low", pct = 31)`
 #[macro_export]
 macro_rules! tr {
     ($id:literal) => {
@@ -165,7 +165,7 @@ mod tests {
     fn english_formats_clean() {
         let b = bundle(0);
         let mut args = FluentArgs::new();
-        for k in ["version", "ssid", "state", "name", "port", "mac", "level", "built", "author", "error"] {
+        for k in ["version", "ssid", "state", "name", "port", "mac", "built", "author", "error"] {
             args.set(k, "x");
         }
         for k in ["count", "channel", "pct", "max", "mic_stream", "mic_port", "pad_stream", "pad_port"] {
@@ -180,8 +180,11 @@ mod tests {
         assert_eq!(tr!("rename-prompt", mac = "m", max = 1), "Name for m, up to 1 character:");
         assert_eq!(tr!("menu-connected", count = 3), "3 connected.");
         assert_eq!(tr!("controller-line", state = "level", name = "A", port = "?", pct = 7), "A: Port #? (7%)");
-        assert_eq!(tr!("tip-line", name = "A", port = 1, level = "8%"), "A Port #1: 8%");
-        assert_eq!(tr!("tip-line", name = "A", port = "none", level = "8%"), "A: 8%");
+        assert_eq!(
+            tr!("controller-line", state = "charging", name = "A", port = 1, pct = 93),
+            "A: Port #1 (charging, 93%)"
+        );
+        assert_eq!(tr!("controller-line", state = "charged", name = "A", port = 1, pct = 100), "A: Port #1 (charged)");
     }
 
     #[test]

@@ -13,6 +13,9 @@ pub use battery::Battery;
 #[cfg(windows)]
 pub use windows::{Tray, device_sound};
 
+/// XInput's four ports: as many controllers as can be hosted at once
+pub const MAX_CONTROLLERS: usize = 4;
+
 /// What the About box tells, from the program it's in
 #[derive(Debug, Clone, Copy)]
 pub struct About {

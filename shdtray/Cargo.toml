@@ -9,7 +9,7 @@ publish.workspace = true
 [dependencies]
 shdnet.workspace = true
 anyhow.workspace = true
-# UI text, from locales/*/shdtray.ftl
+# UI text, from res/locales/*/shdtray.ftl
 fluent-bundle = "0.16.0"
 shdlib = { workspace = true, features = ["vban"] }
 tracing.workspace = true

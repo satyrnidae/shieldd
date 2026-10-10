@@ -34,8 +34,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VK_SHIFT,
 };
 use windows::Win32::UI::Shell::{
-    NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIIF_ERROR, NIIF_NOSOUND, NIIF_WARNING, NIM_ADD, NIM_DELETE,
-    NIM_MODIFY, NOTIFY_ICON_MESSAGE, NOTIFYICONDATAW, NOTIFYICONIDENTIFIER, Shell_NotifyIconGetRect, Shell_NotifyIconW,
+    NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIIF_ERROR, NIIF_INFO, NIIF_NOSOUND, NIIF_WARNING, NIM_ADD,
+    NIM_DELETE, NIM_MODIFY, NOTIFY_ICON_MESSAGE, NOTIFYICONDATAW, NOTIFYICONIDENTIFIER, Shell_NotifyIconGetRect,
+    Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, CreateIconIndirect, CreatePopupMenu, CreateWindowExW, DS_CENTER,
@@ -52,7 +53,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::battery::{Battery, Gauge};
 use crate::tr;
-use crate::{About, Command, Connected, Shunned, Status};
+use crate::{About, Command, Connected, MAX_CONTROLLERS, Shunned, Status};
 use shdlib::names::MAX_NAME;
 use shdnet::mac::MacFmt;
 use windows::core::{BOOL, PCWSTR, PWSTR, w};
@@ -110,7 +111,7 @@ const FLASH_FRAME: Duration = Duration::from_millis(800);
 /// charging starts
 const FLASH_FOR: Duration = Duration::from_secs(5);
 /// How many controllers the corner badge can count: one has none, and four is all there can be
-const BADGES: std::ops::RangeInclusive<u8> = 2..=4;
+const BADGES: std::ops::RangeInclusive<u8> = 2..=MAX_CONTROLLERS as u8;
 /// The badge's side, as a share of the icon's
 const BADGE_SCALE: f32 = 5.0 / 8.0;
 /// Where the ring around each Phosphor digit ends, the pen back at (128, 216). The number's
@@ -745,13 +746,28 @@ fn quit() {
     unsafe { PostQuitMessage(0) };
 }
 
+/// What a notification looks and sounds like
+#[derive(Debug, Clone, Copy)]
+enum Notice {
+    Info,
+    Warning,
+    /// The error icon and the critical battery alarm
+    Alarm,
+}
+
 /// One controller's battery, as the tray follows it
 #[derive(Debug, Default)]
 struct Watch {
+    /// Its place in the order controllers connected, while it is
+    connection: Option<u64>,
     gauge: Gauge,
     /// The gauge's last answer
     pct: Option<u8>,
     critical_alerted: bool,
+    /// Told it's low, this discharge
+    low_alerted: bool,
+    /// Last refresh found it on the charger and full
+    was_charged: bool,
     /// Last must-charge notification
     must_charge_told: Option<Instant>,
     /// Last refresh found it on the charger
@@ -774,8 +790,10 @@ struct State {
     status: Status,
     /// Every controller seen this run, by MAC
     watches: HashMap<[u8; 6], Watch>,
-    /// The controller the battery icon shows: the lowest
+    /// The controller the battery icon shows: the lowest, discharging first
     focus: Option<[u8; 6]>,
+    /// The next controller to connect gets this as its connection
+    connections: u64,
     /// When the animation on screen last moved
     frame_at: Instant,
     /// Last refresh found nothing connected, pairing or joining
@@ -836,6 +854,7 @@ fn run(rx: Receiver<Msg>, commands: Sender<Command>) -> Result<()> {
         status: Status::default(),
         watches: HashMap::new(),
         focus: None,
+        connections: 0,
         frame_at: Instant::now(),
         was_disconnected: false,
         had_controller: false,
@@ -900,10 +919,9 @@ fn menu_and_boxes(hwnd: HWND) {
         }
         break (picked, s, commands);
     };
-    let connected = !s.controllers.is_empty();
     let cmd = match (picked, id::controller(picked)) {
         _ if QUITTING.get() => return,
-        (id::PAIR, _) if confirm_pair(hwnd, connected) => Command::Pair,
+        (id::PAIR, _) if confirm_pair(hwnd) => Command::Pair,
         (id::RECONFIGURE, _) if confirm_reconfigure(hwnd) => Command::Reconfigure,
         (id::EXIT, _) => Command::Exit,
         (id::ABOUT, _) => return about(hwnd),
@@ -1015,18 +1033,19 @@ fn name_of(name: Option<&str>) -> String {
     name.map_or_else(|| tr!("controller-unnamed"), Into::into)
 }
 
-/// The tooltip with something connected: a line per controller, its name, port and level, lowest
-/// first and the ones without a reading last. Windows cuts it at 127 characters, which four
-/// long names charging can just about reach.
-fn tip_lines(controllers: &[Connected], pct: impl Fn(&[u8; 6]) -> Option<u8>) -> String {
-    let mut lines: Vec<_> = controllers.iter().map(|c| (c, c.battery.zip(pct(&c.mac)))).collect();
-    lines.sort_by_key(|(_, r)| r.map_or(u16::MAX, |(_, p)| p.into()));
+/// The tooltip with something connected: each controller's menu line without the port or the
+/// shortcut. By port, then the order they connected in, so the newest is at the bottom; without a
+/// port, after those with one. `watch` is a controller's percent shown and its connection.
+/// Windows cuts the tooltip at 127 characters: four 15-character names charging at 99% come to
+/// exactly that.
+fn tip_lines(controllers: &[Connected], watch: impl Fn(&[u8; 6]) -> (Option<u8>, Option<u64>)) -> String {
+    let mut lines: Vec<_> = controllers.iter().map(|c| (c, watch(&c.mac))).collect();
+    lines.sort_by_key(|(c, (_, n))| (c.port.unwrap_or(u8::MAX), n.unwrap_or(u64::MAX)));
     lines
         .iter()
-        .map(|(c, r)| {
-            let level = r.map_or_else(|| tr!("tip-no-reading"), |(b, p)| level(&b, p));
-            let port = c.port.map_or_else(|| "none".into(), |p| p.to_string());
-            tr!("tip-line", name = name_of(c.name.as_deref()), port = port, level = level)
+        .map(|(c, (pct, _))| {
+            let (state, pct) = battery_args(c, *pct);
+            tr!("tip-line", state = state, name = name_of(c.name.as_deref()), pct = pct)
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -1036,11 +1055,16 @@ fn tip_lines(controllers: &[Connected], pct: impl Fn(&[u8; 6]) -> Option<u8>) ->
 fn controller_line(c: &Connected, pct: Option<u8>, used: &mut Vec<char>) -> String {
     let name = shortcut(&name_of(c.name.as_deref()), used);
     let port = c.port.map_or_else(|| "?".into(), |p| p.to_string());
-    let state = match (c.battery, pct) {
-        (Some(b), Some(p)) => charge_state(&b, p),
-        _ => "unknown",
-    };
-    tr!("controller-line", state = state, name = name, port = port, pct = pct.unwrap_or(0))
+    let (state, pct) = battery_args(c, pct);
+    tr!("controller-line", state = state, name = name, port = port, pct = pct)
+}
+
+/// The `$state` and `$pct` a controller's battery shows with, `pct` the percent shown
+fn battery_args(c: &Connected, pct: Option<u8>) -> (&'static str, u8) {
+    match (c.battery, pct) {
+        (Some(b), Some(p)) => (charge_state(&b, p), p),
+        _ => ("unknown", 0),
+    }
 }
 
 /// The `$state` a battery's level is shown with
@@ -1091,14 +1115,14 @@ fn shunned_line(s: &Shunned) -> String {
     tr!("controller-shunned", name = menu_text(&name_of(s.name.as_deref())))
 }
 
-/// A battery's level for the icon's tooltip
-fn level(b: &Battery, pct: u8) -> String {
-    tr!("battery-level", state = charge_state(b, pct), pct = pct)
-}
-
-/// The controller with a battery reading and the lowest percent shown, which the icon follows
+/// The controller the icon follows: of those with a battery reading, one running down before
+/// one on the charger, charged or not, then the lowest percent shown
 fn lowest(controllers: &[Connected], pct: impl Fn(&[u8; 6]) -> Option<u8>) -> Option<&Connected> {
-    controllers.iter().filter(|c| c.battery.is_some()).min_by_key(|c| pct(&c.mac).unwrap_or(u8::MAX))
+    controllers
+        .iter()
+        .filter_map(|c| Some((c, c.battery?)))
+        .min_by_key(|(c, b)| (b.charging, pct(&c.mac).unwrap_or(u8::MAX)))
+        .map(|(c, _)| c)
 }
 
 /// The menu for `s`, with each controller's percent as the tray shows it
@@ -1118,7 +1142,7 @@ fn menu_items(s: &Status, pct: impl Fn(&[u8; 6]) -> Option<u8>) -> Vec<Item> {
         items.push(Item::new(title, 0, line));
     }
     items.push(Item::separator());
-    let pair = if s.controllers.is_empty() { tr!("menu-pair") } else { tr!("menu-repair") };
+    let pair = tr!("menu-pair");
     let (reconfigure, exit) = (tr!("menu-reconfigure"), tr!("menu-exit"));
     // Controllers get the letters the rest leave
     let mut used: Vec<char> = [&pair, &reconfigure, &exit].into_iter().filter_map(|t| accel(t)).collect();
@@ -1146,7 +1170,8 @@ fn menu_items(s: &Status, pct: impl Fn(&[u8; 6]) -> Option<u8>) -> Vec<Item> {
     }
     items.extend([
         Item::separator(),
-        Item::new(gray(!s.pairing), id::PAIR, pair),
+        // Already open, or no room for another
+        Item::new(gray(!s.pairing && s.controllers.len() < MAX_CONTROLLERS), id::PAIR, pair),
         Item::new(MF_STRING, id::RECONFIGURE, reconfigure),
         Item::separator(),
         Item::new(MF_STRING, id::EXIT, exit),
@@ -1206,6 +1231,19 @@ impl State {
             if reading(mac).is_none() {
                 w.gauge.forget_charger();
                 w.was_charging = false;
+                w.was_charged = false;
+            }
+        }
+        for (mac, w) in &mut self.watches {
+            if !s.controllers.iter().any(|c| c.mac == *mac) {
+                w.connection = None;
+            }
+        }
+        for c in &s.controllers {
+            let w = self.watches.entry(c.mac).or_default();
+            if w.connection.is_none() {
+                w.connection = Some(self.connections);
+                self.connections += 1;
             }
         }
         let mut alerts = Vec::new();
@@ -1216,6 +1254,7 @@ impl State {
             w.pct = Some(shown);
             if fresh || b.charging {
                 w.critical_alerted = false;
+                w.low_alerted = false;
             }
             let tell_must_charge =
                 b.must_charge && w.must_charge_told.is_none_or(|t| now.duration_since(t) >= MUST_CHARGE_EVERY);
@@ -1231,16 +1270,38 @@ impl State {
             if alert {
                 w.critical_alerted = true;
             }
+            // Once per discharge, at the controller's 25% band; critical says it instead if it
+            // gets there first
+            let low = !b.charging && b.band < 50 && !w.low_alerted && !w.critical_alerted;
+            if !b.charging && (b.band < 50 || w.critical_alerted) {
+                w.low_alerted = true;
+            }
+            let name = name_of(c.name.as_deref());
+            let charged = charge_state(&b, shown) == "charged";
+            // The charging bit coming on. The gauge only reads full once the charger lets go, so
+            // this is nearly always the charging notice, then the charged one up to 30 s later.
             if b.charging && !w.was_charging {
                 w.charge_flash_until = Some(now + FLASH_FOR);
+                // Already showing full: just that it's charged
+                if !charged {
+                    let notice = (tr!("alert-charging-title", name = &name), tr!("alert-charging", pct = shown));
+                    alerts.push((Notice::Info, notice.0, notice.1));
+                }
+            }
+            if charged && !w.was_charged {
+                alerts.push((Notice::Info, tr!("alert-charged-title", name = &name), tr!("alert-charged")));
             }
             w.was_charging = b.charging;
-            let name = name_of(c.name.as_deref());
+            w.was_charged = charged;
+            if low {
+                alerts.push((Notice::Warning, tr!("alert-low-title", name = &name), tr!("alert-low", pct = shown)));
+            }
             if alert {
-                alerts.push((tr!("alert-critical-title", name = &name), tr!("alert-critical", pct = shown)));
+                let notice = (tr!("alert-critical-title", name = &name), tr!("alert-critical", pct = shown));
+                alerts.push((Notice::Alarm, notice.0, notice.1));
             }
             if tell_must_charge {
-                alerts.push((tr!("alert-empty-title", name = &name), tr!("alert-empty")));
+                alerts.push((Notice::Alarm, tr!("alert-empty-title", name = &name), tr!("alert-empty")));
             }
         }
 
@@ -1265,20 +1326,24 @@ impl State {
                 Icon::Charging | Icon::Charged if self.charge_flashing(now) => self.animate(Icon::Charging, now),
                 _ => settled,
             };
-            let tip = tip_lines(&s.controllers, |m| self.watches.get(m).and_then(|w| w.pct));
+            let tip = self.tip_lines(&s.controllers);
             self.show(icon, msg, Some(&tip));
         } else {
             let tip = match s.controllers.is_empty() {
-                false => tip_lines(&s.controllers, |m| self.watches.get(m).and_then(|w| w.pct)),
+                false => self.tip_lines(&s.controllers),
                 true => tr!("tip-disconnected"),
             };
             // Flashing only with nothing connected, and only for a bit
             let icon = if self.flashing(now) { self.animate(Icon::Disconnected, now) } else { Icon::Disconnected };
             self.show(icon, msg, Some(&tip));
         }
-        for (title, text) in alerts {
-            self.notify(&title, &text, true);
+        for (kind, title, text) in alerts {
+            self.notify(&title, &text, kind);
         }
+    }
+
+    fn tip_lines(&self, controllers: &[Connected]) -> String {
+        tip_lines(controllers, |m| self.watches.get(m).map_or((None, None), |w| (w.pct, w.connection)))
     }
 
     /// The animation's next frame, if what's on screen is animated
@@ -1355,18 +1420,22 @@ impl State {
     }
 
     /// `alarm`: Windows' critical battery sound and the error icon, else a plain warning
-    fn notify(&self, title: &str, text: &str, alarm: bool) {
-        info!(title, text, "notification");
+    fn notify(&self, title: &str, text: &str, kind: Notice) {
+        info!(title, text, ?kind, "notification");
         let mut d = self.data();
         d.uFlags = NIF_INFO;
         put(&mut d.szInfoTitle, title);
         put(&mut d.szInfo, text);
-        // Our own sound instead of the generic one
-        d.dwInfoFlags = if alarm { NIIF_ERROR | NIIF_NOSOUND } else { NIIF_WARNING };
+        d.dwInfoFlags = match kind {
+            Notice::Info => NIIF_INFO,
+            Notice::Warning => NIIF_WARNING,
+            // Our own sound instead of the generic one
+            Notice::Alarm => NIIF_ERROR | NIIF_NOSOUND,
+        };
         // SAFETY: as in show; PlaySound copies nothing from us after returning
         unsafe {
             let _ = Shell_NotifyIconW(NIM_MODIFY, &d);
-            if alarm {
+            if matches!(kind, Notice::Alarm) {
                 let _ = PlaySoundW(w!("CriticalBatteryAlarm"), None, SND_ALIAS | SND_ASYNC);
             }
         }
@@ -1386,7 +1455,7 @@ impl State {
                     self.status = s;
                     self.refresh();
                 }
-                Ok(Msg::Problem(title, text)) => self.notify(&title, &text, false),
+                Ok(Msg::Problem(title, text)) => self.notify(&title, &text, Notice::Warning),
                 Ok(Msg::Quit) | Err(TryRecvError::Disconnected) => return quit(),
                 Err(TryRecvError::Empty) => break,
             }
@@ -1548,9 +1617,8 @@ fn about(hwnd: HWND) {
 }
 
 /// How to pair, before turning it on
-fn confirm_pair(hwnd: HWND, connected: bool) -> bool {
-    let title = if connected { tr!("repair-title") } else { tr!("pair-title") };
-    message(hwnd, &tr!("pair"), &title, MB_OKCANCEL | MB_ICONINFORMATION) == IDOK
+fn confirm_pair(hwnd: HWND) -> bool {
+    message(hwnd, &tr!("pair"), &tr!("pair-title"), MB_OKCANCEL | MB_ICONINFORMATION) == IDOK
 }
 
 /// A new network throws every pairing away, so ask first
@@ -1765,7 +1833,7 @@ mod tests {
         assert_eq!(shortcut("P&A-1", &mut used), "P&&A-&1");
         assert_eq!(shortcut("pal", &mut used), "pal", "nothing left");
         assert_eq!(used, ['p', 'c', 'x', 'a', 'l', 'o', '1']);
-        assert_eq!(accel("Re-&pair controller..."), Some('p'));
+        assert_eq!(accel("&Pair controller..."), Some('p'));
         assert_eq!(accel("Pad&&Co"), None);
     }
 
@@ -1788,7 +1856,7 @@ mod tests {
                 "&B: Port #2 (20%)",
                 "Controller (shunned)",
                 "",
-                "Re-&pair controller...",
+                "&Pair controller...",
                 "Re&configure network",
                 "",
                 "E&xit",
@@ -1814,6 +1882,30 @@ mod tests {
         let none = menu_items(&Status { pairing: true, ..Default::default() }, |_| None);
         let at = |t: &str| none.iter().find(|i| i.text == t).unwrap().flags.0 & MF_GRAYED.0 != 0;
         assert!(at("No controllers connected") && at("&Pair controller..."));
+        // Four connected: no room to pair a fifth
+        let pair_grayed = |n: u8| {
+            let s = Status { controllers: (1..=n).map(|m| up(m, "A", false)).collect(), ..Default::default() };
+            let items = menu_items(&s, |_| Some(50));
+            items.iter().find(|i| i.id == id::PAIR).unwrap().flags.0 & MF_GRAYED.0 != 0
+        };
+        assert!(!pair_grayed(3));
+        assert!(pair_grayed(4));
+    }
+
+    #[test]
+    fn tip_by_port_then_connection() {
+        let mut cs = [up(1, "A", false), up(2, "B", false), up(3, "C", false), up(4, "D", false)];
+        cs[0].port = Some(2);
+        cs[1].port = None;
+        cs[2].port = Some(1);
+        cs[3].port = None;
+        cs[1].battery = None;
+        let watch = |m: &[u8; 6]| (Some(10 * m[0]), Some([0, 5, 9, 7, 2][usize::from(m[0])]));
+        assert_eq!(
+            tip_lines(&cs, watch),
+            "C (30%)\nA (10%)\nD (40%)\nB",
+            "no port goes last, the newest at the bottom"
+        );
     }
 
     #[test]
@@ -1822,6 +1914,15 @@ mod tests {
         let pct = |m: &[u8; 6]| [None, Some(60), Some(30), None][usize::from(m[0])];
         assert_eq!(lowest(&cs, pct).map(|c| c.mac), Some([2; 6]));
         assert_eq!(lowest(&cs[2..], pct).map(|c| c.mac), None, "no reading, nothing to show");
+        // On the charger, lower or charged, it still loses to one running down
+        let mut charging = cs.clone();
+        charging[1].battery.as_mut().unwrap().charging = true;
+        assert_eq!(lowest(&charging, pct).map(|c| c.mac), Some([1; 6]));
+        let full = |m: &[u8; 6]| [None, Some(100), Some(100), None][usize::from(m[0])];
+        charging.swap(0, 1);
+        assert_eq!(lowest(&charging, full).map(|c| c.mac), Some([1; 6]));
+        charging[1].battery.as_mut().unwrap().charging = true;
+        assert_eq!(lowest(&charging, pct).map(|c| c.mac), Some([2; 6]), "all charging, the lowest");
     }
 
     #[test]

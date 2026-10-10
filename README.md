@@ -190,9 +190,10 @@ plugged in full getting no top-off within 30 s; and an all-red one with a flashi
 when it's critical. A crossed-out signal flashes red for 5 s at startup and when the
 last controller drops off on its own rather than sent away. A spinner turns while one is
 joining with none up yet, and a Wi-Fi signal lights up blue, a bar at a time, while pairing.
-Critical and empty battery notifications name the controller. With more than one controller
-connected, a blue badge in the icon's lower right corner says how many. A controller joining or
-leaving Wi-Fi plays Windows' Device Connect or Device Disconnect sound, as a USB device would.
+Notifications, naming the controller, say when it goes on the charger, is fully charged, gets
+low in the 25% band, turns critical and is empty. With more than one controller connected, a
+blue badge in the icon's lower right corner says how many. A controller joining or leaving
+Wi-Fi plays Windows' Device Connect or Device Disconnect sound, as a USB device would.
 
 Click for a menu. Its title shows the version, how many controllers are connected, and the
 group's name and channel; clicking the version opens an About box with the build date, license and
@@ -208,8 +209,9 @@ headed by its MAC. Its shortcut is the first letter of its name the menu hasn't 
   Meanwhile it's listed, grayed out, as "(shunned)".
 
 The rest:
-- **Pair controller...**, **Re-pair controller...** while one is connected: pairs one more
-  controller to the network as `--pair` does. Nobody's dropped.
+- **Pair controller...**: pairs one more controller to the network as `--pair` does. Nobody's
+  dropped. Grayed out while pairing's open, and with four connected, as many as there are
+  XInput ports.
 - **Reconfigure network**: a new network as `--reconfigure-network` makes, after a warning,
   since every paired controller is disconnected and has to pair again. Pairing opens right
   after.
@@ -252,7 +254,7 @@ An older path, kept because it still works:
 
 | Path | What |
 | --- | --- |
-| `shdtray/` | The tray: what it shows and sends back, the battery gauge, the Windows tray, its icon SVGs in `res/`, and its text in `locales/` |
+| `shdtray/` | The tray: what it shows and sends back, the battery gauge, the Windows tray, its icon SVGs in `res/` and its text in `res/locales/` |
 | `shieldw/` | shieldd without a console window, for running at login |
 | `shdlib/` | Shared by the other crates: base64, `psk=` values and their DPAPI seal |
 | `shdnet/` | MAC addresses and how they're shown; no dependencies, so ozproto can use it |
@@ -263,7 +265,7 @@ An older path, kept because it still works:
 | `tools/` | rtw88 table generator, Python |
 
 The tray's text, its menu, tooltips, dialogs and notices, is in Fluent files,
-`shdtray/locales/<language>/shdtray.ftl`, picked by Windows' display language with US
+`shdtray/res/locales/<language>/shdtray.ftl`, picked by Windows' display language with US
 English as the fallback. To add a language, copy `en-US`, translate it, and add it to `LOCALES`
 in `shdtray/src/l10n.rs`; anything left out stays English. CLI help, errors and logs are
 English only.

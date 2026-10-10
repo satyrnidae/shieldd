@@ -13,7 +13,6 @@ menu-connected = { $count } connected.
 menu-network = { $ssid }, ch.{ $channel }
 menu-none-connected = No controllers connected
 menu-pair = &Pair controller...
-menu-repair = Re-&pair controller...
 menu-reconfigure = Re&configure network
 menu-exit = E&xit
 
@@ -23,8 +22,8 @@ menu-exit = E&xit
 controller-unnamed = Controller
 # $name carries its shortcut. $port is "?" until Windows assigns one.
 controller-line = { $state ->
-        [charged] { $name }: Port #{ $port } ({ $pct }%) (charged)
-        [charging] { $name }: Port #{ $port } ({ $pct }%) (charging)
+        [charged] { $name }: Port #{ $port } (charged)
+        [charging] { $name }: Port #{ $port } (charging, { $pct }%)
         [level] { $name }: Port #{ $port } ({ $pct }%)
        *[unknown] { $name }: Port #{ $port }
     }
@@ -39,24 +38,25 @@ controller-disconnect = &Disconnect
 
 ## Icon tooltip
 
-battery-level = { $state ->
-        [charged] { $pct }% (charged)
-        [charging] { $pct }% (charging)
-       *[level] { $pct }%
+# One for each connected controller: its menu line without the port, to fit four
+tip-line = { $state ->
+        [charged] { $name } (charged)
+        [charging] { $name } (charging, { $pct }%)
+        [level] { $name } ({ $pct }%)
+       *[unknown] { $name }
     }
 tip-pairing = SHIELD controller: pairing
 tip-joining = SHIELD controller: connecting...
-# One for each connected controller; $port is none until Windows assigns one, and $level is a
-# battery-level or tip-no-reading
-tip-line = { $port ->
-        [none] { $name }: { $level }
-       *[other] { $name } Port #{ $port }: { $level }
-    }
-tip-no-reading = no battery reading
 tip-disconnected = SHIELD controller: not connected
 
 ## Battery alerts
 
+alert-charging-title = { $name } charging
+alert-charging = Plugged in at { $pct }%.
+alert-charged-title = { $name } charged
+alert-charged = Full; ready to unplug.
+alert-low-title = { $name } battery low
+alert-low = { $pct }% left.
 alert-critical-title = { $name } battery critical
 alert-critical = { $pct }% left. Rumble is off; charge it now.
 alert-empty-title = { $name } battery empty
@@ -83,7 +83,6 @@ dialog-ok = OK
 dialog-cancel = Cancel
 
 pair-title = shieldd: pair controller
-repair-title = shieldd: re-pair controller
 pair =
     Hold the NVIDIA button on the controller until its light flashes.
 
