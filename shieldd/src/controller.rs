@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use ozproto::Host;
 use ozproto::usb::{self, Message, Request};
+use shdlib::firmware;
 use shdtray::Battery;
 use tracing::{debug, info, warn};
 
@@ -90,7 +91,7 @@ fn setup_request(step: usize, req_id: u8) -> Request {
         5 => Request::hid_get_report(req_id, HID_INTERFACE, usb::REPORT_FEATURE, 0xFC),
         6 => set(0x0A),
         8 => set(STATUS_CMD),
-        10 => set(0x08),
+        10 => set(firmware::VERSION_CMD),
         12 => set(0x0D),
         _ => Request::hid_get_report(req_id, HID_INTERFACE, usb::REPORT_FEATURE, MAILBOX),
     }
@@ -246,6 +247,8 @@ pub struct Controller {
     stream_pending: Option<(u8, Instant, usize, bool)>,
     /// Mic samples since the last take_mic
     mic: Vec<u8>,
+    /// From setup, see shdlib::firmware
+    firmware: Option<String>,
 }
 
 impl Controller {
@@ -275,6 +278,7 @@ impl Controller {
             streams_open: [false; 2],
             stream_pending: None,
             mic: Vec::new(),
+            firmware: None,
         }
     }
 
@@ -291,6 +295,11 @@ impl Controller {
     /// Mic samples, 16 kHz mono s16le, since the last call
     pub fn take_mic(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.mic)
+    }
+
+    /// Firmware version, as the SHIELD app shows it, once setup has asked
+    pub fn firmware(&self) -> Option<&str> {
+        self.firmware.as_deref()
     }
 
     /// Two short buzzes, unless something else is buzzing
@@ -545,8 +554,10 @@ impl Controller {
                 && SETUP[self.step].starts_with("GET_REPORT feature 0xFD")
             {
                 info!(req = SETUP[self.step], data = %crate::hex(trim_zeros(data, 1)), "mailbox");
-                if data.first() == Some(&STATUS_CMD) {
-                    self.log_status(now, data);
+                match data.first() {
+                    Some(&STATUS_CMD) => self.log_status(now, data),
+                    Some(&firmware::VERSION_CMD) => self.firmware = firmware::version(data),
+                    _ => {}
                 }
             }
         } else {

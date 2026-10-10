@@ -30,6 +30,7 @@ controller-line = { $state ->
 # Sent away to sleep, ignored for now
 controller-shunned = { $name } (shunned)
 controller-mac = MAC { $mac }
+controller-firmware = Firmware v{ $version }
 controller-identify = &Identify
 controller-rename = &Rename...
 controller-audio-on = Enable &audio

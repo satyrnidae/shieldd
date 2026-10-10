@@ -119,6 +119,7 @@ impl Seat {
             battery: self.ctl.battery(),
             vban: self.vban,
             signal: Some(signal),
+            firmware: self.ctl.firmware().map(Into::into),
         })
     }
 

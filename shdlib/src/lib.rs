@@ -8,6 +8,7 @@ pub mod civil;
 #[cfg(windows)]
 pub mod dpapi;
 pub mod files;
+pub mod firmware;
 #[cfg(feature = "logs")]
 pub mod logs;
 pub mod names;

@@ -1263,8 +1263,11 @@ fn menu_items(s: &Status, pct: impl Fn(&[u8; 6]) -> Option<u8>) -> Vec<Item> {
     // Controllers get the letters the rest leave
     let mut used: Vec<char> = [&pair, &reconfigure, &exit].into_iter().filter_map(|t| accel(t)).collect();
     for (n, c) in s.controllers.iter().enumerate() {
-        let sub = vec![
-            Item::new(title, 0, tr!("controller-mac", mac = c.mac.fmt())),
+        let mut sub = vec![Item::new(title, 0, tr!("controller-mac", mac = c.mac.fmt()))];
+        if let Some(v) = &c.firmware {
+            sub.push(Item::new(title, 0, tr!("controller-firmware", version = menu_text(v))));
+        }
+        sub.extend([
             Item::separator(),
             Item::new(MF_STRING, id::of(n, id::IDENTIFY), tr!("controller-identify")),
             Item::new(MF_STRING, id::of(n, id::RENAME), tr!("controller-rename")),
@@ -1274,7 +1277,7 @@ fn menu_items(s: &Status, pct: impl Fn(&[u8; 6]) -> Option<u8>) -> Vec<Item> {
                 if c.vban { tr!("controller-audio-off") } else { tr!("controller-audio-on") },
             ),
             Item::new(MF_STRING, id::of(n, id::DISCONNECT), tr!("controller-disconnect")),
-        ];
+        ]);
         let line =
             Item { sub, signal: c.signal, ..Item::new(MF_STRING, 0, controller_line(c, pct(&c.mac), &mut used)) };
         items.push(line);
@@ -2011,6 +2014,7 @@ mod tests {
             battery: Some(battery),
             vban,
             signal: Some(Signal::Good),
+            firmware: Some("1.96/99/3.71/0.32".into()),
         }
     }
 
@@ -2038,7 +2042,8 @@ mod tests {
     #[test]
     fn a_submenu_per_controller() {
         let s = Status {
-            controllers: vec![up(1, "A", false), up(2, "B", true)],
+            // A's setup hasn't read its firmware yet
+            controllers: vec![Connected { firmware: None, ..up(1, "A", false) }, up(2, "B", true)],
             shunned: vec![Shunned { mac: [3; 6], name: None }],
             ..Default::default()
         };
@@ -2070,6 +2075,7 @@ mod tests {
             sub,
             [
                 (0, "MAC 02:02:02:02:02:02"),
+                (0, "Firmware v1.96/99/3.71/0.32"),
                 (0, ""),
                 (id::of(1, id::IDENTIFY), "&Identify"),
                 (id::of(1, id::RENAME), "&Rename..."),
@@ -2077,6 +2083,7 @@ mod tests {
                 (id::of(1, id::DISCONNECT), "&Disconnect"),
             ]
         );
+        assert!(!items[3].sub.iter().any(|i| i.text.starts_with("Firmware")));
         assert_eq!(id::controller(id::of(1, id::VBAN)), Some((1, id::VBAN)));
         assert_eq!(id::controller(id::EXIT), None);
         assert!(items[5].flags.0 & MF_GRAYED.0 != 0 && items[5].sub.is_empty());

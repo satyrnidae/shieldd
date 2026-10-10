@@ -74,6 +74,8 @@ pub struct Connected {
     pub vban: bool,
     /// Its link's signal bars; shieldd's radio host always says. None shows none.
     pub signal: Option<Signal>,
+    /// Firmware version, `1.96/99/3.71/0.32`, once setup has read it
+    pub firmware: Option<String>,
 }
 
 /// Picked from the menu. The ones for a controller carry its MAC.

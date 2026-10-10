@@ -1,6 +1,6 @@
 [package]
 name = "shdlib"
-description = "Small pieces the other crates share: base64, and psk= values with their DPAPI seal"
+description = "Small pieces the other crates share: the controller's firmware version, base64, and psk= values with their DPAPI seal"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

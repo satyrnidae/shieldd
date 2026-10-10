@@ -200,11 +200,12 @@ group's name and channel; clicking the version opens an About box with the build
 notices. Clicking the tray icon again closes the menu.
 
 Each connected controller has a line with its name, XInput port and battery, opening a submenu
-headed by its MAC. The bars beside it are its link: three green is good, two yellow OK, one red
-poor, and none means it's about to drop or hasn't been heard from in 5 seconds. They go by its
-signal at the adapter and by how many frames need resending either way. A change shows once it's
-held for 2 seconds, a drop at once, and each one is logged; with the menu open, the bars catch
-up the next time it opens. Its shortcut is the first letter of its name the menu hasn't used yet:
+headed by its MAC and firmware version, as the SHIELD app shows it. The bars beside it are its
+link: three green is good, two yellow OK, one red poor, and none means it's about to drop or
+hasn't been heard from in 5 seconds. They go by its signal at the adapter and by how many frames
+need resending either way. A change shows once it's held for 2 seconds, a drop at once, and each
+one is logged; with the menu open, the bars catch up the next time it opens. Its shortcut is the
+first letter of its name the menu hasn't used yet:
 - **Identify**: buzzes the controller twice, to tell which one it is.
 - **Rename...**: up to 15 characters, saved to `known-clients`.
 - **Enable / Disable audio**: its mic and headset over VBAN, see below. Remembered between runs.
@@ -260,7 +261,7 @@ An older path, kept because it still works:
 | --- | --- |
 | `shdtray/` | The tray: what it shows and sends back, the battery gauge, the Windows tray, its icon SVGs in `res/` and its text in `res/locales/` |
 | `shieldw/` | shieldd without a console window, for running at login |
-| `shdlib/` | Shared by the other crates: base64, `psk=` values and their DPAPI seal |
+| `shdlib/` | Shared by the other crates: the firmware version, base64, `psk=` values and their DPAPI seal |
 | `shdnet/` | MAC addresses and how they're shown; no dependencies, so ozproto can use it |
 | `ozproto/` | Ozmo protocol: wire format and host session state machine, no I/O |
 | `rtlusb/` | Userspace RTL8811AU driver over WinUSB: init, firmware, PHY, AP, WPA2, WPS |
