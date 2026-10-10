@@ -172,10 +172,7 @@ impl Message {
                     data: data.to_vec(),
                 }
             }
-            kind::SET_CONFIG_RSP
-            | kind::SET_INTERFACE_RSP
-            | kind::SET_FEATURE_RSP
-            | kind::CLEAR_FEATURE_RSP => {
+            kind::SET_CONFIG_RSP | kind::SET_INTERFACE_RSP | kind::SET_FEATURE_RSP | kind::CLEAR_FEATURE_RSP => {
                 let &[req_id, rcode, ..] = rest else { return None };
                 Message::Status { kind: k, req_id, rcode }
             }
@@ -336,10 +333,7 @@ mod tests {
     #[test]
     fn hid_class_requests() {
         assert_eq!(Request::hid_set_idle(0x0a, 0).encode(0x09), hex("310a0109070a210a00000000"));
-        assert_eq!(
-            Request::hid_get_report(0x0c, 0, REPORT_INPUT, 0x01).encode(0x0c),
-            hex("310a010c070ca10101010000")
-        );
+        assert_eq!(Request::hid_get_report(0x0c, 0, REPORT_INPUT, 0x01).encode(0x0c), hex("310a010c070ca10101010000"));
         assert_eq!(
             Request::hid_get_report(0x0f, 0, REPORT_FEATURE, 0xfc).encode(0x0f),
             hex("310a010f070fa101fc030000")
@@ -353,10 +347,7 @@ mod tests {
     #[test]
     fn set_config_and_interface() {
         assert_eq!(Request::SetConfig { req_id: 8, config: 1 }.encode(7), hex("31050107030801"));
-        assert_eq!(
-            Request::SetInterface { req_id: 0x13, interface: 2, alt: 1 }.encode(0x13),
-            hex("3106011305130201")
-        );
+        assert_eq!(Request::SetInterface { req_id: 0x13, interface: 2, alt: 1 }.encode(0x13), hex("3106011305130201"));
     }
 
     #[test]

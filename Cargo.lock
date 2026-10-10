@@ -719,7 +719,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "ozproto"
-version = "0.2.0+alpha"
+version = "0.3.0+alpha"
 dependencies = [
  "shdnet",
 ]
@@ -877,7 +877,7 @@ dependencies = [
 
 [[package]]
 name = "rtlusb"
-version = "0.2.0+alpha"
+version = "0.3.0+alpha"
 dependencies = [
  "aes",
  "aes-kw",
@@ -991,7 +991,7 @@ dependencies = [
 
 [[package]]
 name = "shdlib"
-version = "0.2.0+alpha"
+version = "0.3.0+alpha"
 dependencies = [
  "anyhow",
  "flate2",
@@ -1004,15 +1004,15 @@ dependencies = [
 
 [[package]]
 name = "shdlink"
-version = "0.2.0+alpha"
+version = "0.3.0+alpha"
 
 [[package]]
 name = "shdnet"
-version = "0.2.0+alpha"
+version = "0.3.0+alpha"
 
 [[package]]
 name = "shdtray"
-version = "0.2.0+alpha"
+version = "0.3.0+alpha"
 dependencies = [
  "anyhow",
  "fluent-bundle",
@@ -1027,7 +1027,7 @@ dependencies = [
 
 [[package]]
 name = "shieldd"
-version = "0.2.0+alpha"
+version = "0.3.0+alpha"
 dependencies = [
  "anyhow",
  "clap",
@@ -1049,7 +1049,7 @@ dependencies = [
 
 [[package]]
 name = "shieldw"
-version = "0.2.0+alpha"
+version = "0.3.0+alpha"
 dependencies = [
  "shieldd",
 ]

@@ -73,11 +73,7 @@ impl Header {
     /// Splits `frame` into its header and the rest.
     pub fn parse(frame: &[u8]) -> Option<(Header, &[u8])> {
         let (h, rest) = frame.split_first_chunk::<{ Self::LEN }>()?;
-        let hdr = Header {
-            control: h[0],
-            last_pkt_num: h[1],
-            pkt_num: u32::from_le_bytes([h[2], h[3], h[4], h[5]]),
-        };
+        let hdr = Header { control: h[0], last_pkt_num: h[1], pkt_num: u32::from_le_bytes([h[2], h[3], h[4], h[5]]) };
         Some((hdr, rest))
     }
 
@@ -270,12 +266,7 @@ impl ConnectRsp {
 
     pub fn parse(body: &[u8]) -> Option<ConnectRsp> {
         let b = body.get(..Self::LEN)?;
-        Some(ConnectRsp {
-            mode: b[0],
-            status: b[1],
-            session_id: b[5],
-            apps: u16::from_le_bytes([b[6], b[7]]),
-        })
+        Some(ConnectRsp { mode: b[0], status: b[1], session_id: b[5], apps: u16::from_le_bytes([b[6], b[7]]) })
     }
 }
 
@@ -363,10 +354,7 @@ pub(crate) mod tests {
     fn elements_stop_on_truncation_and_padding() {
         let body = [0x31, 0x02, 0xAA, 0xBB, 0x08, 0x00, 0x00, 0x00, 0x00];
         let e: Vec<_> = Elements::new(&body).collect();
-        assert_eq!(e, [
-            Element { kind: 0x31, body: &[0xAA, 0xBB] },
-            Element { kind: 0x08, body: &[] },
-        ]);
+        assert_eq!(e, [Element { kind: 0x31, body: &[0xAA, 0xBB] }, Element { kind: 0x08, body: &[] },]);
         // length runs past the end
         assert_eq!(Elements::new(&[0x31, 0x05, 0xAA]).count(), 0);
         assert_eq!(Elements::new(&[0x31]).count(), 0);
