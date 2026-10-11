@@ -1,5 +1,7 @@
 # shieldd
 
+[![Rust](https://github.com/satyrnidae/shieldd/actions/workflows/rust.yml/badge.svg)](https://github.com/satyrnidae/shieldd/actions/workflows/rust.yml)
+
 Native Windows host for the 2015 NVIDIA SHIELD controller. The controller talks Ozmo
 "USB over Wi-Fi" over Wi-Fi Direct; shieldd runs the access point itself on a Realtek
 RTL8811AU USB adapter, through its own userspace driver over WinUSB, and turns the
