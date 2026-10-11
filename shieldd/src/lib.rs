@@ -11,8 +11,9 @@
 //!
 //! Both sides share the packet format through the `shdlink` crate.
 //!
-//! Two binaries share this: `shieldd`, the console one, and `shieldw`, a windowless one for
-//! running at login (`--install`) that lives in its own crate. Hosting, both log to a file too.
+//! Two binaries share this on Windows: `shieldd`, the console one, and `shieldw`, a windowless one
+//! for running at login (`--install`) that lives in its own crate. Linux has no console to hide
+//! and starts `shieldd --background` instead. Hosting, both log to a file too.
 //! See background.rs, and shdlib's logs.rs.
 
 mod background;
@@ -119,15 +120,15 @@ pub struct Args {
     #[arg(long, conflicts_with_all = ["receiver", "transmit"])]
     no_tray: bool,
     /// Keep running: wait for the adapter, and start over when it's unplugged or fails.
-    /// shieldw always runs this way.
+    /// shieldw always runs this way, as does the login start on Linux.
     #[arg(long, conflicts_with_all = ["receiver", "transmit", "pair", "reconfigure_network"])]
     background: bool,
-    /// Start shieldw at login for this user, with the rest of this command line. Doesn't start
-    /// it now. On Linux it also puts in the udev rule (see --install-udev-rule), so run it with
-    /// sudo; it's set up for the user who ran sudo.
+    /// Start at login for this user, with the rest of this command line: shieldw on Windows,
+    /// `shieldd --background` on Linux. Doesn't start it now. On Linux it also puts in the udev
+    /// rule (see --install-udev-rule), so run it with sudo; it's set up for the user who ran sudo.
     #[arg(long, conflicts_with_all = ["receiver", "transmit", "pair", "reconfigure_network", "uninstall", "stop"])]
     install: bool,
-    /// Don't start shieldw at login anymore. Doesn't stop it either; see --stop. On Linux it also
+    /// Don't start at login anymore. Doesn't stop it either; see --stop. On Linux it also
     /// takes out the udev rule, so run it with sudo.
     #[arg(long, exclusive = true)]
     uninstall: bool,

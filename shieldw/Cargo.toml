@@ -1,11 +1,12 @@
 [package]
 name = "shieldw"
-description = "shieldd without a console window, for running at login"
+description = "shieldd without a console window, for running at login on Windows"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
-[dependencies]
+# Elsewhere it's a stub; see main.rs
+[target.'cfg(target_os = "windows")'.dependencies]
 shieldd.workspace = true

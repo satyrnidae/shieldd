@@ -1,6 +1,6 @@
 //! Running in the background on Linux: the single instance holds a lock on a file in the runtime
-//! folder, with its PID in it for --stop, which sends SIGTERM. --install starts shieldw at login
-//! through an XDG autostart entry, and puts in the udev rule and the uinput module that let the
+//! folder, with its PID in it for --stop, which sends SIGTERM. --install starts `shieldd
+//! --background` at login through an XDG autostart entry, and puts in the udev rule and the uinput module that let the
 //! logged-in user drive the adapter and the virtual pads. Those go in /etc, so --install and
 //! --uninstall need root: run with sudo, and the autostart entry is the user's who ran it.
 
@@ -19,7 +19,7 @@ use anyhow::{Context, Result, bail, ensure};
 use shdlib::files::{commit, stage};
 use tracing::{info, warn};
 
-use super::{STOP_WAIT, login_args, shieldw};
+use super::{STOP_WAIT, login_args};
 use crate::Args;
 
 /// The udev rule: the adapter and /dev/uinput for the user at the seat
@@ -117,16 +117,18 @@ pub fn stop() -> Result<()> {
 
 //region Install
 
-/// Starts shieldw at login for the user who ran sudo, with the rest of this command line, and
-/// puts in the udev rule and the uinput module
+/// Starts this shieldd with --background at login for the user who ran sudo, with the rest of this
+/// command line, and puts in the udev rule and the uinput module. Not shieldw, which only Windows
+/// needs: an autostart entry has no terminal to hide.
 pub fn install(args: &Args) -> Result<()> {
     ensure_root("--install")?;
-    let exe = shieldw()?;
-    let exec = std::iter::once(exe.into_os_string())
-        .chain(login_args(args)?)
-        .map(|a| exec_arg(&a))
-        .collect::<Result<Vec<_>>>()?
-        .join(" ");
+    let exe = std::env::current_exe()?;
+    let mut login = login_args(args)?;
+    if !login.iter().any(|a| a == "--background") {
+        login.push("--background".into());
+    }
+    let exec =
+        std::iter::once(exe.into_os_string()).chain(login).map(|a| exec_arg(&a)).collect::<Result<Vec<_>>>()?.join(" ");
     let user = sudo_user()?;
     install_system_files()?;
     let path = user.home.join(".config/autostart").join(AUTOSTART);
@@ -135,7 +137,7 @@ pub fn install(args: &Args) -> Result<()> {
          Terminal=false\nNoDisplay=true\nX-GNOME-Autostart-enabled=true\n"
     );
     write_as(&user, &path, &entry)?;
-    info!(command = exec, "shieldw starts at login for {} now, from {}", user.name, path.display());
+    info!(command = exec, "shieldd starts at login for {} now, from {}", user.name, path.display());
     Ok(())
 }
 

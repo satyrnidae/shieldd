@@ -15,7 +15,7 @@ use windows::Win32::System::Threading::{
 };
 use windows::core::{PCWSTR, w};
 
-use super::{STOP_WAIT, login_args, shieldw};
+use super::{STOP_WAIT, login_args};
 use crate::Args;
 
 const RUN_KEY: PCWSTR = w!(r"Software\Microsoft\Windows\CurrentVersion\Run");
@@ -81,6 +81,14 @@ pub fn stop() -> Result<()> {
 fn open_stop_event() -> Option<HANDLE> {
     // SAFETY: plain named event lookup
     unsafe { OpenEventW(EVENT_MODIFY_STATE, false, STOP_EVENT) }.ok()
+}
+
+/// shieldw, next to this shieldd, which --install starts at login
+fn shieldw() -> Result<std::path::PathBuf> {
+    let exe = std::env::current_exe()?;
+    let shieldw = exe.with_file_name("shieldw.exe");
+    anyhow::ensure!(shieldw.is_file(), "no {} next to {}; build both", shieldw.display(), exe.display());
+    Ok(shieldw)
 }
 
 pub fn install(args: &Args) -> Result<()> {

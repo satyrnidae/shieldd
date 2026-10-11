@@ -127,7 +127,8 @@ cargo test --release
 ```
 
 Binaries land in `target\release`, or `target/release` on Linux: `shieldd`, its windowless twin
-`shieldw` for running at login, and the `rtlusb` bring-up tool, with `.exe` on Windows.
+`shieldw` for running at login (Windows only), and the `rtlusb` bring-up tool, with `.exe` on
+Windows.
 
 ## Adapter setup
 
@@ -314,8 +315,9 @@ Task Manager's startup apps, where it can be turned off too.
 - `shieldd --uninstall`: don't start at login anymore.
 - `shieldd --background`: the same keep-running behavior in a console.
 
-On Linux, run `sudo shieldd --install`: it adds an XDG autostart entry to the `~/.config/autostart`
-of the user who ran sudo, puts in the udev rule as `--install-udev-rule` does, and logs go to
+On Linux, run `sudo shieldd --install`: it adds an XDG autostart entry that runs
+`shieldd --background` to the `~/.config/autostart` of the user who ran sudo, since there's no
+console window to hide and so no shieldw, puts in the udev rule as `--install-udev-rule` does, and logs go to
 `~/.config/shieldd/logs`. `sudo shieldd --uninstall` takes all three out.
 
 ## Other modes
@@ -331,7 +333,7 @@ An older path, kept because it still works:
 | Path | What |
 | --- | --- |
 | `shdtray/` | The tray: what it shows and sends back, the battery gauge, the Windows and Linux trays, its icon SVGs in `res/` and its text in `res/locales/` |
-| `shieldw/` | shieldd without a console window, for running at login |
+| `shieldw/` | shieldd without a console window, for running at login on Windows; a stub elsewhere |
 | `shdlib/` | Shared by the other crates: the firmware version, base64, `psk=` values and their DPAPI seal, controller audio (VBAN, PipeWire) |
 | `shdnet/` | MAC addresses and how they're shown; no dependencies, so ozproto can use it |
 | `ozproto/` | Ozmo protocol: wire format and host session state machine, no I/O |
