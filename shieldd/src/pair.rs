@@ -15,7 +15,7 @@ const MAX_SSID: usize = 32;
 /// Passphrase characters
 const ALNUM: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 /// The DIRECT-xx discriminator, uppercase like Wi-Fi Direct's own
-const DISCRIMINATOR: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+const DISCRIMINATOR: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
 fn pick(rng: &mut impl Rng, set: &[u8], n: usize) -> String {
     (0..n).map(|_| *set.choose(rng).expect("non-empty") as char).collect()

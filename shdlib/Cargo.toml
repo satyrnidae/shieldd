@@ -1,6 +1,6 @@
 [package]
 name = "shdlib"
-description = "Small pieces the other crates share: the controller's firmware version, base64, and psk= values with their DPAPI seal"
+description = "Small pieces the other crates share: the controller's firmware version, base64, psk= values with their DPAPI seal, and controller audio"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,8 +11,10 @@ publish.workspace = true
 logs = ["gzip", "dep:tracing", "dep:tracing-subscriber"]
 # Gzipped files: packed logs, conf backups
 gzip = ["dep:flate2"]
-# Controller audio to and from Voicemeeter
-vban = ["dep:tracing"]
+# Controller audio: VBAN for Voicemeeter
+audio = ["dep:tracing"]
+# And a mic and headset in PipeWire, on Linux
+pipewire = ["audio", "dep:pipewire"]
 
 [dependencies]
 shdnet.workspace = true
@@ -20,6 +22,10 @@ anyhow.workspace = true
 flate2 = { version = "1.1", optional = true }
 tracing = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Buffer::requested, from PipeWire 0.3.49
+pipewire = { version = "0.10.1", features = ["v0_3_49"], optional = true }
 
 # The seal on a psk= value; elsewhere a sealed one is refused
 [target.'cfg(windows)'.dependencies.windows]

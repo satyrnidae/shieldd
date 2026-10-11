@@ -54,6 +54,8 @@ pub struct Status {
     /// A controller shieldd sent away on purpose, by Disconnect, Forget or for its battery,
     /// hasn't come back yet
     pub sent_away: bool,
+    /// Where controller audio goes, for the box when the first one turns it on
+    pub audio: shdlib::audio::Backend,
 }
 
 /// How well a controller's link is holding up, as the bars by its line in the menu
@@ -79,8 +81,8 @@ pub struct Connected {
     pub port: Option<u8>,
     /// Once the first status answer is in
     pub battery: Option<Battery>,
-    /// Its mic and headset are on the VBAN streams
-    pub vban: bool,
+    /// Its mic and headset are on the shared audio
+    pub audio: bool,
     /// Its link's signal bars; shieldd's radio host always says. None shows none.
     pub signal: Option<Signal>,
     /// Firmware version, `1.96/99/3.71/0.32`, once setup has read it
@@ -97,8 +99,8 @@ pub enum Command {
     Identify([u8; 6]),
     /// Goes by this name now, already cleaned up
     Rename([u8; 6], String),
-    /// VBAN on or off for it
-    Vban([u8; 6], bool),
+    /// Audio on or off for it
+    Audio([u8; 6], bool),
     Disconnect([u8; 6]),
     /// Clears its pairing; it has to pair again
     Forget([u8; 6]),

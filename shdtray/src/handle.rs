@@ -25,6 +25,7 @@ pub struct Tray {
     thread: Option<JoinHandle<()>>,
     last: Option<Status>,
     /// On screen, rather than headless
+    #[cfg_attr(not(gui), allow(dead_code, reason = "always headless"))]
     shown: bool,
 }
 

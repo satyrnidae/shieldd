@@ -7,6 +7,7 @@
 
 use std::sync::OnceLock;
 
+use shdlib::audio::{self, Backend};
 use shdlib::names::MAX_NAME;
 use shdnet::mac::MacFmt;
 
@@ -67,7 +68,7 @@ pub(crate) mod id {
     pub const PER_CONTROLLER: usize = 0x10;
     pub const IDENTIFY: usize = 0;
     pub const RENAME: usize = 1;
-    pub const VBAN: usize = 2;
+    pub const AUDIO: usize = 2;
     pub const DISCONNECT: usize = 3;
     pub const FORGET: usize = 4;
 
@@ -203,8 +204,8 @@ pub(crate) fn menu_items(s: &Status, pct: impl Fn(&[u8; 6]) -> Option<u8>) -> Ve
             Item::new(Kind::Normal, id::of(n, id::RENAME), tr!("controller-rename")),
             Item::new(
                 Kind::Normal,
-                id::of(n, id::VBAN),
-                if c.vban { tr!("controller-audio-off") } else { tr!("controller-audio-on") },
+                id::of(n, id::AUDIO),
+                if c.audio { tr!("controller-audio-off") } else { tr!("controller-audio-on") },
             ),
             Item::new(Kind::Normal, id::of(n, id::DISCONNECT), tr!("controller-disconnect")),
             Item::separator(),
@@ -258,7 +259,7 @@ pub(crate) fn command(picked: usize, s: &Status, d: &impl Dialogs) -> Option<Com
             match action {
                 id::IDENTIFY => Command::Identify(c.mac),
                 id::RENAME => Command::Rename(c.mac, rename(d, c)?),
-                id::VBAN => Command::Vban(c.mac, !c.vban),
+                id::AUDIO => Command::Audio(c.mac, !c.audio),
                 id::DISCONNECT => Command::Disconnect(c.mac),
                 id::FORGET if confirm_forget(d, c) => Command::Forget(c.mac),
                 _ => return None,
@@ -269,19 +270,29 @@ pub(crate) fn command(picked: usize, s: &Status, d: &impl Dialogs) -> Option<Com
     Some(cmd)
 }
 
-/// Once `cmd`, picked from the menu for `s`, has gone out: the first VBAN on starts the streams,
-/// so say where they are
+/// Once `cmd`, picked from the menu for `s`, has gone out: the first audio on starts the shared
+/// mic and headset, so say where they are
 pub(crate) fn follow_up(cmd: &Command, s: &Status, d: &impl Dialogs) {
-    let vban_on = matches!(cmd, Command::Vban(_, true)) && !s.controllers.iter().any(|c| c.vban);
-    if vban_on && !d.quitting() {
-        let text = tr!(
-            "vban-on",
-            mic_stream = shdlib::vban::MIC_STREAM,
-            mic_port = shdlib::vban::MIC_PORT,
-            pad_stream = shdlib::vban::PAD_STREAM,
-            pad_port = shdlib::vban::PAD_PORT,
-        );
-        d.inform(&tr!("vban-on-title"), &text);
+    let first_on = matches!(cmd, Command::Audio(_, true)) && !s.controllers.iter().any(|c| c.audio);
+    if !first_on || d.quitting() {
+        return;
+    }
+    match s.audio {
+        Backend::Vban => {
+            use shdlib::audio::vban;
+            let text = tr!(
+                "vban-on",
+                mic_stream = vban::MIC_STREAM,
+                mic_port = vban::MIC_PORT,
+                pad_stream = vban::PAD_STREAM,
+                pad_port = vban::PAD_PORT,
+            );
+            d.inform(&tr!("vban-on-title"), &text);
+        }
+        Backend::PipeWire => {
+            let text = tr!("pipewire-on", mic = audio::MIC_NAME, headset = audio::HEADSET_NAME);
+            d.inform(&tr!("pipewire-on-title"), &text);
+        }
     }
 }
 
@@ -318,14 +329,14 @@ fn confirm_reconfigure(d: &impl Dialogs) -> bool {
 pub(crate) mod tests {
     use super::*;
 
-    pub(crate) fn up(mac: u8, name: &str, vban: bool) -> Connected {
+    pub(crate) fn up(mac: u8, name: &str, audio: bool) -> Connected {
         let battery = Battery { charging: false, band: 50, reading: 0xD500, critical: false, must_charge: false };
         Connected {
             mac: [mac; 6],
             name: Some(name.into()),
             port: Some(mac),
             battery: Some(battery),
-            vban,
+            audio,
             signal: Some(Signal::Good),
             firmware: Some("1.96/99/3.71/0.32".into()),
         }
@@ -386,14 +397,14 @@ pub(crate) mod tests {
                 (0, ""),
                 (id::of(1, id::IDENTIFY), "&Identify"),
                 (id::of(1, id::RENAME), "&Rename..."),
-                (id::of(1, id::VBAN), "Disable &audio"),
+                (id::of(1, id::AUDIO), "Disable &audio"),
                 (id::of(1, id::DISCONNECT), "&Disconnect"),
                 (0, ""),
                 (id::of(1, id::FORGET), "&Forget"),
             ]
         );
         assert!(!items[3].sub.iter().any(|i| i.text.starts_with("Firmware")));
-        assert_eq!(id::controller(id::of(1, id::VBAN)), Some((1, id::VBAN)));
+        assert_eq!(id::controller(id::of(1, id::AUDIO)), Some((1, id::AUDIO)));
         assert_eq!(id::controller(id::EXIT), None);
         // Pairing grays its line; with nothing at all there's a line to say so
         let none = menu_items(&Status { pairing: true, ..Default::default() }, |_| None);

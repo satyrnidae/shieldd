@@ -73,7 +73,7 @@ pub struct Args {
     /// Vertical scale on its own, overriding --mouse-scale
     #[arg(long)]
     mouse_scale_y: Option<f32>,
-    /// Open the mic stream even with VBAN off, where it goes nowhere. It keeps the controller from
+    /// Open the mic stream even with audio off, where it goes nowhere. It keeps the controller from
     /// dozing between inputs, at the cost of a steady stream of frames. Doesn't change the lag.
     #[arg(long)]
     mic: bool,
@@ -108,6 +108,11 @@ pub struct Args {
     /// The controller's hidraw node (default: find 0955:7210), with --transmit
     #[arg(long, requires = "transmit")]
     hidraw: Option<PathBuf>,
+    /// Where controller audio goes: `vban`, streams for Voicemeeter, or on Linux `pipewire`, a
+    /// mic and a headset in the sound settings. By default PipeWire where it's running, VBAN
+    /// otherwise.
+    #[arg(long, value_enum, conflicts_with_all = ["receiver", "transmit"])]
+    audio_backend: Option<AudioBackend>,
     /// No tray icon: no menu, boxes or sounds, and its notifications go to the log. For hosting
     /// without a desktop to show it on.
     #[arg(long, conflicts_with_all = ["receiver", "transmit"])]
@@ -154,6 +159,24 @@ impl Args {
 
     fn scale(&self) -> (f32, f32) {
         (self.mouse_scale_x.unwrap_or(self.mouse_scale), self.mouse_scale_y.unwrap_or(self.mouse_scale * 1.5))
+    }
+}
+
+/// --audio-backend's choices
+#[derive(clap::ValueEnum, Debug, Clone, Copy)]
+enum AudioBackend {
+    Vban,
+    #[cfg(target_os = "linux")]
+    Pipewire,
+}
+
+impl From<AudioBackend> for shdlib::audio::Backend {
+    fn from(b: AudioBackend) -> Self {
+        match b {
+            AudioBackend::Vban => Self::Vban,
+            #[cfg(target_os = "linux")]
+            AudioBackend::Pipewire => Self::PipeWire,
+        }
     }
 }
 

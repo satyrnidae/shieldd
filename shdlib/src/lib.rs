@@ -1,8 +1,7 @@
 //! Small pieces the other crates share
 
-#[cfg(target_os = "linux")]
-#[cfg(feature = "alsa")]
-pub mod alsa;
+#[cfg(feature = "audio")]
+pub mod audio;
 pub mod base64;
 pub mod civil;
 #[cfg(windows)]
@@ -13,11 +12,6 @@ pub mod firmware;
 pub mod logs;
 pub mod names;
 pub mod psk;
-#[cfg(target_os = "linux")]
-#[cfg(feature = "pulse")]
-pub mod pulse;
-#[cfg(feature = "vban")]
-pub mod vban;
 
 use std::path::PathBuf;
 use std::sync::atomic::{Ordering, compiler_fence};

@@ -185,7 +185,7 @@ mod tests {
     fn english_formats_clean() {
         let b = bundle(0);
         let mut args = FluentArgs::new();
-        for k in ["version", "ssid", "state", "name", "port", "mac", "built", "author", "error"] {
+        for k in ["version", "ssid", "state", "name", "port", "mac", "built", "author", "error", "mic", "headset"] {
             args.set(k, "x");
         }
         for k in ["count", "channel", "pct", "max", "mic_stream", "mic_port", "pad_stream", "pad_port"] {

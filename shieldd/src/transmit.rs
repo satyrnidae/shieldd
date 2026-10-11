@@ -516,7 +516,7 @@ pub fn run(dest: SocketAddr, hidraw: Option<&Path>, dump_only: bool) -> Result<(
                 tx.send();
                 continue;
             }
-            for ev in buf[..n].chunks_exact(EVENT_LEN) {
+            for ev in buf[..n].as_chunks::<EVENT_LEN>().0 {
                 let (t, code, value) = parse_event(ev);
                 match t {
                     EV_MSC if code == MSC_SCAN => {
@@ -581,7 +581,7 @@ fn dump(all: &[&Node], hid_i: usize, buf: &mut [u8]) -> Result<()> {
                 }
                 continue;
             }
-            for ev in buf[..n].chunks_exact(EVENT_LEN) {
+            for ev in buf[..n].as_chunks::<EVENT_LEN>().0 {
                 let (t, code, value) = parse_event(ev);
                 if matches!(t, EV_KEY | EV_ABS | EV_REL) {
                     println!("{} {} {} {value}", node.path, type_name(t), code_name(t, code));

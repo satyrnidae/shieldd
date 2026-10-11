@@ -16,7 +16,7 @@ fn pad(n: u8, name: &str, band: u8, charging: bool) -> Connected {
         name: Some(name.into()),
         port: Some(n),
         battery: Some(battery),
-        vban: false,
+        audio: false,
         signal: Some([Signal::Good, Signal::Fair, Signal::Low][usize::from(n - 1) % 3]),
         firmware: Some("1.96/99/3.71/0.32".into()),
     }
@@ -58,9 +58,9 @@ fn main() {
                         c.name = Some(name.clone());
                     }
                 }
-                Command::Vban(mac, on) => {
+                Command::Audio(mac, on) => {
                     for c in status.controllers.iter_mut().filter(|c| c.mac == mac) {
-                        c.vban = on;
+                        c.audio = on;
                     }
                 }
                 Command::Disconnect(mac) | Command::Forget(mac) => {

@@ -3,7 +3,7 @@
 //! Wi-Fi Direct stack's queue held replies for the dozing controller, ~330 ms of input lag.
 //!
 //! Up to four controllers at once, each with its own session and virtual pad (seat.rs), sharing
-//! the mouse, media keys and VBAN streams.
+//! the mouse, media keys and audio.
 //!
 //! `--pair`: WPS push-button on the saved group until one controller has the credential, or
 //! PAIR_WINDOW runs out. Nobody already connected is dropped.
@@ -14,7 +14,7 @@
 //! `--background`: hosting in a loop that waits for the adapter and starts over when it fails.
 //!
 //! The tray's menu lands here too: pairing, reconfiguring, and each controller's identify,
-//! rename, VBAN and disconnect.
+//! rename, audio and disconnect.
 
 use std::collections::{BTreeSet, HashSet};
 use std::path::PathBuf;
@@ -26,7 +26,7 @@ use ozproto::wire::ETHERTYPE;
 use rtlusb::ap::WpsConfig;
 use rtlusb::wps::{Credential, Device};
 use rtlusb::{ApOptions, Link, Radio, RadioEvent};
-use shdlib::vban::{self, Vban};
+use shdlib::audio::{self, Audio, Backend};
 use shdnet::mac::{Mac, MacFmt};
 use shdtray::{Command, Status, Tray, tr};
 use tracing::{debug, info, trace, warn};
@@ -83,13 +83,15 @@ enum Next {
     Reconfigure,
 }
 
-/// What outlives a run: the tray, VBAN with its sockets, and a new group --conf wouldn't take
+/// What outlives a run: the tray, the audio, and a new group --conf wouldn't take
 struct Shared {
     tray: Tray,
-    /// The shared VBAN streams, up while any controller has VBAN on
-    vban: Option<Vban>,
-    /// Controllers with VBAN on, connected or not
-    vban_on: BTreeSet<Mac>,
+    /// Where the audio goes: --audio-backend, or what's there
+    backend: Backend,
+    /// The shared mic and headset, up while any controller has audio on
+    audio: Option<Audio>,
+    /// Controllers with audio on, connected or not
+    audio_on: BTreeSet<Mac>,
     /// Hosted in place of --conf's, and saved again each run until it works
     unsaved: Option<p2pconf::Group>,
     /// --conf, which known-clients sits next to
@@ -101,59 +103,65 @@ struct Shared {
 }
 
 impl Shared {
-    fn vban_file() -> PathBuf {
-        crate::settings_dir().join("vban-clients")
+    fn audio_file() -> PathBuf {
+        crate::settings_dir().join("audio-clients")
     }
 
-    /// From before VBAN was per controller; which one it meant is anyone's guess
-    fn old_vban_marker() -> PathBuf {
-        crate::settings_dir().join("vban.on")
-    }
-
-    /// Controllers that had VBAN on last time, one MAC a line
-    fn load_vban(&mut self) {
-        if std::fs::remove_file(Self::old_vban_marker()).is_ok() {
-            info!("VBAN is per controller now; turn it on again in each one's menu");
+    /// Controllers that had audio on last time, one MAC a line
+    fn load_audio(&mut self) {
+        let dir = crate::settings_dir();
+        // From before VBAN was per controller; which one it meant is anyone's guess
+        if std::fs::remove_file(dir.join("vban.on")).is_ok() {
+            info!("audio is per controller now; turn it on again in each one's menu");
         }
-        let text = std::fs::read_to_string(Self::vban_file()).unwrap_or_default();
-        self.vban_on = text.lines().filter_map(|l| known_clients::parse_mac(l.trim())).collect();
-        self.sync_vban();
+        // From when VBAN was the only backend
+        if !Self::audio_file().exists() {
+            let _ = std::fs::rename(dir.join("vban-clients"), Self::audio_file());
+        }
+        let text = std::fs::read_to_string(Self::audio_file()).unwrap_or_default();
+        self.audio_on = text.lines().filter_map(|l| known_clients::parse_mac(l.trim())).collect();
+        self.sync_audio();
     }
 
-    /// The streams up iff any controller wants them
-    fn sync_vban(&mut self) {
-        if self.vban_on.is_empty() {
-            self.vban = None;
-        } else if self.vban.is_none() {
-            match Vban::start() {
-                Ok(v) => self.vban = Some(v),
+    /// The mic and headset up iff any controller wants them
+    fn sync_audio(&mut self) {
+        if self.audio_on.is_empty() {
+            self.audio = None;
+        } else if self.audio.is_none() {
+            match Audio::start(self.backend) {
+                Ok(a) => self.audio = Some(a),
                 // Who wants it stays remembered; the next toggle tries again
                 Err(e) => {
-                    warn!("VBAN: {e:#}");
-                    self.tray.problem(&tr!("problem-vban-title"), &format!("{e:#}"));
+                    warn!(backend = ?self.backend, "controller audio: {e:#}");
+                    self.tray.problem(&tr!("problem-audio-title"), &format!("{e:#}"));
                 }
             }
         }
     }
 
-    /// Turns VBAN on or off for `mac`, and remembers it for next time. Returns whether it's on.
-    fn set_vban(&mut self, mac: &Mac, on: bool) -> bool {
-        let changed = if on { self.vban_on.insert(*mac) } else { self.vban_on.remove(mac) };
-        if !on && let Some(v) = self.vban.as_mut() {
-            v.forget_mic(mac);
+    /// Turns audio on or off for `mac`, and remembers it for next time. Returns whether it's on.
+    fn set_audio(&mut self, mac: &Mac, on: bool) -> bool {
+        let changed = if on { self.audio_on.insert(*mac) } else { self.audio_on.remove(mac) };
+        if !on && let Some(a) = self.audio.as_mut() {
+            a.forget_mic(mac);
         }
-        self.sync_vban();
+        self.sync_audio();
         if changed {
-            let text: String = self.vban_on.iter().map(|m| format!("{}\n", m.fmt())).collect();
+            let text: String = self.audio_on.iter().map(|m| format!("{}\n", m.fmt())).collect();
             let saved = std::fs::create_dir_all(crate::settings_dir()).and_then(|()| match text.is_empty() {
-                true => std::fs::remove_file(Self::vban_file()),
-                false => std::fs::write(Self::vban_file(), text),
+                true => std::fs::remove_file(Self::audio_file()),
+                false => std::fs::write(Self::audio_file(), text),
             });
             if let Err(e) = saved {
-                debug!("remembering VBAN for {}: {e}", mac.fmt());
+                debug!("remembering audio for {}: {e}", mac.fmt());
             }
         }
-        self.vban_on.contains(mac)
+        self.audio_on.contains(mac)
+    }
+
+    /// What the tray shows with no radio up
+    fn idle_status(&self) -> Status {
+        Status { audio: self.backend, ..Status::default() }
     }
 
     /// Saves a controller's new name, or says why it couldn't. Returns whether it did.
@@ -171,7 +179,7 @@ impl Shared {
         }
     }
 
-    /// Between runs, with no radio: Exit, VBAN, a rename the dialog was still open for, and
+    /// Between runs, with no radio: Exit, audio, a rename the dialog was still open for, and
     /// pairing or reconfiguring for once there's an adapter
     fn idle(&mut self, quit: &AtomicBool, d: Duration) {
         let until = Instant::now() + d;
@@ -179,8 +187,8 @@ impl Shared {
             for cmd in self.tray.commands() {
                 match cmd {
                     Command::Exit => quit.store(true, Ordering::Relaxed),
-                    Command::Vban(mac, on) => {
-                        self.set_vban(&mac, on);
+                    Command::Audio(mac, on) => {
+                        self.set_audio(&mac, on);
                     }
                     Command::Pair | Command::Reconfigure => {
                         let start = if cmd == Command::Pair {
@@ -204,7 +212,7 @@ impl Shared {
                     Command::Identify(_) | Command::Disconnect(_) | Command::Forget(_) => {}
                 }
             }
-            self.tray.update(Status::default());
+            self.tray.update(self.idle_status());
             std::thread::sleep(Duration::from_millis(100));
         }
     }
@@ -217,14 +225,16 @@ pub fn run(args: Args, quit: &AtomicBool) -> Result<()> {
             true => Tray::headless(crate::ABOUT),
             false => Tray::start(crate::ABOUT),
         },
-        vban: None,
-        vban_on: BTreeSet::new(),
+        backend: args.audio_backend.map_or_else(Backend::detect, Into::into),
+        audio: None,
+        audio_on: BTreeSet::new(),
         unsaved: None,
         conf: args.conf.clone(),
         seal: crate::is_default_conf(&args.conf),
         pending: None,
     };
-    sh.load_vban();
+    debug!(backend = ?sh.backend, "controller audio");
+    sh.load_audio();
     let mut start = Start { reconfigure: args.reconfigure_network, pair: args.pair || args.reconfigure_network };
     let mut backoff = RETRY_MIN;
     let mut waiting = false;
@@ -346,7 +356,7 @@ fn seat_for<'a>(
             }
         }
     }
-    seats.push(Seat::new(mac, args.mic, sh.vban_on.contains(&mac)));
+    seats.push(Seat::new(mac, args.mic, sh.audio_on.contains(&mac)));
     Ok(seats.last_mut())
 }
 
@@ -523,10 +533,10 @@ fn run_once(args: &Args, start: Start, quit: &AtomicBool, sh: &mut Shared) -> Re
                                 next = Next::Reconfigure;
                                 stop.store(true, Ordering::Relaxed);
                             }
-                            Command::Vban(mac, on) => {
-                                let on = sh.set_vban(&mac, on);
+                            Command::Audio(mac, on) => {
+                                let on = sh.set_audio(&mac, on);
                                 if let Some(s) = seat_mut(&mut seats, &mac) {
-                                    s.set_vban(on, args.mic);
+                                    s.set_audio(on, args.mic);
                                 }
                             }
                             Command::Identify(mac) => {
@@ -630,28 +640,29 @@ fn run_once(args: &Args, start: Start, quit: &AtomicBool, sh: &mut Shared) -> Re
                         channel: Some(channel),
                         joining: seats.iter().any(|s| s.joining.is_some()),
                         sent_away: seats.iter().any(|s| s.sent_away),
+                        audio: sh.backend,
                     });
                 }
             }
         }
         for seat in &mut seats {
             let mic = seat.ctl.take_mic();
-            if let Some(v) = sh.vban.as_mut()
-                && seat.vban
+            if let Some(a) = sh.audio.as_mut()
+                && seat.audio
                 && !mic.is_empty()
             {
-                v.push_mic(seat.mac, &mic, now);
+                a.push_mic(seat.mac, &mic, now);
             }
         }
         // Headset audio, one 4 ms unit per 4 ms of wall clock, the same to each that wants it
-        match sh.vban.as_ref().filter(|_| seats.iter().any(Seat::wants_headset)) {
-            Some(v) => {
+        match sh.audio.as_ref().filter(|_| seats.iter().any(Seat::wants_headset)) {
+            Some(a) => {
                 let at = isoc_at.replace(now).unwrap_or(now);
                 isoc_credit = (isoc_credit + now.duration_since(at)).min(ISOC_CREDIT_MAX);
-                let unit = Duration::from_millis(u64::from(vban::UNIT_MS));
+                let unit = Duration::from_millis(u64::from(audio::UNIT_MS));
                 while isoc_credit >= unit {
                     isoc_credit -= unit;
-                    if let Some(pcm) = v.take_unit() {
+                    if let Some(pcm) = a.take_unit() {
                         for seat in seats.iter_mut().filter(|s| s.wants_headset()) {
                             seat.send_headset(&pcm);
                         }

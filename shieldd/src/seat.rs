@@ -7,7 +7,7 @@ use anyhow::Result;
 use ozproto::wire::{ETHERTYPE, keep_alive_time};
 use ozproto::{Config, Event, Host};
 use rtlusb::{Link, LinkQuality};
-use shdlib::vban;
+use shdlib::audio;
 use shdnet::mac::{Mac, MacFmt};
 use shdtray::Connected;
 use tracing::{debug, info, trace, warn};
@@ -61,8 +61,8 @@ pub struct Seat {
     pub joining: Option<Instant>,
     /// JOIN_TIMEOUT ran out on it this session; no spinner for it again
     pub join_gave_up: bool,
-    /// Its mic and headset are on the shared VBAN streams
-    pub vban: bool,
+    /// Its mic and headset are on the shared audio
+    pub audio: bool,
     /// Its virtual pad couldn't be plugged in, and why; radio.rs sends it away
     pub pad_failed: Option<String>,
     /// The signal bars the tray shows for it
@@ -70,9 +70,9 @@ pub struct Seat {
 }
 
 impl Seat {
-    pub fn new(mac: Mac, mic: bool, vban: bool) -> Self {
+    pub fn new(mac: Mac, mic: bool, audio: bool) -> Self {
         let mut ctl = Controller::new(mic);
-        ctl.set_streams(mic || vban, vban);
+        ctl.set_streams(mic || audio, audio);
         Seat {
             mac,
             host: Host::new(Config::default()),
@@ -86,15 +86,15 @@ impl Seat {
             sent_away: false,
             joining: None,
             join_gave_up: false,
-            vban,
+            audio,
             pad_failed: None,
             signal: signal::Shown::default(),
         }
     }
 
-    /// VBAN on or off for it; `mic` is --mic, which keeps the mic open either way
-    pub fn set_vban(&mut self, on: bool, mic: bool) {
-        self.vban = on;
+    /// Audio on or off for it; `mic` is --mic, which keeps the mic open either way
+    pub fn set_audio(&mut self, on: bool, mic: bool) {
+        self.audio = on;
         self.ctl.set_streams(mic || on, on);
     }
 
@@ -115,15 +115,15 @@ impl Seat {
         if was != Some(signal) {
             let q = q.unwrap_or_default();
             let (dbm, tx_fail, rx_retry, rx_dup) = (q.dbm, q.tx_fail, q.rx_retry, q.rx_dup);
-            let vban = self.vban;
-            info!(sta = %self.mac.fmt(), ?signal, ?dbm, tx_fail, rx_retry, rx_dup, vban, "signal");
+            let audio = self.audio;
+            info!(sta = %self.mac.fmt(), ?signal, ?dbm, tx_fail, rx_retry, rx_dup, audio, "signal");
         }
         Some(Connected {
             mac: self.mac,
             name,
             port: self.pad.port(),
             battery: self.ctl.battery(),
-            vban: self.vban,
+            audio: self.audio,
             signal: Some(signal),
             firmware: self.ctl.firmware().map(Into::into),
         })
@@ -179,15 +179,15 @@ impl Seat {
         }
     }
 
-    /// Wants headset audio: VBAN on and its headset stream open
+    /// Wants headset audio: audio on and its headset stream open
     pub fn wants_headset(&self) -> bool {
-        self.vban && self.ctl.headset_open()
+        self.audio && self.ctl.headset_open()
     }
 
     /// One isoc unit of headset audio, UNIT_MS long
     pub fn send_headset(&mut self, pcm: &[u8]) {
-        self.host.send_isoc(HEADSET_EP, self.isoc_frame, vban::UNIT_MS, pcm);
-        self.isoc_frame = self.isoc_frame.wrapping_add(vban::UNIT_MS);
+        self.host.send_isoc(HEADSET_EP, self.isoc_frame, audio::UNIT_MS, pcm);
+        self.isoc_frame = self.isoc_frame.wrapping_add(audio::UNIT_MS);
     }
 
     /// Everything the session has to send

@@ -8,18 +8,20 @@ license.workspace = true
 publish.workspace = true
 
 [features]
-default = ["tray"]
+default = ["tray", "pipewire"]
 # The tray on Linux (GTK 4 and D-Bus); without it, hosting runs headless and the tray's
 # notifications go to the log. Off for a build that only runs --transmit: --no-default-features.
 # Windows' tray is always there.
 tray = ["shdtray/tray"]
+# Controller audio as a mic and a headset in PipeWire, on Linux; VBAN either way
+pipewire = ["shdlib/pipewire"]
 
 [dependencies]
 shdnet.workspace = true
 ozproto.workspace = true
 shdlink.workspace = true
 shdtray.workspace = true
-shdlib = { workspace = true, features = ["gzip", "logs", "vban"] }
+shdlib = { workspace = true, features = ["gzip", "logs", "audio"] }
 anyhow.workspace = true
 clap.workspace = true
 tracing.workspace = true

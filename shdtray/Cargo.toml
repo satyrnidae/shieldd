@@ -11,7 +11,7 @@ shdnet.workspace = true
 anyhow.workspace = true
 # UI text, from res/locales/*/shdtray.ftl
 fluent-bundle = "0.16.0"
-shdlib = { workspace = true, features = ["vban"] }
+shdlib = { workspace = true, features = ["audio"] }
 tracing.workspace = true
 unic-langid = "0.9.6"
 # Icons from shdtray/res/*.svg; no text or raster images in them

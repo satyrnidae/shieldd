@@ -71,7 +71,16 @@ vban-on =
     Mic: stream { $mic_stream }, sent to 127.0.0.1 port { $mic_port }
     Headset: stream { $pad_stream }, received on port { $pad_port }
 
-    Point an incoming stream at the first and an outgoing one at the second, PCM 16-bit. Every controller with VBAN on shares them: their mics are mixed, and each headset plays the same audio.
+    Point an incoming stream at the first and an outgoing one at the second, PCM 16-bit. Every controller with audio on shares them: their mics are mixed, and each headset plays the same audio.
+
+pipewire-on-title = shieldd: audio on
+pipewire-on =
+    Controller audio is in your sound settings:
+
+    Mic: { $mic }
+    Headset: { $headset }
+
+    Every controller with audio on shares them: their mics are mixed, and each headset plays the same audio.
 
 # The rename dialog is a fixed 220 dialog units wide; the prompt gets one line
 rename-title = shieldd: rename controller
@@ -124,7 +133,7 @@ about =
 
 ## Notices from shieldd. $error is an error message, in English.
 
-problem-vban-title = VBAN failed
+problem-audio-title = Controller audio failed
 problem-rename-title = Couldn't rename the controller
 problem-first-network-title = Setting up a network for the controller
 problem-first-network = There was none saved yet. Hold the NVIDIA button on the controller until its light flashes to pair it.
