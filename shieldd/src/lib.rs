@@ -21,7 +21,7 @@ mod background;
 mod controller;
 #[cfg_attr(not(windows), allow(dead_code, reason = "only the Windows host uses it so far"))]
 mod known_clients;
-#[cfg(windows)]
+#[cfg_attr(not(windows), allow(dead_code, reason = "only the Windows host uses it so far"))]
 mod outputs;
 #[cfg(windows)]
 mod p2pconf;

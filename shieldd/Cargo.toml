@@ -33,9 +33,10 @@ rand = "0.8"
 names = { version = "0.14", default-features = false }
 vigem-client.workspace = true
 
-# --transmit: the WSL side
+# --transmit: the WSL side; and the outputs, through uinput
 [target.'cfg(target_os = "linux")'.dependencies]
 libc.workspace = true
+evdev = "0.13.2"
 
 [target.'cfg(windows)'.dependencies.windows]
 workspace = true

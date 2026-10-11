@@ -11,10 +11,9 @@ use anyhow::{Context, Result};
 use shdlink::media;
 use shdnet::mac::Mac;
 use tracing::{debug, info, trace, warn};
-use vigem_client::{XButtons, XGamepad};
 
 use crate::controller::key;
-use crate::outputs::{Desktop, Gamepad};
+use crate::outputs::{Desktop, Gamepad, PadState};
 
 /// No packets this long: let go of everything. Same as shield_rx.py.
 const STALE: Duration = Duration::from_millis(500);
@@ -25,7 +24,7 @@ const MEDIA: [(u8, u8); 3] = [(media::VOL_UP, key::VOL_UP), (media::VOL_DOWN, ke
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Packet {
     seq: u32,
-    pad: XGamepad,
+    pad: PadState,
     /// Controller key bits
     keys: u8,
     /// Bit 0 = left, 1 = right, 2 = middle, 3 = X1
@@ -39,14 +38,14 @@ impl Packet {
         let p = shdlink::Packet::parse(b)?;
         Some(Packet {
             seq: p.seq,
-            pad: XGamepad {
-                buttons: XButtons { raw: p.buttons },
-                thumb_lx: stick(p.lx),
-                thumb_ly: stick(p.ly),
-                thumb_rx: stick(p.rx),
-                thumb_ry: stick(p.ry),
-                left_trigger: trigger(p.lt),
-                right_trigger: trigger(p.rt),
+            pad: PadState {
+                buttons: p.buttons,
+                lx: stick(p.lx),
+                ly: stick(p.ly),
+                rx: stick(p.rx),
+                ry: stick(p.ry),
+                lt: trigger(p.lt),
+                rt: trigger(p.rt),
             },
             keys: MEDIA.iter().filter(|(bit, _)| p.media & bit != 0).fold(0, |k, (_, to)| k | to),
             mouse_buttons: p.mouse_buttons,
@@ -125,7 +124,7 @@ pub fn run(listen: SocketAddr, mouse_scale: (f32, f32), quit: &AtomicBool) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shdlink::{MAGIC, PACKET_LEN};
+    use shdlink::{MAGIC, PACKET_LEN, xb};
 
     /// struct.pack("<4sIHffffffBBhh", ...) as shield_tx.py builds it
     fn pack(seq: u32, buttons: u16, axes: [f32; 6], media: u8, mb: u8, dx: i16, dy: i16) -> Vec<u8> {
@@ -143,13 +142,13 @@ mod tests {
 
     #[test]
     fn parses_shield_tx_packet() {
-        let b = pack(7, XButtons::A | XButtons::GUIDE, [-1.0, 1.0, 0.5, 0.0, 1.0, 0.0], 0x05, 0x09, -3, 12);
+        let b = pack(7, xb::A | xb::GUIDE, [-1.0, 1.0, 0.5, 0.0, 1.0, 0.0], 0x05, 0x09, -3, 12);
         assert_eq!(b.len(), PACKET_LEN);
         let p = Packet::parse(&b).unwrap();
         assert_eq!(p.seq, 7);
-        assert_eq!(p.pad.buttons.raw, XButtons::A | XButtons::GUIDE);
-        assert_eq!((p.pad.thumb_lx, p.pad.thumb_ly, p.pad.thumb_rx, p.pad.thumb_ry), (-32767, 32767, 16384, 0));
-        assert_eq!((p.pad.left_trigger, p.pad.right_trigger), (255, 0));
+        assert_eq!(p.pad.buttons, xb::A | xb::GUIDE);
+        assert_eq!((p.pad.lx, p.pad.ly, p.pad.rx, p.pad.ry), (-32767, 32767, 16384, 0));
+        assert_eq!((p.pad.lt, p.pad.rt), (255, 0));
         assert_eq!(p.keys, key::VOL_UP | key::MUTE);
         assert_eq!((p.mouse_buttons, p.dx, p.dy), (0x09, -3, 12));
     }
@@ -165,7 +164,7 @@ mod tests {
     #[test]
     fn out_of_range_axes_clamp() {
         let p = Packet::parse(&pack(1, 0, [2.0, -2.0, 0.0, 0.0, -1.0, 9.0], 0, 0, 0, 0)).unwrap();
-        assert_eq!((p.pad.thumb_lx, p.pad.thumb_ly), (32767, -32767));
-        assert_eq!((p.pad.left_trigger, p.pad.right_trigger), (0, 255));
+        assert_eq!((p.pad.lx, p.pad.ly), (32767, -32767));
+        assert_eq!((p.pad.lt, p.pad.rt), (0, 255));
     }
 }
