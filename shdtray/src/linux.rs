@@ -31,6 +31,10 @@ use shdlib::names::MAX_NAME;
 
 //region Icons
 
+// TODO: KDE panel renders the icon at 48, which is Very Large compared to the other icons.
+//       We should set the scale of the icon at 48 to about half to match the other icons in
+//       the panel at 48px. Connected controllers badge scaling should not change to maximize
+//       readability. Will require its own tests.
 /// The sides the icon is rendered at; the panel picks the one that suits it
 const SIZES: [u32; 2] = [24, 48];
 /// The menu's signal bars, which the menu scales to its own size

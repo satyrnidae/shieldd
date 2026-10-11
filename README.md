@@ -42,16 +42,19 @@ Works:
   and disconnect; about
 - Runs at login, windowless, and picks the adapter back up after a replug
 - Mic and headset audio over VBAN, tested with Voicemeeter Potato
+- Linux native utility and USB driver
 
 Planned:
-- Linux native utility
 - PulseAudio / ALSA audio backend
 
 Unplanned:
 - A native Windows audio device. That would need a kernel driver, and test-signed drivers don't
   get along with anti-cheat.
-- 5 GHz, TX power calibration and IQK on the adapter. 2.4 GHz at fixed power is enough at
-  couch distance.
+- 5 GHz, which the SHIELD controller and tablet do not seem to support anyways.
+
+Not yet:
+- TX power calibration and IQK on the adapter. Fixed power levels are good enough for couch
+  distance.
 
 ## Supported hardware
 
