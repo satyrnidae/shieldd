@@ -1,8 +1,8 @@
 //! UI text, from the Fluent files under res/locales/, one per language, embedded: the tray's and
 //! the notices shieldd sends to it. CLI help, errors and logs stay English.
 //!
-//! The user's Windows display languages pick the text, most preferred first. Anything a language
-//! leaves out falls back to en-US.
+//! The user's display languages pick the text, most preferred first: Windows' own, or elsewhere
+//! the locale's, from LANGUAGE and the rest. Anything a language leaves out falls back to en-US.
 
 use std::sync::OnceLock;
 
@@ -97,9 +97,29 @@ fn ui_languages() -> Vec<String> {
     #[cfg(windows)]
     let wanted = crate::windows::ui_languages();
     #[cfg(not(windows))]
-    let wanted = Vec::new();
+    let wanted = env_languages(|k| std::env::var(k).ok());
     // Tests compare English text, whatever the machine's set to
     if cfg!(test) { Vec::new() } else { wanted }
+}
+
+/// The languages a POSIX locale asks for, as BCP 47 tags: LANGUAGE's list, most preferred
+/// first, then the first of LC_ALL, LC_MESSAGES and LANG that's set. `de_DE.UTF-8@euro` is
+/// `de-DE`. The C locale asks for none, and turns LANGUAGE off as gettext does.
+#[cfg(not(windows))]
+fn env_languages(var: impl Fn(&str) -> Option<String>) -> Vec<String> {
+    let tag = |l: &str| {
+        let l = l.split(['.', '@']).next().unwrap_or_default();
+        (!l.is_empty() && l != "C" && l != "POSIX").then(|| l.replace('_', "-"))
+    };
+    let locale = ["LC_ALL", "LC_MESSAGES", "LANG"].into_iter().find_map(|k| var(k).filter(|v| !v.is_empty()));
+    let Some(locale) = locale.as_deref().map(tag) else { return Vec::new() };
+    let mut out: Vec<String> = match locale {
+        Some(_) => var("LANGUAGE").unwrap_or_default().split(':').filter_map(tag).collect(),
+        None => return Vec::new(),
+    };
+    out.extend(locale);
+    out.dedup();
+    out
 }
 
 #[cfg(test)]
@@ -196,5 +216,21 @@ mod tests {
         assert_eq!(pick(&["fr-BE"]), [2, 0]);
         assert_eq!(pick(&["en-GB", "de-DE"]), [0, 1]);
         assert_eq!(pick(&["xx-not a tag", "ja-JP"]), [0]);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn languages_from_the_locale() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |k: &str| pairs.iter().find(|(n, _)| *n == k).map(|(_, v)| v.to_string())
+        };
+        assert_eq!(env_languages(env(&[("LANG", "de_DE.UTF-8")])), ["de-DE"]);
+        assert_eq!(env_languages(env(&[("LANG", "fr_CA.UTF-8"), ("LC_ALL", "en_GB@euro")])), ["en-GB"]);
+        assert_eq!(
+            env_languages(env(&[("LANGUAGE", "fr_FR:de::en"), ("LANG", "en_US.UTF-8")])),
+            ["fr-FR", "de", "en", "en-US"]
+        );
+        assert!(env_languages(env(&[("LANGUAGE", "fr_FR"), ("LANG", "C.UTF-8")])).is_empty());
+        assert!(env_languages(env(&[])).is_empty());
     }
 }

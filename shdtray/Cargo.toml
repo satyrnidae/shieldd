@@ -17,9 +17,20 @@ unic-langid = "0.9.6"
 # Icons from shdtray/res/*.svg; no text or raster images in them
 resvg = { version = "0.48", default-features = false }
 
+[features]
+# The Linux tray: the icon through StatusNotifierItem (ksni), notifications over D-Bus, and its
+# boxes in GTK 4. Off by default, so --transmit builds without GTK; Windows' tray is always there.
+tray = ["dep:ksni", "dep:zbus", "dep:gtk4", "dep:libc"]
+
 [dev-dependencies]
 # The message ids in each .ftl, for the tests
 fluent-syntax = "0.12.0"
+# The tray example's logs
+tracing-subscriber.workspace = true
+
+[[example]]
+name = "tray"
+required-features = ["tray"]
 
 [target.'cfg(windows)'.dependencies.windows]
 workspace = true
@@ -37,3 +48,11 @@ features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni = { version = "0.3.6", default-features = false, features = ["blocking", "async-io"], optional = true }
+zbus = { version = "5", default-features = false, features = ["async-io", "blocking-api"], optional = true }
+# AlertDialog is 4.10
+gtk4 = { version = "0.11.5", features = ["v4_10"], optional = true }
+# dlopen for libcanberra's event sounds, silent without it
+libc = { workspace = true, optional = true }

@@ -1,25 +1,32 @@
 //! The tray: battery, connection and pairing at a glance, and a menu to pair, reconfigure the
 //! network, and identify, rename, stream or disconnect each controller. What it shows and what
 //! it sends back are platform-neutral: here, battery.rs, icons.rs, menu.rs and model.rs, with
-//! handle.rs the side shieldd holds. Putting it on screen is per platform, so far windows.rs.
+//! handle.rs the side shieldd holds. Putting it on screen is per platform: windows.rs, and
+//! linux.rs with the `tray` feature.
 
-#[cfg_attr(not(windows), allow(dead_code, reason = "only the Windows tray uses it so far"))]
+#[cfg_attr(not(any(windows, all(target_os = "linux", feature = "tray"))), allow(dead_code, reason = "no tray here"))]
 mod battery;
-#[cfg(windows)]
+#[cfg(any(windows, all(target_os = "linux", feature = "tray")))]
 mod handle;
-#[cfg_attr(not(windows), allow(dead_code, reason = "only the Windows tray uses it so far"))]
+#[cfg_attr(not(any(windows, all(target_os = "linux", feature = "tray"))), allow(dead_code, reason = "no tray here"))]
 mod icons;
 pub mod l10n;
-#[cfg_attr(not(windows), allow(dead_code, reason = "only the Windows tray uses it so far"))]
+#[cfg(all(target_os = "linux", feature = "tray"))]
+mod linux;
+#[cfg_attr(not(any(windows, all(target_os = "linux", feature = "tray"))), allow(dead_code, reason = "no tray here"))]
 mod menu;
-#[cfg_attr(not(windows), allow(dead_code, reason = "only the Windows tray uses it so far"))]
+#[cfg_attr(not(any(windows, all(target_os = "linux", feature = "tray"))), allow(dead_code, reason = "no tray here"))]
 mod model;
 #[cfg(windows)]
 mod windows;
 
 pub use battery::Battery;
-#[cfg(windows)]
+#[cfg(any(windows, all(target_os = "linux", feature = "tray")))]
 pub use handle::Tray;
+#[cfg(all(target_os = "linux", feature = "tray"))]
+use linux as platform;
+#[cfg(all(target_os = "linux", feature = "tray"))]
+pub use linux::device_sound;
 #[cfg(windows)]
 use windows as platform;
 #[cfg(windows)]
@@ -55,7 +62,7 @@ pub struct Status {
 }
 
 /// How well a controller's link is holding up, as the bars by its line in the menu
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Signal {
     /// About to drop, or nothing heard from it lately: no bars
     Dropping,

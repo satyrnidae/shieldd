@@ -14,7 +14,7 @@ use resvg::usvg;
 use crate::battery::Battery;
 use crate::{MAX_CONTROLLERS, Signal};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Icon {
     /// On the charger: outline and bolt in the stroke color. Flashes with ChargingLit when plugged in.
     Charging,
@@ -309,9 +309,9 @@ pub(crate) struct Palette {
 /// Only the stroke and yellow differ by theme; the darker reds and greens were too close to black
 /// to flash against it
 pub(crate) const LIGHT: Palette =
-    Palette { stroke: "#000000", green: "#44AA00", yellow: "#D4AA00", red: "#AA0000", blue: "#0066FF" };
+    Palette { stroke: "#000000", green: "#1ccb00", yellow: "#fec41e", red: "#fe1e1e", blue: "#40a4ff" };
 pub(crate) const DARK: Palette =
-    Palette { stroke: "#FFFFFF", green: "#44AA00", yellow: "#FFD42A", red: "#AA0000", blue: "#0066FF" };
+    Palette { stroke: "#FFFFFF", green: "#1ccb00", yellow: "#fec41e", red: "#fe1e1e", blue: "#40a4ff" };
 
 impl Palette {
     fn accent(&self, a: Accent) -> &'static str {

@@ -228,11 +228,6 @@ pub(crate) fn menu_items(s: &Status, pct: impl Fn(&[u8; 6]) -> Option<u8>) -> Ve
     items
 }
 
-/// `items` without their signal bars, for telling whether an open menu's stale
-pub(crate) fn without_signal(items: &[Item]) -> Vec<Item> {
-    items.iter().map(|i| Item { signal: None, sub: without_signal(&i.sub), ..i.clone() }).collect()
-}
-
 /// The boxes a pick from the menu may open, as each platform shows them
 pub(crate) trait Dialogs {
     /// Shutting down: no more boxes

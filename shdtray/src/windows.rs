@@ -48,7 +48,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::handle::Msg;
 use crate::icons::{BADGES, DARK, Icon, LIGHT, rasterize, signal_svg};
-use crate::menu::{self, Dialogs, Item, Kind, without_signal};
+use crate::menu::{self, Dialogs, Item, Kind};
 use crate::model::{Model, Notice};
 use crate::{Command, Signal, tr};
 use shdlib::names::MAX_NAME;
@@ -457,6 +457,11 @@ fn signal_bitmap(s: Signal, size: u32) -> Option<HBITMAP> {
 fn small_icon_size(dpi: u32) -> u32 {
     // SAFETY: plain query
     unsafe { GetSystemMetricsForDpi(SM_CXSMICON, dpi) }.max(16) as u32
+}
+
+/// `items` without their signal bars, for telling whether an open menu's stale
+fn without_signal(items: &[Item]) -> Vec<Item> {
+    items.iter().map(|i| Item { signal: None, sub: without_signal(&i.sub), ..i.clone() }).collect()
 }
 
 /// Pops up `items` at `at` until something's picked or it's closed; 0 for nothing

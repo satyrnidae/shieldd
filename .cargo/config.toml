@@ -1,0 +1,5 @@
+# Windows builds to target/windows. Both toolchains read this file, D:\ and /mnt/d being the same
+# folder, and Cargo can't pick target-dir by platform, so the Linux side sets CARGO_TARGET_DIR to
+# target/linux itself (a cargo wrapper in WSL's ~/.bashrc).
+[build]
+target-dir = "target/windows"
