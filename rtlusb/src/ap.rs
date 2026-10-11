@@ -133,7 +133,13 @@ impl Chip {
         rtl.set32(TCR, TCR_UPDATE_TIMIE)?;
         rtl.w8(DTIM_COUNTER_ROOT, 0)?;
         rtl.w8(BCN_CTRL, (EN_BCN_FUNCTION | DIS_TSF_UDT) as u8)?;
-        self.download_beacon(tx, &cfg.beacon())?;
+        // The first bulk packet after a previous session can vanish: acked, but the chip never sees
+        // it. Seen behind usbipd, every start but the first after an attach, and only the one
+        // packet; the next goes through. That's this beacon, so it gets a second go.
+        if let Err(e) = self.download_beacon(tx, &cfg.beacon()) {
+            debug!("first beacon lost, sending it again: {e:#}");
+            self.download_beacon(tx, &cfg.beacon())?;
+        }
         rtl.set32(FWHW_TXQ_CTRL, EN_BCNQ_DL)
     }
 
@@ -149,10 +155,23 @@ impl Chip {
 
         let res = tx.send(rtl, TxInfo::beacon(), beacon).and_then(|()| {
             if rtl.poll32(DWBCN0_CTRL, BCN_VALID, 1, Duration::from_millis(20))? {
-                Ok(())
-            } else {
-                bail!("beacon never became valid")
+                return Ok(());
             }
+            // What the chip had, to tell why
+            let regs = [
+                ("DWBCN0_CTRL", DWBCN0_CTRL),
+                ("FIFOPAGE_CTRL_2", FIFOPAGE_CTRL_2),
+                ("CR", CR),
+                ("RQPN", RQPN),
+                ("FWHW_TXQ_CTRL", FWHW_TXQ_CTRL),
+                ("BCN_CTRL", BCN_CTRL),
+            ];
+            let state = regs
+                .iter()
+                .map(|&(name, addr)| format!("{name}={:#010x}", rtl.r32(addr).unwrap_or(0xdead_beef)))
+                .collect::<Vec<_>>()
+                .join(" ");
+            bail!("beacon never became valid ({} bytes); {state}", beacon.len())
         });
 
         rtl.w16(FIFOPAGE_CTRL_2, (crate::chip::RSVD_BOUNDARY as u16) | BCN_VALID_V1)?;

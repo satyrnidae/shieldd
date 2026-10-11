@@ -28,7 +28,7 @@ use rtlusb::wps::{Credential, Device};
 use rtlusb::{ApOptions, Link, Radio, RadioEvent};
 use shdlib::vban::{self, Vban};
 use shdnet::mac::{Mac, MacFmt};
-use shdtray::{self as tray, Command, Status, Tray, tr};
+use shdtray::{Command, Status, Tray, tr};
 use tracing::{debug, info, trace, warn};
 
 use crate::outputs::Desktop;
@@ -213,7 +213,10 @@ impl Shared {
 pub fn run(args: Args, quit: &AtomicBool) -> Result<()> {
     // Up the whole time, so it also says shieldd is running while there's nothing to host
     let mut sh = Shared {
-        tray: Tray::start(crate::ABOUT),
+        tray: match args.no_tray {
+            true => Tray::headless(crate::ABOUT),
+            false => Tray::start(crate::ABOUT),
+        },
         vban: None,
         vban_on: BTreeSet::new(),
         unsaved: None,
@@ -225,6 +228,7 @@ pub fn run(args: Args, quit: &AtomicBool) -> Result<()> {
     let mut start = Start { reconfigure: args.reconfigure_network, pair: args.pair || args.reconfigure_network };
     let mut backoff = RETRY_MIN;
     let mut waiting = false;
+    let mut first_network = false;
     while !quit.load(Ordering::Relaxed) {
         if args.background && !rtlusb::usb::present() {
             if !waiting {
@@ -237,6 +241,16 @@ pub fn run(args: Args, quit: &AtomicBool) -> Result<()> {
         waiting = false;
         if let Some(p) = sh.pending.take() {
             start = p;
+        }
+        // Nothing saved to host: a new group and pairing, as --reconfigure-network, which saves it
+        // at once so the next start just hosts. Said once, not on each retry.
+        if !start.reconfigure && sh.unsaved.is_none() && !args.conf.exists() {
+            if !first_network {
+                info!("no saved group in {}; making one and pairing", args.conf.display());
+                sh.tray.problem(&tr!("problem-first-network-title"), &tr!("problem-first-network"));
+                first_network = true;
+            }
+            start = Start::RECONFIGURE;
         }
         let started = Instant::now();
         let next = run_once(&args, start, quit, &mut sh);
@@ -425,9 +439,10 @@ fn run_once(args: &Args, start: Start, quit: &AtomicBool, sh: &mut Shared) -> Re
             RadioEvent::Connected(sta) => {
                 info!(sta = %sta.fmt(), "Wi-Fi link up");
                 linked.insert(sta);
-                // Its pad's first plug-in plays Windows' own sound a moment later; one's enough
-                if seat_mut(&mut seats, &sta).is_some_and(|s| s.pad.plugged()) {
-                    tray::device_sound(true);
+                // On Windows its pad's first plug-in plays the system's own sound a moment later;
+                // one's enough
+                if !crate::outputs::PLUG_SOUND || seat_mut(&mut seats, &sta).is_some_and(|s| s.pad.plugged()) {
+                    sh.tray.device_sound(true);
                 }
             }
             RadioEvent::Disconnected(sta) => {
@@ -438,7 +453,7 @@ fn run_once(args: &Args, start: Start, quit: &AtomicBool, sh: &mut Shared) -> Re
                 // Not for one turned away before it ever connected
                 if linked.remove(&sta) {
                     info!(sta = %sta.fmt(), "Wi-Fi link down");
-                    tray::device_sound(false);
+                    sh.tray.device_sound(false);
                 }
             }
             RadioEvent::Paired(sta, model) => {

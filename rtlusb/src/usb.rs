@@ -11,6 +11,16 @@ use tracing::trace;
 const VID: u16 = 0x0bda;
 const PID: u16 = 0x0811;
 
+/// No adapter that we can open, and what to check
+#[cfg(windows)]
+const NOT_FOUND: &str = "no 0bda:0811 on WinUSB; is it plugged in, and on WinUSB rather than the Realtek driver?";
+#[cfg(not(windows))]
+const NOT_FOUND: &str = "no 0bda:0811; is it plugged in?";
+#[cfg(windows)]
+const OPEN_FAILED: &str = "open device";
+#[cfg(not(windows))]
+const OPEN_FAILED: &str = "open device; is shieldd's udev rule installed (`sudo shieldd --install-udev-rule`)?";
+
 const REQ: u8 = 0x05;
 const TIMEOUT: Duration = Duration::from_millis(500);
 
@@ -31,13 +41,13 @@ pub fn present() -> bool {
 
 impl Rtl {
     pub fn open() -> Result<Self> {
-        let info = nusb::list_devices()
-            .wait()?
-            .find(|d| d.vendor_id() == VID && d.product_id() == PID)
-            .context("no 0bda:0811 on WinUSB; attached to WSL, or still on the Realtek driver?")?;
-        let dev = info.open().wait().context("open device")?;
+        let info =
+            nusb::list_devices().wait()?.find(|d| d.vendor_id() == VID && d.product_id() == PID).context(NOT_FOUND)?;
+        let dev = info.open().wait().context(OPEN_FAILED)?;
         let speed = dev.speed();
-        let iface = dev.claim_interface(0).wait().context("claim interface 0")?;
+        // On Linux the kernel's own driver, rtw88 or an out-of-tree 8821au, has it first. It's
+        // not rebound when we let go; replugging the adapter gives it back.
+        let iface = dev.detach_and_claim_interface(0).wait().context("claim interface 0")?;
 
         let mut bulk_in = None;
         let mut bulk_out = Vec::new();

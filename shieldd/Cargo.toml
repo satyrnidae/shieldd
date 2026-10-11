@@ -1,11 +1,18 @@
 [package]
 name = "shieldd"
-description = "Windows host for the 2015 NVIDIA SHIELD controller over Wi-Fi Direct + Ozmo, plus the WSL bridge (--transmit / --receiver)"
+description = "Windows and Linux host for the 2015 NVIDIA SHIELD controller over Wi-Fi Direct + Ozmo, plus the WSL bridge (--transmit / --receiver)"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+
+[features]
+default = ["tray"]
+# The tray on Linux (GTK 4 and D-Bus); without it, hosting runs headless and the tray's
+# notifications go to the log. Off for a build that only runs --transmit: --no-default-features.
+# Windows' tray is always there.
+tray = ["shdtray/tray"]
 
 [dependencies]
 shdnet.workspace = true
@@ -16,6 +23,10 @@ shdlib = { workspace = true, features = ["gzip", "logs", "vban"] }
 anyhow.workspace = true
 clap.workspace = true
 tracing.workspace = true
+ctrlc.workspace = true
+rtlusb.workspace = true
+rand = "0.8"
+names = { version = "0.14", default-features = false }
 
 [build-dependencies]
 # The About box's build date
@@ -25,18 +36,15 @@ shdlib.workspace = true
 # Reading backups back in tests
 flate2 = "1.1"
 
-# The host and --receiver: Windows only
+# The outputs, through ViGEmBus
 [target.'cfg(windows)'.dependencies]
-ctrlc.workspace = true
-rtlusb.workspace = true
-rand = "0.8"
-names = { version = "0.14", default-features = false }
 vigem-client.workspace = true
 
-# --transmit: the WSL side; and the outputs, through uinput
+# --transmit, the WSL side; the outputs, through uinput; and --stop's SIGTERM
 [target.'cfg(target_os = "linux")'.dependencies]
 libc.workspace = true
 evdev = "0.13.2"
+ctrlc = { workspace = true, features = ["termination"] }
 
 [target.'cfg(windows)'.dependencies.windows]
 workspace = true

@@ -31,6 +31,10 @@ use windows::Input;
 
 use crate::controller::{Pad, Trackpad, btn, key};
 
+/// The system plays its own device sound when a virtual pad first plugs in: Windows does for
+/// ViGEm's. A desktop on Linux has nothing to say about a uinput device.
+pub const PLUG_SOUND: bool = cfg!(windows);
+
 /// What a virtual pad shows, shaped as XInput has it: XUSB button bits (shdlink's `xb`),
 /// triggers 0-255, and sticks with Y growing upward
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

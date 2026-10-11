@@ -45,7 +45,7 @@ pub struct Seat {
     pub host: Host,
     pub ctl: Controller,
     /// Plugged in from its first setup until the run ends, so a dropout doesn't make it vanish
-    /// from Windows and come back as a new device
+    /// from the system and come back as a new device
     pub pad: Gamepad,
     /// Rumble waiting for the controller to take the previous one
     rumble: Option<[u16; 3]>,

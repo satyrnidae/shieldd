@@ -215,7 +215,7 @@ fn kde_sound_theme() -> Option<String> {
 }
 
 /// The sound theme's device-added or device-removed sound, as for a USB device
-pub fn device_sound(connected: bool) {
+pub(crate) fn device_sound(connected: bool) {
     play(if connected { c"device-added" } else { c"device-removed" }, None);
 }
 

@@ -138,7 +138,7 @@ fn dib(side: i32, bgra: &[u8]) -> Result<HBITMAP> {
 
 /// Windows' own Device Connect or Device Disconnect sound, as for a USB device. Follows the sound
 /// scheme: silent if it has none, no fallback ding.
-pub fn device_sound(connected: bool) {
+pub(crate) fn device_sound(connected: bool) {
     let alias = if connected { w!("DeviceConnect") } else { w!("DeviceDisconnect") };
     // SAFETY: a static alias; async, so nothing of ours is used after it returns
     let _ = unsafe { PlaySoundW(alias, None, SND_ALIAS | SND_ASYNC | SND_NODEFAULT | SND_SYSTEM) };

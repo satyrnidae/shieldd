@@ -1,6 +1,6 @@
 [package]
 name = "rtlusb"
-description = "Userspace RTL8811AU driver over WinUSB (plan B)"
+description = "Userspace RTL8811AU driver over WinUSB or usbfs (plan B)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

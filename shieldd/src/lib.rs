@@ -1,13 +1,13 @@
-//! shieldd: hosts the 2015 SHIELD controller natively on Windows.
+//! shieldd: hosts the 2015 SHIELD controller natively, on Windows or Linux.
 //!
-//! Default: our own RTL8811AU driver (rtlusb over WinUSB) runs the AP ->
+//! Default: our own RTL8811AU driver (rtlusb over WinUSB or usbfs) runs the AP ->
 //! raw Ozmo frames -> an ozproto session per controller -> controller setup + HID reports ->
-//! a virtual Xbox 360 pad each (ViGEm), plus a shared mouse and media keys (SendInput). See
-//! radio.rs and seat.rs.
+//! a virtual Xbox 360 pad each, plus a shared mouse and media keys: ViGEm and SendInput on
+//! Windows, uinput on Linux. See radio.rs, seat.rs and outputs.rs.
 //!
 //! The WSL bridge, for when the radio stays in Linux (ozwpan):
 //! - `--transmit` (Linux): controller evdev/hidraw -> SHD2 UDP packets (transmit.rs)
-//! - `--receiver` (Windows): SHD2 packets -> the same outputs (receiver.rs)
+//! - `--receiver` (Windows, usually): SHD2 packets -> the same outputs (receiver.rs)
 //!
 //! Both sides share the packet format through the `shdlink` crate.
 //!
@@ -15,25 +15,15 @@
 //! running at login (`--install`) that lives in its own crate. Hosting, both log to a file too.
 //! See background.rs, and shdlib's logs.rs.
 
-#[cfg(windows)]
 mod background;
-#[cfg_attr(not(windows), allow(dead_code, reason = "only the Windows host uses it so far"))]
 mod controller;
-#[cfg_attr(not(windows), allow(dead_code, reason = "only the Windows host uses it so far"))]
 mod known_clients;
-#[cfg_attr(not(windows), allow(dead_code, reason = "only the Windows host uses it so far"))]
 mod outputs;
-#[cfg(windows)]
 mod p2pconf;
-#[cfg(windows)]
 mod pair;
-#[cfg(windows)]
 mod radio;
-#[cfg(windows)]
 mod receiver;
-#[cfg(windows)]
 mod seat;
-#[cfg(windows)]
 mod signal;
 #[cfg(target_os = "linux")]
 mod transmit;
@@ -48,7 +38,6 @@ use tracing::error;
 pub use shdlib::settings_dir;
 
 /// For the tray's About box
-#[cfg(windows)]
 const ABOUT: shdtray::About = shdtray::About {
     version: env!("CARGO_PKG_VERSION"),
     authors: env!("CARGO_PKG_AUTHORS"),
@@ -60,7 +49,6 @@ pub fn default_conf() -> PathBuf {
 }
 
 /// Whether `conf` is the default one, however it's spelled
-#[cfg(windows)]
 fn is_default_conf(conf: &std::path::Path) -> bool {
     match (std::fs::canonicalize(conf), std::fs::canonicalize(default_conf())) {
         (Ok(a), Ok(b)) => a == b,
@@ -70,7 +58,7 @@ fn is_default_conf(conf: &std::path::Path) -> bool {
 
 #[derive(Parser, Debug)]
 #[command(version, about)]
-#[allow(dead_code, reason = "each platform reads only its own options")]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code, reason = "--transmit's options are read on Linux only"))]
 pub struct Args {
     /// wpa_supplicant P2P config holding the controller's saved group
     #[arg(long, default_value_os_t = default_conf())]
@@ -120,27 +108,48 @@ pub struct Args {
     /// The controller's hidraw node (default: find 0955:7210), with --transmit
     #[arg(long, requires = "transmit")]
     hidraw: Option<PathBuf>,
+    /// No tray icon: no menu, boxes or sounds, and its notifications go to the log. For hosting
+    /// without a desktop to show it on.
+    #[arg(long, conflicts_with_all = ["receiver", "transmit"])]
+    no_tray: bool,
     /// Keep running: wait for the adapter, and start over when it's unplugged or fails.
     /// shieldw always runs this way.
     #[arg(long, conflicts_with_all = ["receiver", "transmit", "pair", "reconfigure_network"])]
     background: bool,
     /// Start shieldw at login for this user, with the rest of this command line. Doesn't start
-    /// it now.
+    /// it now. On Linux it also puts in the udev rule (see --install-udev-rule), so run it with
+    /// sudo; it's set up for the user who ran sudo.
     #[arg(long, conflicts_with_all = ["receiver", "transmit", "pair", "reconfigure_network", "uninstall", "stop"])]
     install: bool,
-    /// Don't start shieldw at login anymore. Doesn't stop it either; see --stop.
+    /// Don't start shieldw at login anymore. Doesn't stop it either; see --stop. On Linux it also
+    /// takes out the udev rule, so run it with sudo.
     #[arg(long, exclusive = true)]
     uninstall: bool,
+    /// Let the user logged in at the seat drive the adapter and the virtual pads without root:
+    /// shieldd's udev rule in /etc/udev/rules.d, and uinput loaded at boot. Run it with sudo.
+    /// --install does this too.
+    #[cfg(target_os = "linux")]
+    #[arg(long, exclusive = true)]
+    install_udev_rule: bool,
     /// Stop the shieldd or shieldw that's running now
     #[arg(long, exclusive = true)]
     stop: bool,
 }
 
-#[cfg(windows)]
 impl Args {
     /// Not a one-off like --install or --stop
     fn hosts(&self) -> bool {
-        !(self.install || self.uninstall || self.stop || self.transmit)
+        !(self.install || self.uninstall || self.stop || self.transmit || self.installs_udev_rule())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn installs_udev_rule(&self) -> bool {
+        self.install_udev_rule
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn installs_udev_rule(&self) -> bool {
+        false
     }
 
     fn scale(&self) -> (f32, f32) {
@@ -158,13 +167,10 @@ pub fn run(windowless: bool) -> Result<()> {
     // A host takes the instance before it touches the log file, and only the instance starts a
     // new one. Anything else shieldw does, a second launch or a one-off like --stop, adds to
     // the end of it; shieldd's one-offs only print.
-    #[cfg(windows)]
     let claimed = match &parsed {
         Ok(a) if a.hosts() => Some(background::claim(!windowless)),
         _ => None,
     };
-    #[cfg(not(windows))]
-    let claimed: Option<Result<Quit>> = None;
     let to_file = match &claimed {
         Some(Ok(_)) => Some(true),
         _ => windowless.then_some(false),
@@ -199,40 +205,40 @@ pub fn run(windowless: bool) -> Result<()> {
     result
 }
 
-#[cfg_attr(not(windows), expect(unused_mut, reason = "only Windows sets background"))]
 fn dispatch(mut args: Args, windowless: bool, claimed: Option<Quit>) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
-        let _ = (windowless, claimed);
-        anyhow::ensure!(args.transmit, "on Linux only --transmit is supported (the WSL side of the bridge)");
-        transmit::run(args.dest, args.hidraw.as_deref(), args.dump)
+        if args.transmit {
+            return transmit::run(args.dest, args.hidraw.as_deref(), args.dump);
+        }
+        if args.install_udev_rule {
+            return background::install_udev_rule();
+        }
     }
-    #[cfg(windows)]
-    {
-        anyhow::ensure!(!args.transmit, "--transmit is the WSL side; run it in Linux");
-        if args.install {
-            return background::install(&args);
-        }
-        if args.uninstall {
-            return background::uninstall();
-        }
-        if args.stop {
-            return background::stop();
-        }
-        if windowless {
-            anyhow::ensure!(
-                !(args.pair || args.reconfigure_network || args.receiver),
-                "shieldw only hosts in the background; pair with shieldd or the tray"
-            );
-            args.background = true;
-        }
-        // run() claims for anything that hosts, before logging starts
-        let quit = anyhow::Context::context(claimed, "hosting without the instance")?;
-        if args.receiver {
-            return receiver::run(args.listen, args.scale(), &quit);
-        }
-        radio::run(args, &quit)
+    #[cfg(not(target_os = "linux"))]
+    anyhow::ensure!(!args.transmit, "--transmit is the WSL side; run it in Linux");
+    if args.install {
+        return background::install(&args);
     }
+    if args.uninstall {
+        return background::uninstall();
+    }
+    if args.stop {
+        return background::stop();
+    }
+    if windowless {
+        anyhow::ensure!(
+            !(args.pair || args.reconfigure_network || args.receiver),
+            "shieldw only hosts in the background; pair with shieldd or the tray"
+        );
+        args.background = true;
+    }
+    // run() claims for anything that hosts, before logging starts
+    let quit = anyhow::Context::context(claimed, "hosting without the instance")?;
+    if args.receiver {
+        return receiver::run(args.listen, args.scale(), &quit);
+    }
+    radio::run(args, &quit)
 }
 
 pub fn hex(b: &[u8]) -> String {

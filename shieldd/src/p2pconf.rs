@@ -1,7 +1,12 @@
 //! The controller's saved group, in wpa_supplicant P2P config form: read for hosting, written
-//! by --pair. The key is sealed with DPAPI, `psk=dpapi:<base64>`, so only this Windows user can read
-//! it. A plain `psk=` in the default conf gets sealed the first time it's read; one given with
-//! --conf is left as it is, since something else may read it too.
+//! by --pair.
+//!
+//! On Windows the key is sealed with DPAPI, `psk=dpapi:<base64>`, so only this Windows user can
+//! read it. A plain `psk=` in the default conf gets sealed the first time it's read; one given
+//! with --conf is left as it is, since something else may read it too.
+//!
+//! Elsewhere there's nothing to seal it with, so it stays plain, as wpa_supplicant keeps it, in a
+//! file only its owner can read: written 0600, and the default conf made so when it's read.
 
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -10,7 +15,9 @@ use anyhow::{Context, Result, bail};
 pub use shdlib::psk::Psk;
 use tracing::{info, warn};
 
-use shdlib::files::{commit, free_name, seal_file, seal_text, stage, stage_gz};
+use shdlib::files::{commit, free_name, stage_gz_private, stage_private};
+#[cfg(windows)]
+use shdlib::files::{seal_file, seal_text};
 use shdlib::wipe;
 
 #[derive(Debug, Clone)]
@@ -33,25 +40,49 @@ fn mhz_of(channel: u8) -> u32 {
 }
 
 /// First `mode=3` (GO) network block. `seal`: a plain key gets sealed in place, the rest of the
-/// file left be; if that fails, hosting goes on and it's tried again next time.
+/// file left be, or where there's no sealing the file is made its owner's alone; if that fails,
+/// hosting goes on and it's tried again next time.
 pub fn read(path: &Path, seal: bool) -> Result<Group> {
     let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let found = parse(&text).with_context(|| format!("in {}", path.display()))?;
+    protect(path, &text, &found, seal);
+    Ok(found.group)
+}
+
+#[cfg(windows)]
+fn protect(path: &Path, text: &str, found: &Found, seal: bool) {
     if seal && !found.sealed {
-        match seal_file(path, &text, found.psk_at.clone(), &found.group.psk) {
+        match seal_file(path, text, found.psk_at.clone(), &found.group.psk) {
             Ok(()) => info!("sealed the group key in {}", path.display()),
             Err(e) => warn!("sealing the group key in {}: {e:#}", path.display()),
         }
     } else if !found.sealed {
         info!("the group key in {} isn't sealed; only the default conf gets sealed", path.display());
     }
-    Ok(found.group)
+}
+
+#[cfg(not(windows))]
+fn protect(path: &Path, _: &str, _: &Found, seal: bool) {
+    use std::os::unix::fs::PermissionsExt;
+    if !seal {
+        return;
+    }
+    let Ok(mode) = std::fs::metadata(path).map(|m| m.permissions().mode()) else { return };
+    if mode & 0o077 != 0 {
+        match std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+            Ok(()) => info!("made {} readable by its owner only; it holds the group key", path.display()),
+            Err(e) => warn!("making {} readable by its owner only: {e}", path.display()),
+        }
+    }
 }
 
 struct Found {
     group: Group,
-    /// Where the `psk=` value sits in the text
+    /// Where the `psk=` value sits in the text, for sealing it in place
+    #[cfg_attr(not(windows), allow(dead_code, reason = "only DPAPI seals"))]
     psk_at: Range<usize>,
+    /// Elsewhere a sealed key doesn't parse, so it's always false there
+    #[cfg_attr(not(windows), allow(dead_code, reason = "only DPAPI seals"))]
     sealed: bool,
 }
 
@@ -107,11 +138,12 @@ pub fn write(path: &Path, g: &Group, seal: bool) -> Result<Option<PathBuf>> {
         }
     };
     let mut new = format(g, seal)?.into_bytes();
-    let staged = stage(path, &new);
+    let staged = stage_private(path, &new);
     wipe(&mut new);
     commit(&staged?, path)?;
 
     let Some((mut old, b)) = old else { return Ok(None) };
+    #[cfg(windows)]
     if seal
         && let Ok(text) = std::str::from_utf8(&old)
         && let Ok(found) = parse(text)
@@ -125,7 +157,7 @@ pub fn write(path: &Path, g: &Group, seal: bool) -> Result<Option<PathBuf>> {
             Err(e) => warn!("sealing the backup of {}: {e:#}; keeping it plain", path.display()),
         }
     }
-    let saved = stage_gz(&b, &old).and_then(|t| commit(&t, &b));
+    let saved = stage_gz_private(&b, &old).and_then(|t| commit(&t, &b));
     wipe(&mut old);
     match saved {
         Ok(()) => Ok(Some(b)),
@@ -151,13 +183,24 @@ fn backup_path(path: &Path) -> Result<PathBuf> {
     Ok(free_name(&path.with_file_name("backup"), &base, &[&ext]))
 }
 
-/// The file for `g`, its key sealed or plain
-fn format(g: &Group, seal: bool) -> Result<String> {
+/// The `psk=` value for `g`, sealed or plain, and the comment that says which
+#[cfg(windows)]
+fn key(g: &Group, seal: bool) -> Result<(String, &'static str)> {
     const SEALED: &str = "# psk is sealed with DPAPI; only the Windows user who made it can read it, on this machine.";
-    let (psk, note) = match seal {
+    Ok(match seal {
         true => (g.psk.seal()?, SEALED),
         false => (g.psk.plain(), "# psk is plain, for wpa_supplicant and the like to read too."),
-    };
+    })
+}
+
+#[cfg(not(windows))]
+fn key(g: &Group, _: bool) -> Result<(String, &'static str)> {
+    Ok((g.psk.plain(), "# psk is plain, as wpa_supplicant keeps it; only this file's owner can read it."))
+}
+
+/// The file for `g`, its key sealed or plain
+fn format(g: &Group, seal: bool) -> Result<String> {
+    let (psk, note) = key(g, seal)?;
     let lines = [
         "# Written by shieldd: the group controllers pair to.".to_owned(),
         note.to_owned(),
@@ -200,6 +243,7 @@ mod tests {
         assert_eq!(&conf[f.psk_at], "\"pass1234\"");
     }
 
+    #[cfg(windows)]
     #[test]
     fn written_group_is_sealed_and_reads_back() {
         let g =
@@ -212,6 +256,7 @@ mod tests {
         assert_eq!((f.group.ssid.as_str(), &f.group.psk, f.group.channel), ("DIRECT-FC-organized-baboon", &g.psk, 11));
     }
 
+    #[cfg(windows)]
     #[test]
     fn reading_the_default_seals_it() {
         let dir = scratch("default");
@@ -245,6 +290,7 @@ mod tests {
         out
     }
 
+    #[cfg(windows)]
     #[test]
     fn backups_are_gzipped_in_their_own_folder() {
         let dir = scratch("write");
@@ -272,6 +318,46 @@ mod tests {
         // And the new file plain too, for whatever else reads it
         let new = std::fs::read_to_string(&path).unwrap();
         assert!(new.contains("psk=\"s3cretPW\"") && !new.contains("dpapi:"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(not(windows))]
+    fn mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn reading_the_default_makes_it_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("private");
+        let path = dir.join("p2p.conf");
+        std::fs::write(&path, PLAIN_GO).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        // A conf of its own is left be
+        read(&path, false).unwrap();
+        assert_eq!(mode(&path), 0o644);
+        assert_eq!(read(&path, true).unwrap().psk, Psk::Passphrase("pass1234".into()));
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), PLAIN_GO, "only its mode changes");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn written_plain_and_private_backups_too() {
+        let dir = scratch("plain");
+        let path = dir.join("p2p.conf");
+        std::fs::write(&path, PLAIN_GO).unwrap();
+        let g =
+            Group { ssid: "DIRECT-FC-organized-baboon".into(), psk: Psk::Passphrase("s3cretPW".into()), channel: 6 };
+        let b = write(&path, &g, true).unwrap().unwrap();
+        let new = std::fs::read_to_string(&path).unwrap();
+        assert!(new.contains("psk=\"s3cretPW\"") && new.contains("frequency=2437") && !new.contains("dpapi:"));
+        assert_eq!(gunzip(&b), PLAIN_GO);
+        assert_eq!((mode(&path), mode(&b)), (0o600, 0o600));
+        assert_eq!(read(&path, true).unwrap().psk, g.psk);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

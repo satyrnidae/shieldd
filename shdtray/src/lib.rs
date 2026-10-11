@@ -2,35 +2,30 @@
 //! network, and identify, rename, stream or disconnect each controller. What it shows and what
 //! it sends back are platform-neutral: here, battery.rs, icons.rs, menu.rs and model.rs, with
 //! handle.rs the side shieldd holds. Putting it on screen is per platform: windows.rs, and
-//! linux.rs with the `tray` feature.
+//! linux.rs with the `tray` feature, which build.rs marks `gui`. Headless, for --no-tray or a
+//! build without one, headless.rs only logs.
 
-#[cfg_attr(not(any(windows, all(target_os = "linux", feature = "tray"))), allow(dead_code, reason = "no tray here"))]
 mod battery;
-#[cfg(any(windows, all(target_os = "linux", feature = "tray")))]
 mod handle;
-#[cfg_attr(not(any(windows, all(target_os = "linux", feature = "tray"))), allow(dead_code, reason = "no tray here"))]
+mod headless;
+#[cfg_attr(not(gui), allow(dead_code, reason = "headless"))]
 mod icons;
 pub mod l10n;
-#[cfg(all(target_os = "linux", feature = "tray"))]
+#[cfg(all(gui, target_os = "linux"))]
 mod linux;
-#[cfg_attr(not(any(windows, all(target_os = "linux", feature = "tray"))), allow(dead_code, reason = "no tray here"))]
+#[cfg_attr(not(gui), allow(dead_code, reason = "headless"))]
 mod menu;
-#[cfg_attr(not(any(windows, all(target_os = "linux", feature = "tray"))), allow(dead_code, reason = "no tray here"))]
+#[cfg_attr(not(gui), allow(dead_code, reason = "headless"))]
 mod model;
 #[cfg(windows)]
 mod windows;
 
 pub use battery::Battery;
-#[cfg(any(windows, all(target_os = "linux", feature = "tray")))]
 pub use handle::Tray;
-#[cfg(all(target_os = "linux", feature = "tray"))]
+#[cfg(all(gui, target_os = "linux"))]
 use linux as platform;
-#[cfg(all(target_os = "linux", feature = "tray"))]
-pub use linux::device_sound;
 #[cfg(windows)]
 use windows as platform;
-#[cfg(windows)]
-pub use windows::device_sound;
 
 /// XInput's four ports: as many controllers as can be hosted at once
 pub const MAX_CONTROLLERS: usize = 4;

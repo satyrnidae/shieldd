@@ -19,7 +19,8 @@ resvg = { version = "0.48", default-features = false }
 
 [features]
 # The Linux tray: the icon through StatusNotifierItem (ksni), notifications over D-Bus, and its
-# boxes in GTK 4. Off by default, so --transmit builds without GTK; Windows' tray is always there.
+# boxes in GTK 4. Without it, Linux gets the headless one, which only logs. Windows' tray is always
+# there.
 tray = ["dep:ksni", "dep:zbus", "dep:gtk4", "dep:libc"]
 
 [dev-dependencies]

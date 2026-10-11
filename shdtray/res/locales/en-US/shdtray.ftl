@@ -126,6 +126,8 @@ about =
 
 problem-vban-title = VBAN failed
 problem-rename-title = Couldn't rename the controller
+problem-first-network-title = Setting up a network for the controller
+problem-first-network = There was none saved yet. Hold the NVIDIA button on the controller until its light flashes to pair it.
 problem-pair-soon-title = Pairing shortly
 problem-pair-soon = Pairing starts when shieldd tries the adapter again.
 problem-no-adapter-title = Waiting for the adapter

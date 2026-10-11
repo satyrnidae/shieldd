@@ -470,6 +470,8 @@ impl Chip {
         if cr == 0 || cr == 0xea {
             return Ok(());
         }
+        // Beaconing off, as rtw88 does when the AP stops; the bit survives the power-off
+        rtl.clr32(FWHW_TXQ_CTRL, EN_BCNQ_DL)?;
         if !self.btcoex {
             rtl.clr16(GPIO_MUXCFG, EN_SIC)?;
         }

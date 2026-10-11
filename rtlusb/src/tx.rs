@@ -192,7 +192,7 @@ impl Tx {
             bail!("bulk OUT: {e}");
         }
         if zlp {
-            // URB_ZERO_PACKET, which WinUSB doesn't do by itself
+            // URB_ZERO_PACKET, which neither WinUSB nor nusb on usbfs does by itself
             let done = ep.transfer_blocking(Buffer::new(0), timeout);
             if let Err(e) = done.status {
                 bail!("bulk OUT zero-length packet: {e}");

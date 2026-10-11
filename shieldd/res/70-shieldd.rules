@@ -1,0 +1,14 @@
+# shieldd on Linux: the logged-in user's access to what it needs, without root. Install to
+# /etc/udev/rules.d/ (or /usr/lib/udev/rules.d/ for a package), then:
+#   udevadm control --reload && udevadm trigger
+#
+# uaccess hands each device to the user at the active local seat, through an ACL that logind
+# takes back at logout or a user switch. It has to come before 73-seat-late.rules, which acts on
+# it; hence 70. A session without a seat, as in WSL, gets nothing from it.
+
+# The RTL8811AU adapter, which rtlusb drives over usbfs in place of the kernel's driver
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="0bda", ATTR{idProduct}=="0811", TAG+="uaccess"
+
+# uinput, for each controller's virtual pad and the shared mouse and media keys. The node is
+# there from boot, before the module, which opening it loads; static_node has udev tag it anyway.
+KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", OPTIONS+="static_node=uinput"
