@@ -104,10 +104,12 @@ Installed separately by the user; nothing from them ships with this project.
 ## Icons
 
 ### Ikono Bold Line Icons
-- **Used for:** the tray icons, `shdtray/res/battery-*-svgrepo-com.svg` and
-  `shdtray/res/loading-spinner-svgrepo-com.svg`, embedded in `shdtray` and recolored per theme at
-  runtime. `battery-empty` is the outline of the set's battery icons. Also the menu's signal bars,
-  `shdtray/res/graph-asc-svgrepo-com.svg`, recolored per level.
+- **Used for:** the tray icons, `shdtray/res/battery-*.svg` and `shdtray/res/spinner.svg`,
+  embedded in `shdtray` and recolored per theme at runtime. The set's battery icons are horizontal;
+  these are edited to stand upright, and `battery-empty` is their outline.
+  `battery-critical-menu`, the menu's critical battery warning, is the set's battery warning edited
+  back to horizontal. Also the menu's signal bars, `shdtray/res/signal-strength.svg`, recolored
+  per level.
 - **License:** MIT.
 - **Author:** Will Kelly. Retrieved via SVG Repo, https://www.svgrepo.com
 
@@ -136,8 +138,8 @@ SOFTWARE.
 ```
 
 ### Clarity Project Icons
-- **Used for:** the tray icons while no controller is connected, `shdtray/res/disconnected-svgrepo-com.svg`,
-  and while pairing, `shdtray/res/wifi-svgrepo-com.svg`, embedded in `shdtray` and recolored per theme
+- **Used for:** the tray icons while no controller is connected, `shdtray/res/disconnected.svg`,
+  and while pairing, `shdtray/res/pairing.svg`, embedded in `shdtray` and recolored per theme
   at runtime.
 - **License:** MIT.
 - **Author:** VMware. Retrieved via SVG Repo, https://www.svgrepo.com
@@ -168,7 +170,7 @@ SOFTWARE.
 
 ### Phosphor Icons
 - **Used for:** the tray icon's count badge with more than one controller connected,
-  `shdtray/res/number-circle-{two,three,four}-duotone-svgrepo-com.svg`, embedded in `shdtray` and
+  `shdtray/res/badge-{two,three,four}.svg`, embedded in `shdtray` and
   recolored per theme at runtime, the ring around each number dropped.
 - **License:** MIT.
 - **Author:** Phosphor Icons. Retrieved via SVG Repo, https://www.svgrepo.com

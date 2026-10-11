@@ -18,26 +18,20 @@ use gtk4::{self as gtk, gio, glib, prelude::*};
 use ksni::blocking::TrayMethods;
 use ksni::menu::{StandardItem, SubMenu};
 use resvg::tiny_skia::Pixmap;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 use zbus::blocking::Connection;
 use zbus::zvariant::{OwnedValue, Value};
 
 use crate::handle::Msg;
-use crate::icons::{BADGES, DARK, Icon, LIGHT, Palette, rasterize, signal_svg};
-use crate::menu::{self, Dialogs, Item, Kind};
+use crate::icons::{BADGES, DARK, Icon, LIGHT, Palette, SIZES, mark_svg, rasterize};
+use crate::menu::{self, Dialogs, Item, Kind, Mark};
 use crate::model::{Model, Notice};
 use crate::{Command, Signal, Status, tr};
 use shdlib::names::MAX_NAME;
 
 //region Icons
 
-// TODO: KDE panel renders the icon at 48, which is Very Large compared to the other icons.
-//       We should set the scale of the icon at 48 to about half to match the other icons in
-//       the panel at 48px. Connected controllers badge scaling should not change to maximize
-//       readability. Will require its own tests.
-/// The sides the icon is rendered at; the panel picks the one that suits it
-const SIZES: [u32; 2] = [24, 48];
-/// The menu's signal bars, which the menu scales to its own size
+/// The menu's images, which the menu scales to its own size
 const BAR_SIZE: u32 = 32;
 
 /// `pm` as ksni has an icon: ARGB32 in network byte order, straight alpha
@@ -55,7 +49,7 @@ fn argb(pm: &Pixmap) -> ksni::Icon {
 
 /// `icon`, with its count badge if any, at every one of SIZES
 fn render(icon: Icon, badge: Option<u8>, p: &Palette) -> Result<Vec<ksni::Icon>> {
-    SIZES.iter().map(|&size| icon.badged(p, size, badge).map(|pm| argb(&pm))).collect()
+    SIZES.iter().map(|&(size, art)| icon.badged(p, size, art, badge).map(|pm| argb(&pm))).collect()
 }
 
 /// Each icon and count badge, as rendered
@@ -75,13 +69,16 @@ fn render_all(light: bool) -> Result<Icons> {
     Ok(icons)
 }
 
-/// The signal bars for each level, as PNGs for the menu
-fn signal_pngs() -> HashMap<Signal, Vec<u8>> {
+/// Every image beside a controller's line, as PNGs for the menu: the signal bars for each level,
+/// and both frames of the critical battery warning
+fn mark_pngs() -> HashMap<Mark, Vec<u8>> {
     [Signal::Dropping, Signal::Low, Signal::Fair, Signal::Good]
+        .map(Mark::Signal)
         .into_iter()
-        .filter_map(|s| {
-            let png = rasterize(&signal_svg(s), BAR_SIZE).and_then(|pm| pm.encode_png().context("encoding png"));
-            png.inspect_err(|e| warn!("signal bars: {e:#}")).ok().map(|png| (s, png))
+        .chain([Mark::Critical, Mark::CriticalDim])
+        .filter_map(|m| {
+            let png = rasterize(&mark_svg(m), BAR_SIZE).and_then(|pm| pm.encode_png().context("encoding png"));
+            png.inspect_err(|e| warn!(?m, "menu image: {e:#}")).ok().map(|png| (m, png))
         })
         .collect()
 }
@@ -253,7 +250,8 @@ struct Sni {
     icon: Vec<ksni::Icon>,
     tip: String,
     items: Vec<Item>,
-    bars: HashMap<Signal, Vec<u8>>,
+    /// mark_pngs
+    marks: HashMap<Mark, Vec<u8>>,
     /// Menu picks, by id, to the tray thread
     picks: Sender<usize>,
 }
@@ -300,7 +298,7 @@ impl Sni {
         // A title line can't be picked, so it's disabled. Windows shows such a line in full
         // color, but dbusmenu has nothing for that, and an enabled line would close the menu.
         let enabled = i.kind == Kind::Normal;
-        let icon_data = i.signal.and_then(|s| self.bars.get(&s)).cloned().unwrap_or_default();
+        let icon_data = i.mark.and_then(|m| self.marks.get(&m)).cloned().unwrap_or_default();
         match i.kind {
             Kind::Separator => ksni::MenuItem::Separator,
             _ if !i.sub.is_empty() => {
@@ -368,7 +366,7 @@ pub(crate) fn run(rx: Receiver<Msg>, commands: Sender<Command>) -> Result<()> {
     std::thread::Builder::new().name("tray boxes".into()).spawn(move || run_boxes(boxes_rx, commands))?;
     let (notices, notices_rx) = mpsc::channel();
     std::thread::Builder::new().name("tray bus".into()).spawn(move || run_bus(notices_rx))?;
-    let sni = Sni { icon: Vec::new(), tip: String::new(), items: Vec::new(), bars: signal_pngs(), picks: picks_tx };
+    let sni = Sni { icon: Vec::new(), tip: String::new(), items: Vec::new(), marks: mark_pngs(), picks: picks_tx };
     // The panel may not be up yet at login; the icon shows once it is
     let sni = sni.assume_sni_available(true).spawn().context("tray icon")?;
     let light = LIGHT_PANEL.load(Ordering::Acquire);
@@ -548,10 +546,22 @@ fn gtk_up() -> bool {
     }
     glib::set_prgname(Some("shieldd"));
     glib::set_application_name("shieldd");
+    glib::log_set_writer_func(gtk_log);
     let up = gtk::init().inspect_err(|e| warn!("no boxes from the tray: {e}")).is_ok();
     GTK.set(Some(up));
     GTK_UP.store(up, Ordering::Release);
     up
+}
+
+/// GLib's log, as GLib writes it, but for what GTK says each time an alert opens: that it has no
+/// window to belong to. A tray has none, so that goes to the trace log instead.
+fn gtk_log(level: glib::LogLevel, fields: &[glib::LogField<'_>]) -> glib::LogWriterOutput {
+    let message = fields.iter().find(|f| f.key() == "MESSAGE").and_then(|f| f.value_str());
+    if let Some(m) = message.filter(|m| m.contains("without a transient parent")) {
+        trace!("gtk: {m}");
+        return glib::LogWriterOutput::Handled;
+    }
+    glib::log_writer_default(level, fields)
 }
 
 /// Runs `f` on the dialog thread, if GTK is up there
@@ -621,6 +631,60 @@ impl Dialogs for Boxes {
 
     fn inform(&self, title: &str, text: &str) {
         alert(title, text, &[tr!("dialog-ok")], 0, 0);
+    }
+
+    fn inform_link(&self, title: &str, text: &str, url: &str) {
+        if !gtk_up() || QUITTING.load(Ordering::Acquire) {
+            return;
+        }
+        // An alert's text can't hold a link, so a window of its own: the text, the link in it
+        // opening in the browser, and OK
+        let markup = match text.split_once(url) {
+            Some((before, after)) => {
+                let (before, after, href) =
+                    (glib::markup_escape_text(before), glib::markup_escape_text(after), glib::markup_escape_text(url));
+                format!("{before}<a href=\"{href}\">{href}</a>{after}")
+            }
+            None => glib::markup_escape_text(text).to_string(),
+        };
+        let window = gtk::Window::builder().title(title).modal(true).resizable(false).build();
+        let label = gtk::Label::builder()
+            .label(markup)
+            .use_markup(true)
+            .xalign(0.0)
+            .wrap(true)
+            .max_width_chars(60)
+            .build();
+        let ok = gtk::Button::with_label(&tr!("dialog-ok"));
+        ok.add_css_class("suggested-action");
+        ok.set_halign(gtk::Align::End);
+        let content = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(12)
+            .margin_top(18)
+            .margin_bottom(18)
+            .margin_start(18)
+            .margin_end(18)
+            .build();
+        content.append(&label);
+        content.append(&ok);
+        window.set_child(Some(&content));
+        window.set_default_widget(Some(&ok));
+        let main = glib::MainLoop::new(None, false);
+        ok.connect_clicked({
+            let window = window.clone();
+            move |_| window.close()
+        });
+        window.connect_close_request({
+            let main = main.clone();
+            move |_| {
+                main.quit();
+                glib::Propagation::Proceed
+            }
+        });
+        window.present();
+        ok.grab_focus();
+        main.run();
     }
 
     fn confirm(&self, title: &str, text: &str, warn: bool) -> bool {
@@ -703,7 +767,7 @@ mod tests {
     #[test]
     fn info_lines_cant_be_picked() {
         let (picks, _rx) = mpsc::channel();
-        let sni = Sni { icon: Vec::new(), tip: String::new(), items: Vec::new(), bars: HashMap::new(), picks };
+        let sni = Sni { icon: Vec::new(), tip: String::new(), items: Vec::new(), marks: HashMap::new(), picks };
         let s = Status {
             controllers: vec![crate::menu::tests::up(1, "A", false)],
             ssid: Some("DIRECT-ab".into()),
@@ -722,7 +786,7 @@ mod tests {
                 }
             }
         }
-        let items: Vec<_> = crate::menu::menu_items(&s, |_| Some(50)).iter().map(|i| sni.item(i)).collect();
+        let items: Vec<_> = crate::menu::menu_items(&s, |_| Some(50), true).iter().map(|i| sni.item(i)).collect();
         let mut out = Vec::new();
         lines(&items, &mut out);
         let disabled: Vec<&str> = out.iter().filter(|(_, on)| !on).map(|(l, _)| l.as_str()).collect();
@@ -735,7 +799,7 @@ mod tests {
 
     #[test]
     fn icons_are_argb() {
-        let pm = Icon::Full.badged(&DARK, 32, Some(2)).unwrap();
+        let pm = Icon::Full.badged(&DARK, 32, 32, Some(2)).unwrap();
         let icon = argb(&pm);
         assert_eq!((icon.width, icon.height, icon.data.len()), (32, 32, 32 * 32 * 4));
         // The badge's disc in the corner, opaque: A, then R, G, B, straight alpha
@@ -759,9 +823,9 @@ mod tests {
     }
 
     #[test]
-    fn every_signal_has_bars() {
-        let pngs = signal_pngs();
-        assert_eq!(pngs.len(), 4);
+    fn every_mark_has_a_png() {
+        let pngs = mark_pngs();
+        assert_eq!(pngs.len(), 6);
         assert!(pngs.values().all(|p| p.starts_with(b"\x89PNG")));
     }
 }

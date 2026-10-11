@@ -8,7 +8,7 @@
 
 #[cfg(target_os = "linux")]
 mod linux;
-#[cfg(windows)]
+#[cfg(target_os = "windows")]
 mod windows;
 
 use std::collections::HashMap;
@@ -24,16 +24,16 @@ use tracing::debug;
 pub use linux::Gamepad;
 #[cfg(target_os = "linux")]
 use linux::Input;
-#[cfg(windows)]
+#[cfg(target_os = "windows")]
 pub use windows::Gamepad;
-#[cfg(windows)]
+#[cfg(target_os = "windows")]
 use windows::Input;
 
 use crate::controller::{Pad, Trackpad, btn, key};
 
 /// The system plays its own device sound when a virtual pad first plugs in: Windows does for
 /// ViGEm's. A desktop on Linux has nothing to say about a uinput device.
-pub const PLUG_SOUND: bool = cfg!(windows);
+pub const PLUG_SOUND: bool = cfg!(target_os = "windows");
 
 /// What a virtual pad shows, shaped as XInput has it: XUSB button bits (shdlink's `xb`),
 /// triggers 0-255, and sticks with Y growing upward

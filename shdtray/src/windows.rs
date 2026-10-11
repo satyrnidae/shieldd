@@ -10,17 +10,20 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use resvg::tiny_skia::Pixmap;
 use tracing::{debug, info, warn};
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, S_OK, WPARAM};
 use windows::Win32::Globalization::{GetUserPreferredUILanguages, MUI_LANGUAGE_NAME};
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateBitmap, CreateDIBSection, DIB_RGB_COLORS, DeleteObject, HBITMAP,
-    MONITOR_DEFAULTTONEAREST, MonitorFromPoint,
+    InvalidateRect, MONITOR_DEFAULTTONEAREST, MonitorFromPoint,
 };
 use windows::Win32::Media::Audio::{PlaySoundW, SND_ALIAS, SND_ASYNC, SND_NODEFAULT, SND_SYSTEM};
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
 use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
 use windows::Win32::System::Threading::GetCurrentThreadId;
-use windows::Win32::UI::Controls::EM_LIMITTEXT;
+use windows::Win32::UI::Controls::{
+    EM_LIMITTEXT, TASKDIALOG_NOTIFICATIONS, TASKDIALOGCONFIG, TASKDIALOGCONFIG_0, TD_INFORMATION_ICON, TDCBF_OK_BUTTON,
+    TDF_ALLOW_DIALOG_CANCELLATION, TDF_ENABLE_HYPERLINKS, TDN_HYPERLINK_CLICKED,
+};
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForMonitor, GetDpiForSystem, GetSystemMetricsForDpi,
     MDT_EFFECTIVE_DPI, SetThreadDpiAwarenessContext,
@@ -31,7 +34,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::Shell::{
     NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIIF_ERROR, NIIF_INFO, NIIF_NOSOUND, NIIF_WARNING, NIM_ADD,
     NIM_DELETE, NIM_MODIFY, NOTIFY_ICON_MESSAGE, NOTIFYICONDATAW, NOTIFYICONIDENTIFIER, Shell_NotifyIconGetRect,
-    Shell_NotifyIconW,
+    Shell_NotifyIconW, ShellExecuteW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, CreateIconIndirect, CreatePopupMenu, CreateWindowExW, DS_CENTER,
@@ -40,19 +43,20 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetDlgItemTextW, GetMessageW, HICON, HMENU, ICONINFO, IDCANCEL, IDOK, KillTimer, MB_DEFBUTTON2, MB_ICONINFORMATION,
     MB_ICONWARNING, MB_OK, MB_OKCANCEL, MB_SETFOREGROUND, MENU_ITEM_FLAGS, MENUITEMINFOW, MESSAGEBOX_RESULT,
     MESSAGEBOX_STYLE, MF_DISABLED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MIIM_BITMAP, MSG, MessageBoxW,
-    PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SM_CXSMICON, SendDlgItemMessageW,
-    SetDlgItemTextW, SetForegroundWindow, SetMenuItemInfoW, SetTimer, TPM_RETURNCMD, TrackPopupMenu, WINDOW_EX_STYLE,
-    WINDOW_STYLE, WM_APP, WM_COMMAND, WM_CONTEXTMENU, WM_INITDIALOG, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WM_TIMER,
-    WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SM_CXSMICON, SW_SHOWNORMAL,
+    SendDlgItemMessageW, SetDlgItemTextW, SetForegroundWindow, SetMenuItemInfoW, SetTimer, TPM_RETURNCMD,
+    TrackPopupMenu, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_COMMAND, WM_CONTEXTMENU, WM_INITDIALOG, WM_LBUTTONUP,
+    WM_NULL, WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_POPUP, WS_SYSMENU, WS_TABSTOP,
+    WS_VISIBLE,
 };
 
 use crate::handle::Msg;
-use crate::icons::{BADGES, DARK, Icon, LIGHT, rasterize, signal_svg};
-use crate::menu::{self, Dialogs, Item, Kind};
+use crate::icons::{BADGES, DARK, Icon, LIGHT, mark_svg, rasterize};
+use crate::menu::{self, Dialogs, Item, Kind, Mark};
 use crate::model::{Model, Notice};
-use crate::{Command, Signal, tr};
+use crate::{Command, tr};
 use shdlib::names::MAX_NAME;
-use windows::core::{BOOL, PCWSTR, PWSTR, w};
+use windows::core::{BOOL, HRESULT, PCWSTR, PWSTR, s, w};
 
 //region Icons
 
@@ -382,8 +386,8 @@ pub(crate) fn run(rx: Receiver<Msg>, commands: Sender<Command>) -> Result<()> {
     }
     TRAY_HWND.store(0, Ordering::Release);
     // Only past the loop: EndMenu doesn't wait, so the menu may still have been up in quit
-    for (.., b) in SIGNAL_BITMAPS.take() {
-        // SAFETY: made by signal_bitmap; menu returned before the loop did
+    for (.., b) in MARK_BITMAPS.take() {
+        // SAFETY: made by mark_bitmap; menu returned before the loop did
         let _ = unsafe { DeleteObject(b.into()) };
     }
     if let Some(mut st) = STATE.take() {
@@ -417,7 +421,7 @@ fn menu_and_boxes(hwnd: HWND) {
             return;
         };
         MENU_REOPEN.set(false);
-        MENU_SHOWN.set(Some(without_signal(&items)));
+        MENU_SHOWN.set(Some(without_marks(&items)));
         let picked = track(hwnd, &items, at);
         MENU_SHOWN.set(None);
         if picked == 0 && MENU_REOPEN.replace(false) && !QUITTING.get() {
@@ -437,20 +441,74 @@ fn menu_and_boxes(hwnd: HWND) {
 }
 
 thread_local! {
-    /// Signal bars as menu images, by level and size, made on first use; freed at quit
-    static SIGNAL_BITMAPS: RefCell<Vec<(Signal, u32, HBITMAP)>> = const { RefCell::new(Vec::new()) };
+    /// The images beside controllers' lines, by mark and size, made on first use; freed at quit
+    static MARK_BITMAPS: RefCell<Vec<(Mark, u32, HBITMAP)>> = const { RefCell::new(Vec::new()) };
+    /// The menu up now
+    static MENU_OPEN: RefCell<Option<OpenMenu>> = const { RefCell::new(None) };
 }
 
-/// The signal bars for `s` as a `size` square menu image, rendered the first time
-fn signal_bitmap(s: Signal, size: u32) -> Option<HBITMAP> {
-    let cached = SIGNAL_BITMAPS.with_borrow(|c| c.iter().find(|(m, n, _)| (*m, *n) == (s, size)).map(|e| e.2));
+/// A menu that's up: it, its image size, and the mark each of its top-level items shows
+struct OpenMenu {
+    menu: HMENU,
+    size: u32,
+    marks: Vec<Option<Mark>>,
+}
+
+/// `m` as a `size` square menu image, rendered the first time
+fn mark_bitmap(m: Mark, size: u32) -> Option<HBITMAP> {
+    let cached = MARK_BITMAPS.with_borrow(|c| c.iter().find(|(k, n, _)| (*k, *n) == (m, size)).map(|e| e.2));
     if cached.is_some() {
         return cached;
     }
-    let b = rasterize(&signal_svg(s), size).and_then(|pm| menu_bitmap(&pm));
-    let b = b.inspect_err(|e| warn!("signal bars: {e:#}")).ok()?;
-    SIGNAL_BITMAPS.with_borrow_mut(|c| c.push((s, size, b)));
+    let b = rasterize(&mark_svg(m), size).and_then(|pm| menu_bitmap(&pm));
+    let b = b.inspect_err(|e| warn!(?m, "menu image: {e:#}")).ok()?;
+    MARK_BITMAPS.with_borrow_mut(|c| c.push((m, size, b)));
     Some(b)
+}
+
+/// Swaps the open menu's images for those of `items`, the same menu otherwise, where they've
+/// changed, and repaints it: the bars following the link, and a critical battery's warning
+/// flashing, without reopening the menu, which would collapse an open submenu
+fn update_marks(items: &[Item]) {
+    let changed = MENU_OPEN.with_borrow_mut(|open| {
+        let Some(OpenMenu { menu, size, marks }) = open else { return false };
+        let mut changed = false;
+        for (n, (was, i)) in marks.iter_mut().zip(items).enumerate().filter(|(_, (was, i))| **was != i.mark) {
+            let info = MENUITEMINFOW {
+                cbSize: size_of::<MENUITEMINFOW>() as u32,
+                fMask: MIIM_BITMAP,
+                hbmpItem: i.mark.and_then(|k| mark_bitmap(k, *size)).unwrap_or_default(),
+                ..Default::default()
+            };
+            // SAFETY: the open menu, ours, destroyed only once it's closed and MENU_OPEN cleared;
+            // the bitmaps are cached until quit
+            if unsafe { SetMenuItemInfoW(*menu, n as u32, true, &info) }.is_ok() {
+                *was = i.mark;
+                changed = true;
+            }
+        }
+        changed
+    });
+    if changed {
+        redraw_menus();
+    }
+}
+
+/// Repaints the menus this thread has up: the popup windows of class #32768
+fn redraw_menus() {
+    unsafe extern "system" fn each(hwnd: HWND, _: LPARAM) -> BOOL {
+        let mut class = [0u16; 16];
+        // SAFETY: a window of this thread, enumerated; class outlives the calls
+        unsafe {
+            let n = GetClassNameW(hwnd, &mut class).max(0) as usize;
+            if String::from_utf16_lossy(&class[..n]) == "#32768" {
+                let _ = InvalidateRect(Some(hwnd), None, false);
+            }
+        }
+        BOOL(1)
+    }
+    // SAFETY: each only looks at the windows it's given
+    let _ = unsafe { EnumThreadWindows(GetCurrentThreadId(), Some(each), LPARAM(0)) };
 }
 
 /// A small icon's side at `dpi`: the tray icon's, and the menu's images
@@ -459,9 +517,9 @@ fn small_icon_size(dpi: u32) -> u32 {
     unsafe { GetSystemMetricsForDpi(SM_CXSMICON, dpi) }.max(16) as u32
 }
 
-/// `items` without their signal bars, for telling whether an open menu's stale
-fn without_signal(items: &[Item]) -> Vec<Item> {
-    items.iter().map(|i| Item { signal: None, sub: without_signal(&i.sub), ..i.clone() }).collect()
+/// `items` without their images, for telling whether an open menu's stale
+fn without_marks(items: &[Item]) -> Vec<Item> {
+    items.iter().map(|i| Item { mark: None, sub: without_marks(&i.sub), ..i.clone() }).collect()
 }
 
 /// Pops up `items` at `at` until something's picked or it's closed; 0 for nothing
@@ -486,7 +544,9 @@ fn track(hwnd: HWND, items: &[Item], at: POINT) -> usize {
         // A menu underlines its shortcut letters only after keyboard input, and the window's UI
         // state doesn't count, so a Shift tap it is. Lands on our window, which is in front.
         tap_shift();
+        MENU_OPEN.set(Some(OpenMenu { menu: m, size, marks: items.iter().map(|i| i.mark).collect() }));
         let picked = TrackPopupMenu(m, TPM_RETURNCMD, at.x, at.y, None, hwnd, None);
+        MENU_OPEN.set(None);
         let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
         let _ = DestroyMenu(m);
         picked.0 as usize
@@ -511,7 +571,7 @@ unsafe fn build_menu(items: &[Item], size: u32) -> Option<HMENU> {
                 },
             };
             let _ = AppendMenuW(m, flags, id, PCWSTR(text.as_ptr()));
-            if let Some(b) = i.signal.and_then(|s| signal_bitmap(s, size)) {
+            if let Some(b) = i.mark.and_then(|k| mark_bitmap(k, size)) {
                 let info = MENUITEMINFOW {
                     cbSize: size_of::<MENUITEMINFOW>() as u32,
                     fMask: MIIM_BITMAP,
@@ -568,7 +628,7 @@ impl State {
         for icon in Icon::all() {
             let badges = BADGES.map(Some).filter(|_| icon.takes_badge());
             for badge in std::iter::once(None).chain(badges) {
-                self.icons.push((icon, badge, render(&icon.badged(palette, size, badge)?)?));
+                self.icons.push((icon, badge, render(&icon.badged(palette, size, size, badge)?)?));
             }
         }
         debug!(size, light = self.light, "tray icons rendered");
@@ -683,15 +743,16 @@ impl State {
         if let Some(next) = self.model.step() {
             self.show(next, NIM_MODIFY, None);
         }
-        // Not for the signal bars alone: reopening would collapse an open submenu each time a link
-        // flickers. They catch up the next time the menu opens.
-        let stale = MENU_SHOWN.with_borrow(|shown| {
-            shown.as_ref().is_some_and(|items| *items != without_signal(&self.model.menu_items()))
-        });
+        // Not for the images alone: reopening would collapse an open submenu each time a link
+        // flickers, so they're swapped in place
+        let items = self.model.menu_items();
+        let stale = MENU_SHOWN.with_borrow(|shown| shown.as_ref().is_some_and(|s| *s != without_marks(&items)));
         if stale {
             MENU_REOPEN.set(true);
             // SAFETY: plain call; closes the menu this thread has open
             let _ = unsafe { EndMenu() };
+        } else {
+            update_marks(&items);
         }
         let wait = self.model.wait();
         // SAFETY: our window, on its thread; a new SetTimer with the same ID replaces the old
@@ -709,6 +770,12 @@ impl Dialogs for Boxes {
 
     fn inform(&self, title: &str, text: &str) {
         message(self.0, text, title, MB_OK | MB_ICONINFORMATION);
+    }
+
+    fn inform_link(&self, title: &str, text: &str, url: &str) {
+        if !task_dialog(self.0, title, &text.replacen(url, &format!("<a href=\"{url}\">{url}</a>"), 1)) {
+            self.inform(title, text);
+        }
     }
 
     fn confirm(&self, title: &str, text: &str, warn: bool) -> bool {
@@ -822,6 +889,53 @@ fn rename_template(title: &str, prompt: &str) -> Vec<u32> {
 }
 
 /// A message box in front, until it's closed
+/// TaskDialogIndirect, from Common Controls 6, which shieldd's manifest asks for. Looked up when
+/// it's wanted, since a binary without the manifest, a test say, gets version 5, which has none,
+/// and wouldn't even start were it imported.
+type TaskDialogIndirect = unsafe extern "system" fn(*const TASKDIALOGCONFIG, *mut i32, *mut i32, *mut BOOL) -> HRESULT;
+
+/// An information box with OK whose `text` may have `<a href="...">` links in it, which open in
+/// the browser. False if there's no TaskDialog to show it in.
+fn task_dialog(hwnd: HWND, title: &str, text: &str) -> bool {
+    unsafe extern "system" fn on_event(
+        hwnd: HWND,
+        msg: TASKDIALOG_NOTIFICATIONS,
+        _: WPARAM,
+        l: LPARAM,
+        _: isize,
+    ) -> HRESULT {
+        if msg == TDN_HYPERLINK_CLICKED {
+            // SAFETY: for this notification, l is the link's href, live for the call
+            unsafe { ShellExecuteW(Some(hwnd), w!("open"), PCWSTR(l.0 as *const u16), None, None, SW_SHOWNORMAL) };
+        }
+        S_OK
+    }
+    // SAFETY: comctl32 stays loaded, as the process already has it; the transmute is to the
+    // function's documented signature
+    let show = unsafe {
+        let Ok(comctl) = LoadLibraryW(w!("comctl32.dll")) else { return false };
+        let Some(f) = GetProcAddress(comctl, s!("TaskDialogIndirect")) else { return false };
+        std::mem::transmute::<unsafe extern "system" fn() -> isize, TaskDialogIndirect>(f)
+    };
+    let (title, text) = (wide(title), wide(text));
+    let config = TASKDIALOGCONFIG {
+        cbSize: size_of::<TASKDIALOGCONFIG>() as u32,
+        hwndParent: hwnd,
+        dwFlags: TDF_ENABLE_HYPERLINKS | TDF_ALLOW_DIALOG_CANCELLATION,
+        dwCommonButtons: TDCBF_OK_BUTTON,
+        pszWindowTitle: PCWSTR(title.as_ptr()),
+        Anonymous1: TASKDIALOGCONFIG_0 { pszMainIcon: TD_INFORMATION_ICON },
+        pszContent: PCWSTR(text.as_ptr()),
+        pfCallback: Some(on_event),
+        ..Default::default()
+    };
+    // Up front, as message's MB_SETFOREGROUND does
+    // SAFETY: plain call on our window
+    let _ = unsafe { SetForegroundWindow(hwnd) };
+    // SAFETY: config and the strings it points to outlive the call
+    unsafe { show(&config, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) }.is_ok()
+}
+
 fn message(hwnd: HWND, text: &str, title: &str, style: MESSAGEBOX_STYLE) -> MESSAGEBOX_RESULT {
     let (text, title) = (wide(text), wide(title));
     // SAFETY: text and title outlive the call
@@ -833,16 +947,16 @@ fn message(hwnd: HWND, text: &str, title: &str, style: MESSAGEBOX_STYLE) -> MESS
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Status;
     use crate::menu::menu_items;
     use crate::menu::tests::up;
+    use crate::{Signal, Status};
 
     #[test]
     fn menu_items_carry_their_bars() {
         use windows::Win32::UI::WindowsAndMessaging::GetMenuItemInfoW;
         let s = Status { controllers: vec![up(1, "A", false)], ..Default::default() };
-        let items = menu_items(&s, |_| Some(50));
-        let at = items.iter().position(|i| i.signal.is_some()).unwrap();
+        let items = menu_items(&s, |_| Some(50), true);
+        let at = items.iter().position(|i| i.mark.is_some()).unwrap();
         // SAFETY: our menu, destroyed below; info outlives the call
         unsafe {
             let m = build_menu(&items, 16).unwrap();
@@ -850,22 +964,23 @@ mod tests {
                 MENUITEMINFOW { cbSize: size_of::<MENUITEMINFOW>() as u32, fMask: MIIM_BITMAP, ..Default::default() };
             GetMenuItemInfoW(m, at as u32, true, &mut info).unwrap();
             // The cached one, rendered once
-            assert_eq!(Some(info.hbmpItem), signal_bitmap(Signal::Good, 16));
-            assert_eq!(SIGNAL_BITMAPS.with_borrow(Vec::len), 1);
+            assert_eq!(Some(info.hbmpItem), mark_bitmap(Mark::Signal(Signal::Good), 16));
+            assert_eq!(MARK_BITMAPS.with_borrow(Vec::len), 1);
             let _ = DestroyMenu(m);
         }
         // A change in the bars alone doesn't make an open menu stale
         let mut weaker = s.clone();
         weaker.controllers[0].signal = Some(Signal::Low);
-        let weaker = menu_items(&weaker, |_| Some(50));
+        let weaker = menu_items(&weaker, |_| Some(50), true);
         assert_ne!(weaker, items);
-        assert_eq!(without_signal(&weaker), without_signal(&items));
+        assert_eq!(without_marks(&weaker), without_marks(&items));
     }
 
     #[test]
-    fn every_signal_makes_a_menu_bitmap() {
-        for s in [Signal::Dropping, Signal::Low, Signal::Fair, Signal::Good] {
-            let b = menu_bitmap(&rasterize(&signal_svg(s), 16).unwrap()).unwrap();
+    fn every_mark_makes_a_menu_bitmap() {
+        let signals = [Signal::Dropping, Signal::Low, Signal::Fair, Signal::Good].map(Mark::Signal);
+        for m in signals.into_iter().chain([Mark::Critical, Mark::CriticalDim]) {
+            let b = menu_bitmap(&rasterize(&mark_svg(m), 16).unwrap()).unwrap();
             // SAFETY: just made, used by nothing
             let _ = unsafe { DeleteObject(b.into()) };
         }

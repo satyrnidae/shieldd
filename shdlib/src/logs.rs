@@ -104,7 +104,7 @@ fn open(dir: &Path, rotate: bool) -> Result<(File, Option<anyhow::Error>)> {
     let file = File::create(&latest).with_context(|| format!("creating {}", latest.display()))?;
     // Windows hands a new file the creation time of one that just left under the same name,
     // within 15 s. This run starts now, and the next one names it for that.
-    #[cfg(windows)]
+    #[cfg(target_os = "windows")]
     {
         use std::os::windows::fs::FileTimesExt;
         let _ = file.set_times(fs::FileTimes::new().set_created(SystemTime::now()));

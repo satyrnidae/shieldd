@@ -4,7 +4,7 @@
 pub mod audio;
 pub mod base64;
 pub mod civil;
-#[cfg(windows)]
+#[cfg(target_os = "windows")]
 pub mod dpapi;
 pub mod files;
 pub mod firmware;
@@ -21,9 +21,9 @@ use std::sync::atomic::{Ordering, compiler_fence};
 /// or `~/.config/shieldd` elsewhere. Empty if neither is set, which leaves paths relative.
 pub fn settings_dir() -> PathBuf {
     use std::env::var_os;
-    #[cfg(windows)]
+    #[cfg(target_os = "windows")]
     let dir = var_os("LOCALAPPDATA").map(PathBuf::from);
-    #[cfg(not(windows))]
+    #[cfg(not(target_os = "windows"))]
     let dir = var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| var_os("HOME").map(|h| PathBuf::from(h).join(".config")));

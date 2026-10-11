@@ -2,12 +2,13 @@
 
 [![Rust](https://github.com/satyrnidae/shieldd/actions/workflows/rust.yml/badge.svg)](https://github.com/satyrnidae/shieldd/actions/workflows/rust.yml)
 
-Native Windows host for the 2015 NVIDIA SHIELD controller. The controller talks Ozmo
+Native Windows and Linux host for the 2015 NVIDIA SHIELD controller. The controller talks Ozmo
 "USB over Wi-Fi" over Wi-Fi Direct; shieldd runs the access point itself on a Realtek
-RTL8811AU USB adapter, through its own userspace driver over WinUSB, and turns the
-controller into a virtual Xbox 360 pad, a mouse and media keys.
+RTL8811AU USB adapter, through its own userspace driver (WinUSB on Windows, usbfs on Linux), and
+turns the controller into a virtual Xbox 360 pad, a mouse and media keys.
 
-No Bluetooth, no vendor app, no Linux VM. Input latency is under ~20 ms.
+No Bluetooth, no vendor app, no kernel driver of its own, and on Windows no Linux VM. Input
+latency is under ~20 ms.
 
 ## AI disclosure
 
@@ -31,8 +32,10 @@ controller on a PC:
 ## Status
 
 Works:
-- Up to four controllers at once, each its own virtual Xbox 360 pad (ViGEmBus)
-- Trackpad -> mouse, volume buttons -> media keys (SendInput), shared by all of them
+- Up to four controllers at once, each its own virtual Xbox 360 pad (ViGEmBus on Windows, uinput
+  on Linux)
+- Trackpad -> mouse, volume buttons -> media keys (SendInput on Windows, uinput on Linux), shared
+  by all of them
 - Rumble: games' rumble on the virtual pad drives the controller's left and right motors
 - WPS push-button pairing, one controller at a time, to a random group made once
 - Reconnect on a tap of the NVIDIA button, hidden SSID, WPA2-CCMP
@@ -43,11 +46,11 @@ Works:
 - Tray menu: pair, reconfigure the network, and per controller identify, rename, audio on/off
   and disconnect; about
 - Runs at login, windowless, and picks the adapter back up after a replug
-- Mic and headset audio over VBAN, tested with Voicemeeter Potato
-- Linux native utility and USB driver
-
-Planned:
-- PulseAudio / ALSA audio backend
+- Mic and headset audio over VBAN, tested with Voicemeeter Potato; on Linux, a mic and a headset
+  in PipeWire
+- Linux: everything above, natively, with the tray on any desktop that shows StatusNotifierItem
+  icons (KDE Plasma, or GNOME with the AppIndicator extension). Tested on Arch under WSL with the
+  adapter attached through usbipd.
 
 Unplanned:
 - A native Windows audio device. That would need a kernel driver, and test-signed drivers don't
@@ -72,9 +75,12 @@ devices and don't apply.
   `rtlusb/src/usb.rs`. Untested.
 - Not supported: RTL8812AU (2T2R, different tables), RTL8814AU, and anything on rtw89 or
   older rtl8xxxu chips.
-- The adapter is dedicated to shieldd while it's on WinUSB; Windows can't use it for Wi-Fi.
+- The adapter is dedicated to shieldd while it's on WinUSB; Windows can't use it for Wi-Fi. On
+  Linux, shieldd takes it from the kernel's rtw88 driver while running and lets go on exit.
 
 ## Requirements
+
+### Windows
 
 Run:
 - Windows 10 or 11, x64. Developed on Windows 11.
@@ -91,6 +97,28 @@ Build:
 - Rust 1.88 or newer, `x86_64-pc-windows-msvc` toolchain (edition 2024, let chains).
 - Visual Studio Build Tools with the "Desktop development with C++" workload, for the MSVC linker.
 
+### Linux
+
+Run:
+- Linux with the `uinput` module, for the virtual pads, mouse and keys.
+- Access to the adapter and `/dev/uinput` without root: `sudo shieldd --install-udev-rule` once,
+  or `--install`, which does it too. See [Adapter setup](#adapter-setup).
+- For the tray: GTK 4.10 or newer, and a panel that shows StatusNotifierItem icons. Without one,
+  `--no-tray` hosts headless and logs what the tray would have said.
+- Optional: PipeWire, for controller audio in the sound settings; VBAN otherwise. libcanberra,
+  for the connect and disconnect sounds.
+
+Build:
+- Rust 1.88 or newer.
+- pkg-config, libclang (for PipeWire's bindings), and the GTK 4 and PipeWire development files:
+  - Debian / Ubuntu: `sudo apt install pkg-config libclang-dev libgtk-4-dev libpipewire-0.3-dev`
+  - Fedora: `sudo dnf install pkgconf-pkg-config clang-devel gtk4-devel pipewire-devel`
+  - Arch: `sudo pacman -S pkgconf clang gtk4 libpipewire`
+
+Leave out the tray and PipeWire, and with them GTK, PipeWire and libclang, with
+`--no-default-features`, or `--no-default-features --features tray` or `pipewire` for one of
+them.
+
 ## Build
 
 ```powershell
@@ -98,13 +126,12 @@ cargo build --release
 cargo test --release
 ```
 
-Binaries land in `target\release`: `shieldd.exe`, its windowless twin `shieldw.exe` for running
-at login, and the `rtlusb.exe` bring-up tool.
-
-On Linux, `cargo build --release -p shieldd` builds only the `--transmit` side of the WSL
-bridge; see [Other modes](#other-modes).
+Binaries land in `target\release`, or `target/release` on Linux: `shieldd`, its windowless twin
+`shieldw` for running at login, and the `rtlusb` bring-up tool, with `.exe` on Windows.
 
 ## Adapter setup
+
+### Windows
 
 One time per adapter:
 1. Plug in the adapter. If it's attached to WSL through usbipd, detach it first.
@@ -114,6 +141,23 @@ One time per adapter:
 
 The adapter disappears from Windows' Wi-Fi list; that's expected. To undo, uninstall the device
 in Device Manager with "Attempt to remove the driver for this device" ticked, then replug.
+
+### Linux
+
+```sh
+sudo ./target/release/shieldd --install-udev-rule
+```
+
+Puts shieldd's udev rule in `/etc/udev/rules.d/70-shieldd.rules` and has `uinput` load at
+boot (`/etc/modules-load.d/shieldd.conf`). The rule hands the adapter and `/dev/uinput` to
+whoever is logged in at the seat, so shieldd runs as you. Nothing to do about the kernel's
+rtw88 driver: shieldd detaches it while it runs. `--uninstall` takes both files out again.
+
+WSL has no seat for the rule to go by: after `usbipd attach`, grant the adapter's
+`/dev/bus/usb/<bus>/<dev>` node and `/dev/uinput` with `setfacl -m u:$USER:rw`, again whenever
+udev resets them.
+
+### Both
 
 The USB serial on these adapters is a generic `00E04C000001`, so two of them can't be told apart
 by serial. shieldd opens the first `0bda:0811` it finds.
@@ -179,8 +223,10 @@ stop; the adapter powers down and the virtual pads unplug.
 
 Options worth knowing, the rest in `shieldd --help`:
 - `--mouse-scale N`, `--mouse-scale-x`, `--mouse-scale-y`: trackpad speed.
-- `--mic`: keep the controller's mic stream open even without VBAN, which keeps the controller from
-  dozing between inputs.
+- `--mic`: keep the controller's mic stream open even with audio off, which keeps the controller
+  from dozing between inputs.
+- `--audio-backend vban|pipewire`: where controller audio goes, see [Audio](#audio).
+- `--no-tray`: no tray icon; notifications go to the log.
 - `RUST_LOG`: log level, e.g. `shieldd=debug,rtlusb=debug`. `trace` dumps every frame.
 - `SHIELDD_PS_HOLD_MS`: how long replies wait for a dozing controller, default 30, 0 to send
   at once.
@@ -198,7 +244,11 @@ joining with none up yet, and a Wi-Fi signal lights up blue, a bar at a time, wh
 Notifications, naming the controller, say when it goes on the charger, is fully charged, gets
 low in the 25% band, turns critical and is empty. With more than one controller connected, a
 blue badge in the icon's lower right corner says how many. A controller joining or leaving
-Wi-Fi plays Windows' Device Connect or Device Disconnect sound, as a USB device would.
+Wi-Fi plays Windows' Device Connect or Device Disconnect sound, as a USB device would; on Linux,
+the sound theme's device-added and device-removed sounds, through libcanberra.
+
+On Linux the tray is a StatusNotifierItem, with notifications over D-Bus and its boxes in GTK 4.
+The icon follows the panel's light or dark theme.
 
 Click for a menu. Its title shows the version, how many controllers are connected, and the
 group's name and channel; clicking the version opens an About box with the build date, license and
@@ -209,11 +259,12 @@ headed by its MAC and firmware version, as the SHIELD app shows it. The bars bes
 link: three green is good, two yellow OK, one red poor, and none means it's about to drop or
 hasn't been heard from in 5 seconds. They go by its signal at the adapter and by how many frames
 need resending either way. A change shows once it's held for 2 seconds, a drop at once, and each
-one is logged; with the menu open, the bars catch up the next time it opens. Its shortcut is the
+one is logged; they change in place with the menu open. A controller whose battery is critical
+shows a flashing red battery warning in their place until it's on the charger. Its shortcut is the
 first letter of its name the menu hasn't used yet:
 - **Identify**: buzzes the controller twice, to tell which one it is.
 - **Rename...**: up to 15 characters, saved to `known-clients`.
-- **Enable / Disable audio**: its mic and headset over VBAN, see below. Remembered between runs.
+- **Enable / Disable audio**: its mic and headset, see below. Remembered between runs.
 - **Disconnect**: switches the controller off the way the SHIELD Tablet does, then drops it
   from Wi-Fi; its NVIDIA button wakes it again. One that hasn't gone to sleep within 2 s is
   only dropped. A controller that connects flat, or that Windows can't give a virtual pad,
@@ -233,10 +284,16 @@ The rest:
 
 ### Audio
 
-With VBAN on, a controller's audio goes through
-[Voicemeeter](https://vb-audio.com/Voicemeeter/) over VBAN on localhost. The streams are up
-while any controller has VBAN on, and shared: their mics are mixed into one, and every headset
-plays the same audio.
+A controller's audio is up while any controller has it on, and shared: their mics are mixed
+into one, and every headset plays the same audio. Where it goes is `--audio-backend`'s: PipeWire
+on Linux where it's running, VBAN otherwise.
+
+PipeWire: a source, **SHIELD controller mic**, and a sink, **SHIELD controller headset**, in the
+sound settings like any other device, there while audio is on. PipeWire converts to and from
+whatever apps use.
+
+VBAN: through [Voicemeeter](https://vb-audio.com/Voicemeeter/) over VBAN on localhost, on Windows
+or anywhere else with `--audio-backend vban`.
 - Mic: stream `ShieldMic`, 16 kHz, sent to port 6980. Add it as an incoming stream.
 - Headset jack: stream `ShieldPad`, PCM 16-bit at any rate, received on port 6981. Point an
   outgoing stream at `127.0.0.1:6981`. Played ~12 dB down, since the jack has no volume of its
@@ -257,35 +314,41 @@ Task Manager's startup apps, where it can be turned off too.
 - `shieldd --uninstall`: don't start at login anymore.
 - `shieldd --background`: the same keep-running behavior in a console.
 
+On Linux, run `sudo shieldd --install`: it adds an XDG autostart entry to the `~/.config/autostart`
+of the user who ran sudo, puts in the udev rule as `--install-udev-rule` does, and logs go to
+`~/.config/shieldd/logs`. `sudo shieldd --uninstall` takes all three out.
+
 ## Other modes
 
 An older path, kept because it still works:
 - `--receiver` (Windows) + `--transmit` (Linux): the WSL bridge. The adapter is attached to WSL,
   Linux's ozwpan driver enumerates the controller, and `--transmit` forwards its input to
-  `--receiver` over UDP.
+  `--receiver` over UDP. `cargo build -p shieldd --no-default-features` builds a `--transmit`
+  side without GTK or PipeWire.
 
 ## Layout
 
 | Path | What |
 | --- | --- |
-| `shdtray/` | The tray: what it shows and sends back, the battery gauge, the Windows tray, its icon SVGs in `res/` and its text in `res/locales/` |
+| `shdtray/` | The tray: what it shows and sends back, the battery gauge, the Windows and Linux trays, its icon SVGs in `res/` and its text in `res/locales/` |
 | `shieldw/` | shieldd without a console window, for running at login |
-| `shdlib/` | Shared by the other crates: the firmware version, base64, `psk=` values and their DPAPI seal |
+| `shdlib/` | Shared by the other crates: the firmware version, base64, `psk=` values and their DPAPI seal, controller audio (VBAN, PipeWire) |
 | `shdnet/` | MAC addresses and how they're shown; no dependencies, so ozproto can use it |
 | `ozproto/` | Ozmo protocol: wire format and host session state machine, no I/O |
-| `rtlusb/` | Userspace RTL8811AU driver over WinUSB: init, firmware, PHY, AP, WPA2, WPS |
-| `shieldd/` | The host: radio, controller setup, outputs, pairing, tray, login start, WSL bridge receiver |
+| `rtlusb/` | Userspace RTL8811AU driver over WinUSB or usbfs: init, firmware, PHY, AP, WPA2, WPS |
+| `shieldd/` | The host: radio, controller setup, outputs, pairing, tray, login start, WSL bridge; the udev rule in `res/` |
 | `shdlink/` | Packet format shared by `--transmit` and `--receiver` |
 | `tools/` | rtw88 table generator, Python |
 
 The tray's text, its menu, tooltips, dialogs and notices, is in Fluent files,
-`shdtray/res/locales/<language>/shdtray.ftl`, picked by Windows' display language with US
-English as the fallback. To add a language, copy `en-US`, translate it, and add it to `LOCALES`
+`shdtray/res/locales/<language>/shdtray.ftl`, picked by Windows' display language, or on Linux
+`LANGUAGE`, `LC_ALL`, `LC_MESSAGES` or `LANG`, with US English as the fallback. To add a language, copy `en-US`, translate it, and add it to `LOCALES`
 in `shdtray/src/l10n.rs`; anything left out stays English. CLI help, errors and logs are
 English only.
 
 `rtlusb.exe efuse | rx | ap` are bring-up tools for the adapter: dump efuse, print received
-frames, or run a bare AP. Each run logs to `%LOCALAPPDATA%\shieldd\logs\rtlusb\latest.log` too,
+frames, or run a bare AP. Each run logs to `%LOCALAPPDATA%\shieldd\logs\rtlusb\latest.log`
+(`~/.config/shieldd/logs/rtlusb` on Linux) too,
 earlier runs gzipped next to it as for shieldd.
 
 ## Prior art

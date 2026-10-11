@@ -9,8 +9,18 @@ use std::time::{Duration, Instant};
 use shdtray::{About, Battery, Command, Connected, Signal, Status, Tray};
 
 fn pad(n: u8, name: &str, band: u8, charging: bool) -> Connected {
-    // The reading only matters on the charger, where it's near enough full
-    let battery = Battery { charging, band, reading: 0xD500, critical: band <= 10, must_charge: false };
+    // A voltage reading at the bottom of its band, so the percent agrees with it, from battery.rs's
+    // curve. The charger lifts it by CHARGE_LIFT.
+    let lift = if charging { 0x0660 } else { 0 };
+    let reading = lift
+        + match band {
+            0..=10 => 0xD081,
+            11..=25 => 0xD47F,
+            26..=50 => 0xDA74,
+            51..=75 => 0xE26B,
+            _ => 0xEEEF,
+        };
+    let battery = Battery { charging, band, reading, critical: band <= 10, must_charge: false };
     Connected {
         mac: [0x02, 0, 0, 0, 0, n],
         name: Some(name.into()),
@@ -24,17 +34,21 @@ fn pad(n: u8, name: &str, band: u8, charging: bool) -> Connected {
 
 fn main() {
     tracing_subscriber_init();
-    let about = About { version: env!("CARGO_PKG_VERSION"), authors: env!("CARGO_PKG_AUTHORS"), built: "example" };
+    let about = About { version: env!("CARGO_PKG_VERSION"), authors: env!("CARGO_PKG_AUTHORS"), built: "example", source: env!("CARGO_PKG_REPOSITORY") };
     let mut tray = Tray::start(about);
     let network = Status { ssid: Some("DIRECT-xy-example_net".into()), channel: Some(6), ..Default::default() };
     let steps = [
         Status { ..network.clone() },
         Status { pairing: true, ..network.clone() },
         Status { joining: true, ..network.clone() },
-        Status { controllers: vec![pad(1, "Pad & Co", 75, false)], ..network.clone() },
-        Status { controllers: vec![pad(1, "Pad & Co", 50, false), pad(2, "Second", 25, true)], ..network.clone() },
+        Status { controllers: vec![pad(1, "CASSINI", 75, false)], ..network.clone() },
+        Status { controllers: vec![pad(1, "CASSINI", 50, false), pad(2, "albiorix", 25, true)], ..network.clone() },
         Status {
-            controllers: vec![pad(1, "Pad & Co", 10, false), pad(2, "Second", 100, true), pad(3, "Third", 50, false)],
+            controllers: vec![
+                pad(1, "CASSINI", 10, false),
+                pad(2, "albiorix", 100, true),
+                pad(3, "Chrysalis", 50, false),
+            ],
             ..network.clone()
         },
     ];

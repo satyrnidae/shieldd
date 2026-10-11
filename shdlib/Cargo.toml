@@ -28,7 +28,7 @@ tracing-subscriber = { workspace = true, optional = true }
 pipewire = { version = "0.10.1", features = ["v0_3_49"], optional = true }
 
 # The seal on a psk= value; elsewhere a sealed one is refused
-[target.'cfg(windows)'.dependencies.windows]
+[target.'cfg(target_os = "windows")'.dependencies.windows]
 workspace = true
 features = ["Win32_Foundation", "Win32_Security_Cryptography"]
 

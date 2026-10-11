@@ -16,7 +16,7 @@ pub use shdlib::psk::Psk;
 use tracing::{info, warn};
 
 use shdlib::files::{commit, free_name, stage_gz_private, stage_private};
-#[cfg(windows)]
+#[cfg(target_os = "windows")]
 use shdlib::files::{seal_file, seal_text};
 use shdlib::wipe;
 
@@ -49,7 +49,7 @@ pub fn read(path: &Path, seal: bool) -> Result<Group> {
     Ok(found.group)
 }
 
-#[cfg(windows)]
+#[cfg(target_os = "windows")]
 fn protect(path: &Path, text: &str, found: &Found, seal: bool) {
     if seal && !found.sealed {
         match seal_file(path, text, found.psk_at.clone(), &found.group.psk) {
@@ -61,7 +61,7 @@ fn protect(path: &Path, text: &str, found: &Found, seal: bool) {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(not(target_os = "windows"))]
 fn protect(path: &Path, _: &str, _: &Found, seal: bool) {
     use std::os::unix::fs::PermissionsExt;
     if !seal {
@@ -79,10 +79,10 @@ fn protect(path: &Path, _: &str, _: &Found, seal: bool) {
 struct Found {
     group: Group,
     /// Where the `psk=` value sits in the text, for sealing it in place
-    #[cfg_attr(not(windows), allow(dead_code, reason = "only DPAPI seals"))]
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code, reason = "only DPAPI seals"))]
     psk_at: Range<usize>,
     /// Elsewhere a sealed key doesn't parse, so it's always false there
-    #[cfg_attr(not(windows), allow(dead_code, reason = "only DPAPI seals"))]
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code, reason = "only DPAPI seals"))]
     sealed: bool,
 }
 
@@ -143,7 +143,7 @@ pub fn write(path: &Path, g: &Group, seal: bool) -> Result<Option<PathBuf>> {
     commit(&staged?, path)?;
 
     let Some((mut old, b)) = old else { return Ok(None) };
-    #[cfg(windows)]
+    #[cfg(target_os = "windows")]
     if seal
         && let Ok(text) = std::str::from_utf8(&old)
         && let Ok(found) = parse(text)
@@ -184,7 +184,7 @@ fn backup_path(path: &Path) -> Result<PathBuf> {
 }
 
 /// The `psk=` value for `g`, sealed or plain, and the comment that says which
-#[cfg(windows)]
+#[cfg(target_os = "windows")]
 fn key(g: &Group, seal: bool) -> Result<(String, &'static str)> {
     const SEALED: &str = "# psk is sealed with DPAPI; only the Windows user who made it can read it, on this machine.";
     Ok(match seal {
@@ -193,7 +193,7 @@ fn key(g: &Group, seal: bool) -> Result<(String, &'static str)> {
     })
 }
 
-#[cfg(not(windows))]
+#[cfg(not(target_os = "windows"))]
 fn key(g: &Group, _: bool) -> Result<(String, &'static str)> {
     Ok((g.psk.plain(), "# psk is plain, as wpa_supplicant keeps it; only this file's owner can read it."))
 }
@@ -243,7 +243,7 @@ mod tests {
         assert_eq!(&conf[f.psk_at], "\"pass1234\"");
     }
 
-    #[cfg(windows)]
+    #[cfg(target_os = "windows")]
     #[test]
     fn written_group_is_sealed_and_reads_back() {
         let g =
@@ -256,7 +256,7 @@ mod tests {
         assert_eq!((f.group.ssid.as_str(), &f.group.psk, f.group.channel), ("DIRECT-FC-organized-baboon", &g.psk, 11));
     }
 
-    #[cfg(windows)]
+    #[cfg(target_os = "windows")]
     #[test]
     fn reading_the_default_seals_it() {
         let dir = scratch("default");
@@ -290,7 +290,7 @@ mod tests {
         out
     }
 
-    #[cfg(windows)]
+    #[cfg(target_os = "windows")]
     #[test]
     fn backups_are_gzipped_in_their_own_folder() {
         let dir = scratch("write");
@@ -321,13 +321,13 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    #[cfg(not(windows))]
+    #[cfg(not(target_os = "windows"))]
     fn mode(path: &Path) -> u32 {
         use std::os::unix::fs::PermissionsExt;
         std::fs::metadata(path).unwrap().permissions().mode() & 0o777
     }
 
-    #[cfg(not(windows))]
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn reading_the_default_makes_it_private() {
         use std::os::unix::fs::PermissionsExt;
@@ -344,7 +344,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    #[cfg(not(windows))]
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn written_plain_and_private_backups_too() {
         let dir = scratch("plain");

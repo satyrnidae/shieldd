@@ -42,6 +42,7 @@ const ABOUT: shdtray::About = shdtray::About {
     version: env!("CARGO_PKG_VERSION"),
     authors: env!("CARGO_PKG_AUTHORS"),
     built: env!("SHIELDD_BUILD_DATE"),
+    source: env!("CARGO_PKG_REPOSITORY"),
 };
 
 pub fn default_conf() -> PathBuf {

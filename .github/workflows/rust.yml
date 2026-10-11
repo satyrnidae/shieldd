@@ -11,12 +11,31 @@ env:
 
 jobs:
   build:
-
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, windows-latest ]
+    runs-on: ${{ matrix.os }}
+    env:
+      # .cargo/config.toml points everyone at target/windows, for a shared checkout; keep each
+      # platform's own here too
+      CARGO_TARGET_DIR: ${{ matrix.os == 'windows-latest' && 'target/windows' || 'target/linux' }}
 
     steps:
     - uses: actions/checkout@v4
+    # The tray's GTK 4 and the PipeWire audio; bindgen needs libclang for pipewire-sys
+    - name: Linux dependencies
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends pkg-config libclang-dev libgtk-4-dev libpipewire-0.3-dev
     - name: Build
-      run: cargo build --verbose
+      run: cargo build --workspace --all-targets --locked
     - name: Run tests
-      run: cargo test --verbose
+      run: cargo test --workspace --locked
+    - name: Clippy
+      run: cargo clippy --workspace --all-targets --locked -- -D warnings
+    # The --transmit-only build, without GTK or PipeWire
+    - name: Build without default features
+      if: runner.os == 'Linux'
+      run: cargo build -p shieldd --no-default-features --locked

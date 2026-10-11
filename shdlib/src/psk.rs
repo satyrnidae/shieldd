@@ -62,7 +62,7 @@ impl Psk {
     }
 
     /// The sealed `psk=` value
-    #[cfg(windows)]
+    #[cfg(target_os = "windows")]
     pub fn seal(&self) -> Result<String> {
         let mut plain = self.plain().into_bytes();
         let sealed = crate::dpapi::protect(&plain);
@@ -71,7 +71,7 @@ impl Psk {
     }
 }
 
-#[cfg(windows)]
+#[cfg(target_os = "windows")]
 fn unseal(sealed: &str) -> Result<Psk> {
     use anyhow::Context;
     let blob = crate::base64::decode(sealed).context("sealed psk isn't base64")?;
@@ -81,7 +81,7 @@ fn unseal(sealed: &str) -> Result<Psk> {
     psk
 }
 
-#[cfg(not(windows))]
+#[cfg(not(target_os = "windows"))]
 fn unseal(_: &str) -> Result<Psk> {
     anyhow::bail!("psk is sealed with Windows DPAPI; only the Windows user who sealed it can open it")
 }
@@ -132,7 +132,7 @@ mod tests {
         assert!(Psk::parse_plain(&HEX[2..]).is_err());
     }
 
-    #[cfg(windows)]
+    #[cfg(target_os = "windows")]
     #[test]
     fn sealed_round_trip() {
         for psk in [Psk::Passphrase("s3cretPW".into()), Psk::parse_plain(HEX).unwrap()] {

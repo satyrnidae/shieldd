@@ -17,14 +17,14 @@ mod linux;
 mod menu;
 #[cfg_attr(not(gui), allow(dead_code, reason = "headless"))]
 mod model;
-#[cfg(windows)]
+#[cfg(target_os = "windows")]
 mod windows;
 
 pub use battery::Battery;
 pub use handle::Tray;
 #[cfg(all(gui, target_os = "linux"))]
 use linux as platform;
-#[cfg(windows)]
+#[cfg(target_os = "windows")]
 use windows as platform;
 
 /// XInput's four ports: as many controllers as can be hosted at once
@@ -37,6 +37,8 @@ pub struct About {
     /// As Cargo has them, `:` between authors
     pub authors: &'static str,
     pub built: &'static str,
+    /// Where its source code is, which the GPL has it say
+    pub source: &'static str,
 }
 
 /// What the tray shows

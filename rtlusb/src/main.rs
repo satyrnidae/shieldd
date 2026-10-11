@@ -18,9 +18,9 @@ use rtlusb::{ap, bss, efuse, phy, rx, tx, usb, wpa};
 /// Where shieldd keeps the group (shieldd main.rs)
 fn default_conf() -> PathBuf {
     use std::env::var_os;
-    #[cfg(windows)]
+    #[cfg(target_os = "windows")]
     let dir = var_os("LOCALAPPDATA").map(PathBuf::from);
-    #[cfg(not(windows))]
+    #[cfg(not(target_os = "windows"))]
     let dir = var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| var_os("HOME").map(|h| PathBuf::from(h).join(".config")));

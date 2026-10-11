@@ -19,7 +19,7 @@ use crate::{About, Command, Connected, MAX_CONTROLLERS, Signal, Status};
 pub(crate) static ABOUT: OnceLock<About> = OnceLock::new();
 
 pub(crate) fn about_info() -> About {
-    ABOUT.get().copied().unwrap_or(About { version: "?", authors: "", built: "?" })
+    ABOUT.get().copied().unwrap_or(About { version: "?", authors: "", built: "?", source: "" })
 }
 
 /// How a menu item looks, and whether it can be picked
@@ -42,13 +42,24 @@ pub(crate) struct Item {
     pub(crate) id: usize,
     pub(crate) text: String,
     pub(crate) sub: Vec<Item>,
-    /// Signal bars beside the text
-    pub(crate) signal: Option<Signal>,
+    /// The image beside the text
+    pub(crate) mark: Option<Mark>,
+}
+
+/// The image beside a controller's line: its signal bars, or in their place, with its battery
+/// critical, the battery warning, flashing as the tray icon does
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Mark {
+    Signal(Signal),
+    /// All red
+    Critical,
+    /// The flash's other frame: the red outline, the mark in black
+    CriticalDim,
 }
 
 impl Item {
     fn new(kind: Kind, id: usize, text: impl Into<String>) -> Item {
-        Item { kind, id, text: text.into(), sub: Vec::new(), signal: None }
+        Item { kind, id, text: text.into(), sub: Vec::new(), mark: None }
     }
 
     fn separator() -> Item {
@@ -172,8 +183,9 @@ fn accel(text: &str) -> Option<char> {
     None
 }
 
-/// The menu for `s`, with each controller's percent as the tray shows it
-pub(crate) fn menu_items(s: &Status, pct: impl Fn(&[u8; 6]) -> Option<u8>) -> Vec<Item> {
+/// The menu for `s`, with each controller's percent as the tray shows it, and a critical battery's
+/// warning `lit` or not
+pub(crate) fn menu_items(s: &Status, pct: impl Fn(&[u8; 6]) -> Option<u8>, lit: bool) -> Vec<Item> {
     let gray = |on: bool| if on { Kind::Normal } else { Kind::Grayed };
     let title = Kind::Title;
     let mut items = vec![
@@ -212,7 +224,7 @@ pub(crate) fn menu_items(s: &Status, pct: impl Fn(&[u8; 6]) -> Option<u8>) -> Ve
             Item::new(Kind::Normal, id::of(n, id::FORGET), tr!("controller-forget")),
         ]);
         let line =
-            Item { sub, signal: c.signal, ..Item::new(Kind::Normal, 0, controller_line(c, pct(&c.mac), &mut used)) };
+            Item { sub, mark: mark(c, lit), ..Item::new(Kind::Normal, 0, controller_line(c, pct(&c.mac), &mut used)) };
         items.push(line);
     }
     if s.controllers.is_empty() {
@@ -229,12 +241,22 @@ pub(crate) fn menu_items(s: &Status, pct: impl Fn(&[u8; 6]) -> Option<u8>) -> Ve
     items
 }
 
+/// The image beside `c`'s line, the warning `lit` or not
+fn mark(c: &Connected, lit: bool) -> Option<Mark> {
+    match c.battery {
+        Some(b) if b.critical && !b.charging => Some(if lit { Mark::Critical } else { Mark::CriticalDim }),
+        _ => c.signal.map(Mark::Signal),
+    }
+}
+
 /// The boxes a pick from the menu may open, as each platform shows them
 pub(crate) trait Dialogs {
     /// Shutting down: no more boxes
     fn quitting(&self) -> bool;
     /// Something to know, with just OK
     fn inform(&self, title: &str, text: &str);
+    /// As inform, with `url`, where it's in `text`, a link that opens it
+    fn inform_link(&self, title: &str, text: &str, url: &str);
     /// OK or Cancel. `warn` for something that can't be undone, which leans to Cancel.
     fn confirm(&self, title: &str, text: &str, warn: bool) -> bool;
     /// A controller's new name, up to MAX_NAME characters, starting from `name`. None if
@@ -307,7 +329,8 @@ fn rename(d: &impl Dialogs, c: &Connected) -> Option<String> {
 fn about(d: &impl Dialogs) {
     let info = about_info();
     let author = info.authors.replace(':', ", ");
-    d.inform(&tr!("about-title"), &tr!("about", version = info.version, built = info.built, author = author));
+    let text = tr!("about", version = info.version, built = info.built, author = author, source = info.source);
+    d.inform_link(&tr!("about-title"), &text, info.source);
 }
 
 /// How to pair, before turning it on
@@ -366,12 +389,12 @@ pub(crate) mod tests {
             controllers: vec![Connected { firmware: None, ..up(1, "A", false) }, up(2, "B", true)],
             ..Default::default()
         };
-        let items = menu_items(&s, |m| Some(m[0] * 10));
+        let items = menu_items(&s, |m| Some(m[0] * 10), true);
         let texts: Vec<&str> = items.iter().map(|i| i.text.as_str()).collect();
         // The bars go on each controller's line and nowhere else
-        let signals: Vec<_> = items.iter().filter_map(|i| i.signal).collect();
-        assert_eq!(signals, [Signal::Good, Signal::Good]);
-        assert_eq!(items[3].signal, Some(Signal::Good));
+        let marks: Vec<_> = items.iter().filter_map(|i| i.mark).collect();
+        assert_eq!(marks, [Mark::Signal(Signal::Good), Mark::Signal(Signal::Good)]);
+        assert_eq!(items[3].mark, Some(Mark::Signal(Signal::Good)));
         assert_eq!(
             texts,
             [
@@ -407,17 +430,36 @@ pub(crate) mod tests {
         assert_eq!(id::controller(id::of(1, id::AUDIO)), Some((1, id::AUDIO)));
         assert_eq!(id::controller(id::EXIT), None);
         // Pairing grays its line; with nothing at all there's a line to say so
-        let none = menu_items(&Status { pairing: true, ..Default::default() }, |_| None);
+        let none = menu_items(&Status { pairing: true, ..Default::default() }, |_| None, true);
         let at = |t: &str| none.iter().find(|i| i.text == t).unwrap().kind == Kind::Grayed;
         assert!(at("No controllers connected") && at("&Pair controller..."));
         // Four connected: no room to pair a fifth
         let pair_grayed = |n: u8| {
             let s = Status { controllers: (1..=n).map(|m| up(m, "A", false)).collect(), ..Default::default() };
-            let items = menu_items(&s, |_| Some(50));
+            let items = menu_items(&s, |_| Some(50), true);
             items.iter().find(|i| i.id == id::PAIR).unwrap().kind == Kind::Grayed
         };
         assert!(!pair_grayed(3));
         assert!(pair_grayed(4));
+    }
+
+    #[test]
+    fn a_critical_battery_flashes_in_place_of_the_bars() {
+        let critical = |charging: bool| {
+            let mut c = up(1, "A", false);
+            c.battery = c.battery.map(|b| Battery { band: 10, critical: true, charging, ..b });
+            c
+        };
+        let s = Status { controllers: vec![critical(false), up(2, "B", false)], ..Default::default() };
+        let marks = |lit: bool| -> Vec<_> { menu_items(&s, |_| Some(5), lit).iter().filter_map(|i| i.mark).collect() };
+        assert_eq!(marks(true), [Mark::Critical, Mark::Signal(Signal::Good)]);
+        assert_eq!(marks(false), [Mark::CriticalDim, Mark::Signal(Signal::Good)]);
+        // On the charger it's no longer running out: the bars are back
+        let s = Status { controllers: vec![critical(true)], ..Default::default() };
+        assert_eq!(menu_items(&s, |_| Some(5), true)[3].mark, Some(Mark::Signal(Signal::Good)));
+        // Still flagged with no signal reading to replace
+        let s = Status { controllers: vec![Connected { signal: None, ..critical(false) }], ..Default::default() };
+        assert_eq!(menu_items(&s, |_| Some(5), true)[3].mark, Some(Mark::Critical));
     }
 
     #[test]

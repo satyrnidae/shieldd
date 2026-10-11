@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use crate::battery::Gauge;
-use crate::icons::{BADGES, FLASH_FOR, Icon};
+use crate::icons::{BADGES, FLASH_FOR, FLASH_FRAME, Icon};
 use crate::menu::{Item, charge_state, menu_items, name_of, tip_lines};
 use crate::tr;
 use crate::{Connected, Status};
@@ -296,7 +296,18 @@ impl Model {
 
     /// The menu for the current status
     pub(crate) fn menu_items(&self) -> Vec<Item> {
-        menu_items(&self.status, |m| self.watches.get(m).and_then(|w| w.pct))
+        menu_items(&self.status, |m| self.watches.get(m).and_then(|w| w.pct), self.critical_lit())
+    }
+
+    /// Whether a critical battery's warning in the menu is lit: in step with the icon while it
+    /// flashes the same, on its own clock otherwise. The platform looks often enough, IDLE_TICK,
+    /// to catch each change.
+    fn critical_lit(&self) -> bool {
+        match self.shown {
+            Some(Icon::Critical) => true,
+            Some(Icon::CriticalDim) => false,
+            _ => (self.frame_at.elapsed().as_millis() / FLASH_FRAME.as_millis()).is_multiple_of(2),
+        }
     }
 
     /// Gives every gauge its look, not just the first that's due. True if any was, which wants a

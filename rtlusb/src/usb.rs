@@ -12,13 +12,13 @@ const VID: u16 = 0x0bda;
 const PID: u16 = 0x0811;
 
 /// No adapter that we can open, and what to check
-#[cfg(windows)]
+#[cfg(target_os = "windows")]
 const NOT_FOUND: &str = "no 0bda:0811 on WinUSB; is it plugged in, and on WinUSB rather than the Realtek driver?";
-#[cfg(not(windows))]
+#[cfg(not(target_os = "windows"))]
 const NOT_FOUND: &str = "no 0bda:0811; is it plugged in?";
-#[cfg(windows)]
+#[cfg(target_os = "windows")]
 const OPEN_FAILED: &str = "open device";
-#[cfg(not(windows))]
+#[cfg(not(target_os = "windows"))]
 const OPEN_FAILED: &str = "open device; is shieldd's udev rule installed (`sudo shieldd --install-udev-rule`)?";
 
 const REQ: u8 = 0x05;

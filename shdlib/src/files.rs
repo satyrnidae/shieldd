@@ -1,7 +1,7 @@
 //! Replacing a file without ever leaving it half written: stage the new contents next to it, then
 //! commit them in one rename
 
-#[cfg(windows)]
+#[cfg(target_os = "windows")]
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
@@ -30,7 +30,7 @@ fn stage_as(path: &Path, contents: &[u8], private: bool) -> Result<PathBuf> {
     Ok(tmp)
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn write(path: &Path, contents: &[u8], private: bool) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
@@ -45,7 +45,7 @@ fn write(path: &Path, contents: &[u8], private: bool) -> std::io::Result<()> {
     std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)?.write_all(contents)
 }
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 fn write(path: &Path, contents: &[u8], _private: bool) -> std::io::Result<()> {
     std::fs::write(path, contents)
 }
@@ -86,13 +86,13 @@ fn gzip(contents: &[u8]) -> Result<Vec<u8>> {
 }
 
 /// `text`, a wpa_supplicant conf, with the plain `psk=` value at `at` swapped for `psk` sealed
-#[cfg(windows)]
+#[cfg(target_os = "windows")]
 pub fn seal_text(text: &str, at: Range<usize>, psk: &crate::psk::Psk) -> Result<String> {
     Ok(format!("{}{}{}", &text[..at.start], psk.seal()?, &text[at.end..]))
 }
 
 /// seal_text, written to `to`
-#[cfg(windows)]
+#[cfg(target_os = "windows")]
 pub fn seal_file(to: &Path, text: &str, at: Range<usize>, psk: &crate::psk::Psk) -> Result<()> {
     commit(&stage_private(to, seal_text(text, at, psk)?)?, to)
 }
@@ -114,7 +114,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn private_files_are_the_owners_alone() {
         use std::os::unix::fs::PermissionsExt;

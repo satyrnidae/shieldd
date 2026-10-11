@@ -4,6 +4,7 @@ description = "shieldd's tray: what it shows and sends back, and the Windows tra
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 publish.workspace = true
 
 [dependencies]
@@ -33,7 +34,7 @@ tracing-subscriber.workspace = true
 name = "tray"
 required-features = ["tray"]
 
-[target.'cfg(windows)'.dependencies.windows]
+[target.'cfg(target_os = "windows")'.dependencies.windows]
 workspace = true
 features = [
     "Win32_Foundation",

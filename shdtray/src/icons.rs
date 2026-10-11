@@ -8,10 +8,11 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use resvg::tiny_skia::{Pixmap, Transform};
+use resvg::tiny_skia::{Pixmap, PixmapPaint, Transform};
 use resvg::usvg;
 
 use crate::battery::Battery;
+use crate::menu::Mark;
 use crate::{MAX_CONTROLLERS, Signal};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -60,7 +61,7 @@ const PAIRING_FRAMES: u8 = 5;
 const PAIRING_FRAME: Duration = Duration::from_millis(400);
 /// How long each half of a flash shows: the charging bolt, the critical mark, the disconnected
 /// icon
-const FLASH_FRAME: Duration = Duration::from_millis(800);
+pub(crate) const FLASH_FRAME: Duration = Duration::from_millis(800);
 /// How long a flash runs before the icon holds still: the disconnected one at startup and each
 /// time a controller leaves on its own, rather than sent away; the charging bolt each time
 /// charging starts
@@ -69,6 +70,12 @@ pub(crate) const FLASH_FOR: Duration = Duration::from_secs(5);
 pub(crate) const BADGES: std::ops::RangeInclusive<u8> = 2..=MAX_CONTROLLERS as u8;
 /// The badge's side, as a share of the icon's
 const BADGE_SCALE: f32 = 5.0 / 8.0;
+
+/// The sides the icon is rendered at, the panel picking the one that suits it, and how much of
+/// each the drawing takes. Theme icons keep to about three quarters of theirs, Breeze's 16 of 22,
+/// so ours does too; its count badge stays full size, to read.
+#[cfg(target_os = "linux")]
+pub(crate) const SIZES: [(u32, u32); 2] = [(24, 18), (48, 36)];
 /// Where the ring around each Phosphor digit ends, the pen back at (128, 216). The number's
 /// first move is relative to that.
 const BADGE_RING_END: &str = "Zm0,192a88,88,0,1,1,88-88A88.09957,88.09957,0,0,1,128,216Z";
@@ -132,22 +139,22 @@ impl Icon {
     /// The SVG, and the color of every path after the first, which is the outline
     fn source(self) -> (&'static str, Accent) {
         match self {
-            Icon::Charging => (include_str!("../res/battery-charging-svgrepo-com.svg"), Accent::None),
-            Icon::ChargingLit => (include_str!("../res/battery-charging-svgrepo-com.svg"), Accent::Green),
-            Icon::Charged => (include_str!("../res/battery-full-svgrepo-com.svg"), Accent::Green),
-            Icon::Full => (include_str!("../res/battery-full-svgrepo-com.svg"), Accent::Green),
-            Icon::Medium => (include_str!("../res/battery-medium-svgrepo-com.svg"), Accent::Yellow),
-            Icon::Low => (include_str!("../res/battery-low-svgrepo-com.svg"), Accent::Red),
-            Icon::Empty => (include_str!("../res/battery-empty-svgrepo-com.svg"), Accent::Red),
-            Icon::Critical => (include_str!("../res/battery-warning-svgrepo-com.svg"), Accent::Red),
+            Icon::Charging => (include_str!("../res/battery-charging.svg"), Accent::None),
+            Icon::ChargingLit => (include_str!("../res/battery-charging.svg"), Accent::Green),
+            Icon::Charged => (include_str!("../res/battery-full.svg"), Accent::Green),
+            Icon::Full => (include_str!("../res/battery-full.svg"), Accent::Green),
+            Icon::Medium => (include_str!("../res/battery-medium.svg"), Accent::Yellow),
+            Icon::Low => (include_str!("../res/battery-low.svg"), Accent::Red),
+            Icon::Empty => (include_str!("../res/battery-empty.svg"), Accent::Red),
+            Icon::Critical => (include_str!("../res/battery-critical.svg"), Accent::Red),
             // Its color is on the root element, before any path; all of it is outline
-            Icon::Disconnected => (include_str!("../res/disconnected-svgrepo-com.svg"), Accent::None),
-            Icon::DisconnectedRed => (include_str!("../res/disconnected-svgrepo-com.svg"), Accent::Red),
-            Icon::CriticalDim => (include_str!("../res/battery-warning-svgrepo-com.svg"), Accent::None),
+            Icon::Disconnected => (include_str!("../res/disconnected.svg"), Accent::None),
+            Icon::DisconnectedRed => (include_str!("../res/disconnected.svg"), Accent::Red),
+            Icon::CriticalDim => (include_str!("../res/battery-critical.svg"), Accent::None),
             // Colored by pairing_frame instead
-            Icon::Pairing(_) => (include_str!("../res/wifi-svgrepo-com.svg"), Accent::None),
+            Icon::Pairing(_) => (include_str!("../res/pairing.svg"), Accent::None),
             // Turned by pixmap
-            Icon::Spinner(_) => (include_str!("../res/loading-spinner-svgrepo-com.svg"), Accent::None),
+            Icon::Spinner(_) => (include_str!("../res/spinner.svg"), Accent::None),
         }
     }
 
@@ -220,19 +227,36 @@ impl Icon {
         !matches!(self, Icon::Disconnected | Icon::DisconnectedRed)
     }
 
-    /// As pixmap, with the count badge in the lower right corner, if any
-    pub(crate) fn badged(self, p: &Palette, size: u32, badge: Option<u8>) -> Result<Pixmap> {
-        let Some(n) = badge else { return self.pixmap(p, size) };
+    /// As pixmap on a `size` square, with the count badge in the lower right corner, if any. The
+    /// drawing itself is `art` across: all of it at `size`, or less, centered, to leave a margin.
+    /// With a badge, a smaller drawing moves out from under it, a battery to the left and the rest
+    /// to the top left; the badge stays its share of the whole square.
+    pub(crate) fn badged(self, p: &Palette, size: u32, art: u32, badge: Option<u8>) -> Result<Pixmap> {
         // A battery's narrow enough to step aside to the left, out from under the badge
-        let mut pm = match self.is_battery() {
-            true => fit(&self.svg(p), size, false),
-            false => self.pixmap(p, size),
+        let drawn = match badge.is_some() && self.is_battery() {
+            true => fit(&self.svg(p), art, false),
+            false => self.pixmap(p, art),
         }?;
+        let mut pm = match art < size {
+            true => {
+                let mut pm = Pixmap::new(size, size).context("icon pixmap")?;
+                let mid = ((size - art) / 2) as i32;
+                let (x, y) = match badge {
+                    None => (mid, mid),
+                    Some(_) if self.is_battery() => (0, mid),
+                    Some(_) => (0, 0),
+                };
+                pm.draw_pixmap(x, y, drawn.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
+                pm
+            }
+            false => drawn,
+        };
+        let Some(n) = badge else { return Ok(pm) };
         let svg = badge_svg(n, p).with_context(|| format!("no badge for {n}"))?;
         let side = ((size as f32 * BADGE_SCALE).round() as u32).max(1);
         let b = rasterize(&svg, side)?;
         let at = (size - side) as i32;
-        pm.draw_pixmap(at, at, b.as_ref(), &resvg::tiny_skia::PixmapPaint::default(), Transform::identity(), None);
+        pm.draw_pixmap(at, at, b.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
         Ok(pm)
     }
 }
@@ -241,9 +265,9 @@ impl Icon {
 /// full strength, the ring around it dropped, and the number in the stroke color
 fn badge_svg(n: u8, p: &Palette) -> Option<String> {
     let svg = match n {
-        2 => include_str!("../res/number-circle-two-duotone-svgrepo-com.svg"),
-        3 => include_str!("../res/number-circle-three-duotone-svgrepo-com.svg"),
-        4 => include_str!("../res/number-circle-four-duotone-svgrepo-com.svg"),
+        2 => include_str!("../res/badge-two.svg"),
+        3 => include_str!("../res/badge-three.svg"),
+        4 => include_str!("../res/badge-four.svg"),
         _ => return None,
     };
     let (head, number) = svg.split_once(BADGE_RING_END)?;
@@ -253,14 +277,27 @@ fn badge_svg(n: u8, p: &Palette) -> Option<String> {
     Some(svg.replace("<g opacity=\"0.2\">", "<g>").replacen("<circle ", &disc, 1).replace("#000000", p.stroke))
 }
 
+/// The menu's critical battery warning, in place of the signal bars
+const WARNING_SVG: &str = include_str!("../res/battery-critical-menu.svg");
+
+/// The image for `m` beside a controller's line in the menu, which stays light whatever the
+/// taskbar does
+pub(crate) fn mark_svg(m: Mark) -> String {
+    match m {
+        Mark::Signal(s) => signal_svg(s),
+        Mark::Critical => paint(WARNING_SVG, LIGHT.red, LIGHT.red),
+        Mark::CriticalDim => paint(WARNING_SVG, LIGHT.red, LIGHT.stroke),
+    }
+}
+
 /// The menu's signal bars, Ikono's graph-asc
-const SIGNAL_SVG: &str = include_str!("../res/graph-asc-svgrepo-com.svg");
+const SIGNAL_SVG: &str = include_str!("../res/signal-strength.svg");
 /// The bars that aren't lit, pale enough on the light menu to read as off
 const SIGNAL_UNLIT: &str = "#C8C8C8";
 
 /// The signal bars for `s`, lit from the left: none, one red, two yellow or all three green.
 /// The menu isn't themed and stays light whatever the taskbar does, so the light palette.
-pub(crate) fn signal_svg(s: Signal) -> String {
+fn signal_svg(s: Signal) -> String {
     let (lit, color) = match s {
         Signal::Dropping => (0, SIGNAL_UNLIT),
         Signal::Low => (1, LIGHT.red),
@@ -309,7 +346,7 @@ pub(crate) struct Palette {
 /// Only the stroke and yellow differ by theme; the darker reds and greens were too close to black
 /// to flash against it
 pub(crate) const LIGHT: Palette =
-    Palette { stroke: "#000000", green: "#1ccb00", yellow: "#fec41e", red: "#fe1e1e", blue: "#40a4ff" };
+    Palette { stroke: "#000000", green: "#1bad05", yellow: "#daa000", red: "#db0505", blue: "#1f86e7" };
 pub(crate) const DARK: Palette =
     Palette { stroke: "#FFFFFF", green: "#1ccb00", yellow: "#fec41e", red: "#fe1e1e", blue: "#40a4ff" };
 
@@ -390,7 +427,6 @@ fn rasterize_turned(svg: &str, size: u32, deg: f32) -> Result<Pixmap> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use resvg::tiny_skia::PixmapPaint;
 
     #[test]
     fn pairing_frames_light_one_at_a_time() {
@@ -434,29 +470,46 @@ mod tests {
         exe.ancestors().nth(3).unwrap().join("tests").join("icons")
     }
 
+    /// What renders_icons_to_target draws: side and drawing. Windows' is a big one to look at;
+    /// Linux's are each of the sizes the panel gets, margins and all.
+    #[cfg(target_os = "windows")]
+    const RENDERS: [(u32, u32); 1] = [(64, 64)];
+    #[cfg(target_os = "linux")]
+    const RENDERS: [(u32, u32); 2] = SIZES;
+
     /// Every icon in both themes, on its taskbar color, for eyeballing: one PNG each, and strips
     /// of the status icons, the pairing animation and the spinner. Each strip's first row is
     /// plain, then a row for each count badge; the icons that take none leave those rows empty.
+    /// Once for each of RENDERS.
     #[test]
     fn renders_icons_to_target() {
-        const SIZE: u32 = 64;
+        for (size, art) in RENDERS {
+            // More than one, each in a folder named for its size
+            let dir = match RENDERS.len() {
+                1 => icon_dir(),
+                _ => icon_dir().join(size.to_string()),
+            };
+            render_icons(&dir, size, art);
+        }
+    }
+
+    fn render_icons(dir: &std::path::Path, size: u32, art: u32) {
         const GAP: u32 = 8;
         let badges: Vec<Option<u8>> = std::iter::once(None).chain(BADGES.map(Some)).collect();
         let rows = badges.len() as u32;
-        let dir = icon_dir();
         for (theme, p, bg) in [("light", &LIGHT, [0xEE, 0xEE, 0xEE]), ("dark", &DARK, [0x20, 0x20, 0x20])] {
             let out = dir.join(theme);
             std::fs::create_dir_all(&out).unwrap();
             let bg = resvg::tiny_skia::Color::from_rgba8(bg[0], bg[1], bg[2], 0xFF);
             let strip_of = |n: u32| {
-                let mut s = Pixmap::new(n * SIZE + (n - 1) * GAP, rows * SIZE + (rows - 1) * GAP).unwrap();
+                let mut s = Pixmap::new(n * size + (n - 1) * GAP, rows * size + (rows - 1) * GAP).unwrap();
                 s.fill(resvg::tiny_skia::Color::from_rgba8(0x80, 0x80, 0x80, 0xFF));
                 s
             };
             let on_bg = |icon: Icon, badge: Option<u8>| {
-                let mut pm = Pixmap::new(SIZE, SIZE).unwrap();
+                let mut pm = Pixmap::new(size, size).unwrap();
                 pm.fill(bg);
-                let fg = icon.badged(p, SIZE, badge).unwrap();
+                let fg = icon.badged(p, size, art, badge).unwrap();
                 pm.draw_pixmap(0, 0, fg.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
                 pm
             };
@@ -483,7 +536,7 @@ mod tests {
                     }
                 };
                 for (row, &badge) in badges.iter().enumerate().filter(|(_, b)| b.is_none() || icon.takes_badge()) {
-                    let (x, y) = ((i * (SIZE + GAP)) as i32, (row as u32 * (SIZE + GAP)) as i32);
+                    let (x, y) = ((i * (size + GAP)) as i32, (row as u32 * (size + GAP)) as i32);
                     s.draw_pixmap(
                         x,
                         y,
@@ -495,21 +548,25 @@ mod tests {
                 }
             }
             status_strip.save_png(out.join("status_strip.png")).unwrap();
-            // The menu's always light, so its signal bars are the same either way
+            // The menu's always light, so its marks are the same either way: the signal bars, then
+            // a critical battery's warning, both frames
             if theme == "light" {
-                let mut signal_strip = Pixmap::new(4 * SIZE + 3 * GAP, SIZE).unwrap();
-                signal_strip.fill(resvg::tiny_skia::Color::from_rgba8(0x80, 0x80, 0x80, 0xFF));
+                let marks = SIGNALS.map(Mark::Signal).into_iter().chain([Mark::Critical, Mark::CriticalDim]);
+                let n = SIGNALS.len() as u32 + 2;
+                let mut mark_strip = Pixmap::new(n * size + (n - 1) * GAP, size).unwrap();
+                mark_strip.fill(resvg::tiny_skia::Color::from_rgba8(0x80, 0x80, 0x80, 0xFF));
                 let menu_bg = resvg::tiny_skia::Color::from_rgba8(0xF9, 0xF9, 0xF9, 0xFF);
-                for (i, s) in SIGNALS.into_iter().enumerate() {
-                    let mut pm = Pixmap::new(SIZE, SIZE).unwrap();
+                for (i, m) in marks.enumerate() {
+                    let mut pm = Pixmap::new(size, size).unwrap();
                     pm.fill(menu_bg);
-                    let fg = rasterize(&signal_svg(s), SIZE).unwrap();
+                    let fg = rasterize(&mark_svg(m), size).unwrap();
                     pm.draw_pixmap(0, 0, fg.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
-                    pm.save_png(out.join(format!("signal_{}.png", format!("{s:?}").to_lowercase()))).unwrap();
-                    let x = (i as u32 * (SIZE + GAP)) as i32;
-                    signal_strip.draw_pixmap(x, 0, pm.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
+                    let name = format!("{m:?}").to_lowercase().replace("signal(", "signal_").replace(')', "");
+                    pm.save_png(out.join(format!("{name}.png"))).unwrap();
+                    let x = (i as u32 * (size + GAP)) as i32;
+                    mark_strip.draw_pixmap(x, 0, pm.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
                 }
-                signal_strip.save_png(out.join("signal_strip.png")).unwrap();
+                mark_strip.save_png(out.join("mark_strip.png")).unwrap();
             }
             strip.save_png(out.join("pairing_strip.png")).unwrap();
             spinner_strip.save_png(out.join("spinner_strip.png")).unwrap();
@@ -517,6 +574,22 @@ mod tests {
     }
 
     const SIGNALS: [Signal; 4] = [Signal::Dropping, Signal::Low, Signal::Fair, Signal::Good];
+
+    #[test]
+    fn critical_warning_is_red_then_red_with_a_black_mark() {
+        let lit = mark_svg(Mark::Critical);
+        assert!(!lit.contains("#000000") && lit.matches(LIGHT.red).count() == 3, "all three paths red");
+        let dim = mark_svg(Mark::CriticalDim);
+        assert_eq!(
+            (dim.matches(LIGHT.red).count(), dim.matches(LIGHT.stroke).count()),
+            (1, 2),
+            "outline red, mark black"
+        );
+        for m in [Mark::Critical, Mark::CriticalDim] {
+            let pm = rasterize(&mark_svg(m), 16).unwrap();
+            assert!(pm.pixels().iter().any(|px| px.alpha() > 0), "{m:?} is blank");
+        }
+    }
 
     /// Each bar's color, left to right
     fn bars(s: Signal) -> Vec<String> {
@@ -554,10 +627,50 @@ mod tests {
             assert!(pm.pixels().iter().any(|px| px.alpha() > 0), "{n} is blank");
         }
         assert!(badge_svg(1, &DARK).is_none() && badge_svg(5, &DARK).is_none());
-        let pm = Icon::Full.badged(&DARK, 32, Some(3)).unwrap();
+        let pm = Icon::Full.badged(&DARK, 32, 32, Some(3)).unwrap();
         // The disc is in the corner, where the plain icon has none of its blue
         let blue = |pm: &Pixmap| pm.pixel(28, 28).unwrap().demultiply().blue();
         assert!(blue(&pm) > 0xC0 && blue(&Icon::Full.pixmap(&DARK, 32).unwrap()) < 0x40);
+    }
+
+    /// Whether anything's drawn in the `x` by `y` ranges of `pm`
+    fn inked(pm: &Pixmap, x: std::ops::Range<u32>, y: std::ops::Range<u32>) -> bool {
+        y.flat_map(|y| x.clone().map(move |x| (x, y))).any(|(x, y)| pm.pixel(x, y).unwrap().alpha() > 0)
+    }
+
+    #[test]
+    fn a_smaller_drawing_keeps_a_margin() {
+        for icon in [Icon::Full, Icon::Pairing(3), Icon::Spinner(2), Icon::Disconnected] {
+            let pm = icon.badged(&DARK, 48, 36, None).unwrap();
+            assert!(inked(&pm, 6..42, 6..42), "{icon:?} is drawn");
+            // Centered: nothing outside the middle 36 square
+            assert!(!inked(&pm, 0..48, 0..6) && !inked(&pm, 0..48, 42..48), "{icon:?} above or below");
+            assert!(!inked(&pm, 0..6, 0..48) && !inked(&pm, 42..48, 0..48), "{icon:?} to the side");
+            // The drawing's the 36 one, moved over
+            let small = icon.badged(&DARK, 36, 36, None).unwrap();
+            assert_eq!(pm.pixel(24, 24), small.pixel(18, 18), "{icon:?}");
+        }
+    }
+
+    #[test]
+    fn a_badge_keeps_its_size_by_a_smaller_drawing() {
+        let side = (48.0 * BADGE_SCALE).round() as u32;
+        for icon in [Icon::Full, Icon::Pairing(3), Icon::Spinner(2)] {
+            let small = icon.badged(&DARK, 48, 36, Some(2)).unwrap();
+            let full = icon.badged(&DARK, 48, 48, Some(2)).unwrap();
+            // The badge, 30 across in the corner, is the same either way, away from the drawing
+            for (x, y) in [(40, 40), (47 - side / 2, 47), (47, 47 - side / 2), (44, 26)] {
+                assert_eq!(small.pixel(x, y), full.pixel(x, y), "{icon:?} at {x},{y}");
+            }
+            assert!(!inked(&small, 36..48, 0..48 - side), "{icon:?} right of its square, above the badge");
+            match icon.is_battery() {
+                // To the left, at its usual height: nothing above or below its square
+                true => assert!(!inked(&small, 0..48, 0..6) && !inked(&small, 0..48 - side, 42..48), "{icon:?}"),
+                // Up in the top left
+                false => assert!(!inked(&small, 0..48 - side, 36..48), "{icon:?} below its square"),
+            }
+            assert!(inked(&small, 0..18, 0..36), "{icon:?} is drawn");
+        }
     }
 
     #[test]

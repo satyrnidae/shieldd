@@ -117,9 +117,9 @@ about =
     Built { $built }
     Copyright © 2026 { $author }
 
-    Native Windows host for the 2015 NVIDIA SHIELD controller.
+    Native Windows and Linux host for the 2015 NVIDIA SHIELD controller.
 
-    shieldd comes with ABSOLUTELY NO WARRANTY. It is free software, and you are welcome to redistribute it under the terms of the GNU General Public License, version 2 only.
+    shieldd comes with ABSOLUTELY NO WARRANTY. It is free software, and you are welcome to redistribute it under the terms of the GNU General Public License, version 2 only. In accordance with section 3 of the license, its complete source code is available at { $source }.
 
     Includes code derived from rtw88, © 2018-2024 Realtek Corporation; from Realtek's RTL8812AU/8821AU driver and its halmac layer, © Realtek Corporation; and from ozwpan, © 2011 Ozmo Inc., all under GPL-2.0.
 

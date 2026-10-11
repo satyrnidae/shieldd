@@ -221,7 +221,7 @@ mod tests {
         assert_eq!(pmk_from_conf(conf, "IEEE").unwrap(), pmk("password", "IEEE"));
     }
 
-    #[cfg(windows)]
+    #[cfg(target_os = "windows")]
     #[test]
     fn reads_a_sealed_one() {
         let sealed = Psk::Passphrase("password".into()).seal().unwrap();

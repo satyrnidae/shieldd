@@ -94,9 +94,9 @@ fn pick<'a>(wanted: &[String], have: impl Iterator<Item = &'a str>) -> Vec<usize
 
 /// The user's display languages as BCP 47 tags, most preferred first
 fn ui_languages() -> Vec<String> {
-    #[cfg(windows)]
+    #[cfg(target_os = "windows")]
     let wanted = crate::windows::ui_languages();
-    #[cfg(not(windows))]
+    #[cfg(not(target_os = "windows"))]
     let wanted = env_languages(|k| std::env::var(k).ok());
     // Tests compare English text, whatever the machine's set to
     if cfg!(test) { Vec::new() } else { wanted }
@@ -105,7 +105,7 @@ fn ui_languages() -> Vec<String> {
 /// The languages a POSIX locale asks for, as BCP 47 tags: LANGUAGE's list, most preferred
 /// first, then the first of LC_ALL, LC_MESSAGES and LANG that's set. `de_DE.UTF-8@euro` is
 /// `de-DE`. The C locale asks for none, and turns LANGUAGE off as gettext does.
-#[cfg(not(windows))]
+#[cfg(not(target_os = "windows"))]
 fn env_languages(var: impl Fn(&str) -> Option<String>) -> Vec<String> {
     let tag = |l: &str| {
         let l = l.split(['.', '@']).next().unwrap_or_default();
@@ -185,7 +185,7 @@ mod tests {
     fn english_formats_clean() {
         let b = bundle(0);
         let mut args = FluentArgs::new();
-        for k in ["version", "ssid", "state", "name", "port", "mac", "built", "author", "error", "mic", "headset"] {
+        for k in ["version", "ssid", "state", "name", "port", "mac", "built", "author", "error", "mic", "headset", "source"] {
             args.set(k, "x");
         }
         for k in ["count", "channel", "pct", "max", "mic_stream", "mic_port", "pad_stream", "pad_port"] {
@@ -218,7 +218,7 @@ mod tests {
         assert_eq!(pick(&["xx-not a tag", "ja-JP"]), [0]);
     }
 
-    #[cfg(not(windows))]
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn languages_from_the_locale() {
         let env = |pairs: &'static [(&'static str, &'static str)]| {

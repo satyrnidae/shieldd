@@ -8,7 +8,7 @@
 
 #[cfg(target_os = "linux")]
 mod linux;
-#[cfg(windows)]
+#[cfg(target_os = "windows")]
 mod windows;
 
 use std::ffi::OsString;
@@ -19,7 +19,7 @@ use anyhow::{Result, ensure};
 
 #[cfg(target_os = "linux")]
 pub use linux::{claim, install, install_udev_rule, stop, uninstall};
-#[cfg(windows)]
+#[cfg(target_os = "windows")]
 pub use windows::{claim, install, stop, uninstall};
 
 use crate::Args;
