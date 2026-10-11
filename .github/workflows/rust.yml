@@ -14,12 +14,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ ubuntu-latest, windows-latest ]
+        include:
+          - os: ubuntu-latest
+            platform: linux
+          - os: windows-latest
+            platform: windows
     runs-on: ${{ matrix.os }}
     env:
       # .cargo/config.toml points everyone at target/windows, for a shared checkout; keep each
       # platform's own here too
-      CARGO_TARGET_DIR: ${{ matrix.os == 'windows-latest' && 'target/windows' || 'target/linux' }}
+      CARGO_TARGET_DIR: target/${{ matrix.platform }}
 
     steps:
     - uses: actions/checkout@v4
@@ -39,3 +43,57 @@ jobs:
     - name: Build without default features
       if: runner.os == 'Linux'
       run: cargo build -p shieldd --no-default-features --locked
+
+    # The binaries, with what the GPL and the bundled works' licenses ask to go along, and on Linux
+    # the udev rule and uinput module that --install puts in
+    # shieldw is Windows' alone; on Linux it's a stub
+    - name: Release build
+      shell: bash
+      run: |
+        if [ "$RUNNER_OS" = Windows ]; then
+          cargo build --release --workspace --bins --locked
+        else
+          cargo build --release --workspace --bins --exclude shieldw --locked
+        fi
+    - name: Package
+      shell: bash
+      run: |
+        out="dist/shieldd-${{ matrix.platform }}-x86_64"
+        mkdir -p "$out"
+        ext="" bins="shieldd rtlusb"
+        if [ "$RUNNER_OS" = Windows ]; then ext=.exe bins="shieldd shieldw rtlusb"; fi
+        for bin in $bins; do
+          cp "$CARGO_TARGET_DIR/release/$bin$ext" "$out/"
+        done
+        cp LICENSE README.md THIRD_PARTY.md "$out/"
+        if [ "$RUNNER_OS" = Linux ]; then
+          cp shieldd/res/70-shieldd.rules shieldd/res/modules-load.conf "$out/"
+        fi
+    - uses: actions/upload-artifact@v4
+      with:
+        name: shieldd-${{ matrix.platform }}-x86_64
+        path: dist/shieldd-${{ matrix.platform }}-x86_64
+        if-no-files-found: error
+
+  # GitHub only expires artifacts by age, so: each package's 3 newest, across runs, and the rest
+  # deleted. Not for pull requests, whose token can't delete.
+  prune:
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      KEEP: 3
+    steps:
+    - name: Delete all but the newest artifacts
+      run: |
+        gh api --paginate "repos/$GITHUB_REPOSITORY/actions/artifacts?per_page=100" \
+          --jq '.artifacts[] | select(.expired | not) | select(.name | startswith("shieldd-")) | [.name, .created_at, .id] | @tsv' |
+          sort -t$'\t' -k1,1 -k2,2r |
+          awk -F'\t' -v keep="$KEEP" '++seen[$1] > keep { print $3 }' |
+          while read -r id; do
+            echo "deleting artifact $id"
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$id"
+          done
