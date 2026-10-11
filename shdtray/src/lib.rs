@@ -1,17 +1,29 @@
 //! The tray: battery, connection and pairing at a glance, and a menu to pair, reconfigure the
 //! network, and identify, rename, stream or disconnect each controller. What it shows and what
-//! it sends back are platform-neutral, here and in battery.rs; the tray itself is per platform,
-//! so far windows.rs.
+//! it sends back are platform-neutral: here, battery.rs, icons.rs, menu.rs and model.rs, with
+//! handle.rs the side shieldd holds. Putting it on screen is per platform, so far windows.rs.
 
 #[cfg_attr(not(windows), allow(dead_code, reason = "only the Windows tray uses it so far"))]
 mod battery;
+#[cfg(windows)]
+mod handle;
+#[cfg_attr(not(windows), allow(dead_code, reason = "only the Windows tray uses it so far"))]
+mod icons;
 pub mod l10n;
+#[cfg_attr(not(windows), allow(dead_code, reason = "only the Windows tray uses it so far"))]
+mod menu;
+#[cfg_attr(not(windows), allow(dead_code, reason = "only the Windows tray uses it so far"))]
+mod model;
 #[cfg(windows)]
 mod windows;
 
 pub use battery::Battery;
 #[cfg(windows)]
-pub use windows::{Tray, device_sound};
+pub use handle::Tray;
+#[cfg(windows)]
+use windows as platform;
+#[cfg(windows)]
+pub use windows::device_sound;
 
 /// XInput's four ports: as many controllers as can be hosted at once
 pub const MAX_CONTROLLERS: usize = 4;
