@@ -10,9 +10,9 @@ cargo build --release
 cargo test --release
 ```
 
-Binaries land in `target\release` (or `target/release` on Linux): `shieldd`, its windowless twin
-`shieldw` for running at login on Windows only, and the `rtlusb` bring-up tool. On Windows they are
-`.exe`.
+Binaries land in an OS-specific directory under `target`: `target\windows\release` on Windows or
+`target/linux/release` on Linux (the folder depends on target triple and profile): `shieldd`, its windowless twin
+`shieldw` for running at login on Windows only, and the `rtlusb` bring-up tool. On Windows they are `.exe`.
 
 ## Layout
 
