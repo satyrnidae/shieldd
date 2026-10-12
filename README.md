@@ -7,8 +7,7 @@ Native Windows and Linux host for the 2015 NVIDIA SHIELD controller. The control
 RTL8811AU USB adapter, through its own userspace driver (WinUSB on Windows, usbfs on Linux), and
 turns the controller into a virtual Xbox 360 pad, a mouse and media keys.
 
-No Bluetooth, no vendor app, no kernel driver of its own, and on Windows no Linux VM. Input
-latency is under ~20 ms.
+Input latency is barely perceptible at one controller, under or around ~20 ms.
 
 ## AI disclosure
 
