@@ -23,4 +23,4 @@ pub mod wpa;
 pub mod wps;
 
 pub use quality::LinkQuality;
-pub use radio::{ApOptions, Link, Radio, RadioEvent};
+pub use radio::{adapter_gone, ApOptions, Link, Radio, RadioEvent};

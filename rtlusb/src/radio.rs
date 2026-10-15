@@ -422,8 +422,9 @@ mod tests {
     fn flags_a_disconnected_adapter() {
         assert!(adapter_gone(&TransferError::Disconnected.into()));
         // A transfer that failed for another reason is not the adapter going away
-        assert!(!adapter_gone(&TransferError::Other("nope").into()));
+        assert!(!adapter_gone(&TransferError::Fault.into()));
         // An unrelated error, wrapped in context, is not it either
-        assert!(!adapter_gone(bail!("nothing to do")));
+        let e = anyhow::Error::msg("nothing to do");
+        assert!(!adapter_gone(&e));
     }
 }
