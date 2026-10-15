@@ -25,7 +25,7 @@ use anyhow::{Context, Result, bail};
 use ozproto::wire::ETHERTYPE;
 use rtlusb::ap::WpsConfig;
 use rtlusb::wps::{Credential, Device};
-use rtlusb::{ApOptions, Link, Radio, RadioEvent};
+use rtlusb::{adapter_gone, ApOptions, Link, Radio, RadioEvent};
 use shdlib::audio::{self, Audio, Backend};
 use shdnet::mac::{Mac, MacFmt};
 use shdtray::{Command, Status, Tray, tr};
@@ -268,6 +268,14 @@ pub fn run(args: Args, quit: &AtomicBool) -> Result<()> {
         match next {
             Ok(Next::Quit) => break,
             Ok(Next::Reconfigure) => start = Start::RECONFIGURE,
+            // The adapter's gone mid-run: say so, show Disconnected (which grays PAIR and
+            // RECONFIGURE), then keep looping. The waiting path re-checks present() every ~2 s and
+            // replays any pending start once it's back; foreground still exits on a plain error.
+            Err(e) if adapter_gone(&e) => {
+                warn!("{e:#}; the adapter has been lost");
+                sh.tray.problem(&tr!("problem-lost-title"), &tr!("problem-lost"));
+                sh.tray.update(sh.idle_status());
+            }
             Err(e) if !args.background => return Err(e),
             Err(e) => {
                 if started.elapsed() > RETRY_MAX {

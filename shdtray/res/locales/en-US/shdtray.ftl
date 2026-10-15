@@ -141,6 +141,8 @@ problem-pair-soon-title = Pairing shortly
 problem-pair-soon = Pairing starts when shieldd tries the adapter again.
 problem-no-adapter-title = Waiting for the adapter
 problem-no-adapter = Pairing starts once the adapter is plugged in.
+problem-lost-title = Lost connection to the adapter
+problem-lost = Unable to pair or connect until it's accessible once more.
 problem-save-title = Couldn't save the new network
 problem-save =
     { $error }

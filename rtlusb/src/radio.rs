@@ -408,3 +408,22 @@ fn gone(e: &anyhow::Error) -> bool {
             || c.downcast_ref::<nusb::Error>().is_some_and(|e| e.kind() == nusb::ErrorKind::Disconnected)
     })
 }
+
+/// Whether `e` came from the adapter going away, for callers that don't want to import nusb's types.
+pub fn adapter_gone(e: &anyhow::Error) -> bool {
+    gone(e)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flags_a_disconnected_adapter() {
+        assert!(adapter_gone(&TransferError::Disconnected.into()));
+        // A transfer that failed for another reason is not the adapter going away
+        assert!(!adapter_gone(&TransferError::Other("nope").into()));
+        // An unrelated error, wrapped in context, is not it either
+        assert!(!adapter_gone(bail!("nothing to do")));
+    }
+}

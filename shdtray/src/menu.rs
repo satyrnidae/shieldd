@@ -234,7 +234,8 @@ pub(crate) fn menu_items(s: &Status, pct: impl Fn(&[u8; 6]) -> Option<u8>, lit: 
         Item::separator(),
         // Already open, or no room for another
         Item::new(gray(!s.pairing && s.controllers.len() < MAX_CONTROLLERS), id::PAIR, pair),
-        Item::new(Kind::Normal, id::RECONFIGURE, reconfigure),
+        // No adapter to reconfigure on: off while the connection's lost and there's nothing hosted
+        Item::new(gray(s.ssid.is_none()), id::RECONFIGURE, reconfigure),
         Item::separator(),
         Item::new(Kind::Normal, id::EXIT, exit),
     ]);
