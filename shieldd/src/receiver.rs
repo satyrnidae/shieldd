@@ -13,7 +13,7 @@ use shdnet::mac::Mac;
 use tracing::{debug, info, trace, warn};
 
 use crate::controller::key;
-use crate::outputs::{Desktop, Gamepad, PadState};
+use crate::outputs::{Accel, Desktop, Gamepad, PadState};
 
 /// No packets this long: let go of everything. Same as shield_rx.py.
 const STALE: Duration = Duration::from_millis(500);
@@ -68,9 +68,9 @@ fn trigger(v: f32) -> u8 {
 const TRANSMITTER: Mac = [0; 6];
 
 /// Runs until ctrl+c.
-pub fn run(listen: SocketAddr, mouse_scale: (f32, f32), quit: &AtomicBool) -> Result<()> {
+pub fn run(listen: SocketAddr, mouse_scale: (f32, f32), accel: Accel, quit: &AtomicBool) -> Result<()> {
     let mut gamepad = Gamepad::new();
-    let mut desktop = Desktop::new(mouse_scale);
+    let mut desktop = Desktop::new(mouse_scale, accel);
     let sock = UdpSocket::bind(listen).with_context(|| format!("binding {listen}; is shield_rx.py still running?"))?;
     sock.set_read_timeout(Some(STALE))?;
     info!(%listen, "receiver mode: waiting for shieldd --transmit (or shield_tx.py). ctrl+c to stop");

@@ -222,7 +222,10 @@ The trackpads share the mouse: a button stays down while any controller holds it
 stop; the adapter powers down and the virtual pads unplug.
 
 Options worth knowing, the rest in `shieldd --help`:
-- `--mouse-scale N`, `--mouse-scale-x`, `--mouse-scale-y`: trackpad speed.
+- `--mouse-scale N`, `--mouse-scale-x`, `--mouse-scale-y`: trackpad speed at full gain.
+- `--mouse-accel-min N`, `--mouse-accel-knee N`: slow finger motion gets a fraction of the
+  scale, default 0.35, easing up to the full scale at the knee, default 1 count per ms. Small
+  moves land on exact pixels. `--mouse-accel-min 1` turns it off.
 - `--mic`: keep the controller's mic stream open even with audio off, which keeps the controller
   from dozing between inputs.
 - `--audio-backend vban|pipewire`: where controller audio goes, see [Audio](#audio).

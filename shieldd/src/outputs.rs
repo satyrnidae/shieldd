@@ -142,6 +142,28 @@ impl Held {
     }
 }
 
+/// Pointer acceleration: how much of the full scale a finger's speed gets
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Accel {
+    /// Gain at a standstill, as a fraction of full. 1.0 or more turns acceleration off.
+    pub min: f32,
+    /// Finger speed in counts per ms where the gain reaches full
+    pub knee: f32,
+}
+
+impl Accel {
+    /// Fraction of the full scale at `speed` counts per ms: `min` at rest, smoothstep up to 1.0 at
+    /// the knee
+    fn gain(&self, speed: f32) -> f32 {
+        // Written so NaN lands here too: anything out of range is off, not a poisoned carry
+        if !(0.0..1.0).contains(&self.min) || self.knee.is_nan() || self.knee <= 0.0 {
+            return 1.0;
+        }
+        let t = (speed / self.knee).clamp(0.0, 1.0);
+        self.min + (1.0 - self.min) * t * t * (3.0 - 2.0 * t)
+    }
+}
+
 /// A source's finger on its trackpad
 #[derive(Debug, Default)]
 struct Pointer {
@@ -149,6 +171,40 @@ struct Pointer {
     touch: Option<(u16, u16)>,
     /// Sub-pixel motion carried between reports
     carry: (f32, f32),
+    /// Smoothed finger speed in counts per ms
+    speed: f32,
+    /// When the last move report came in
+    last: Option<Instant>,
+}
+
+/// How far each report pulls the smoothed speed toward its own, 0 to 1
+const SPEED_SMOOTHING: f32 = 0.5;
+/// Floor on the time between reports when working out speed, in ms, so a burst doesn't read as
+/// infinitely fast
+const MIN_REPORT_MS: f32 = 1.0;
+/// A gap this long, in ms, means the finger lifted and came back, where the caller has no lift
+/// to tell us: the old speed is dropped and the report goes at the slow end, like a first one
+const PAUSE_MS: f32 = 50.0;
+
+impl Pointer {
+    /// Whole pixels to move for a report of `dx` and `dy` counts at `now`; the rest is carried
+    fn step(&mut self, dx: f32, dy: f32, scale: (f32, f32), accel: Accel, now: Instant) -> (i32, i32) {
+        // The first report of a touch has no gap to measure, so it goes at the slow end
+        if let Some(last) = self.last.replace(now) {
+            let ms = now.saturating_duration_since(last).as_secs_f32() * 1000.0;
+            if ms > PAUSE_MS {
+                self.speed = 0.0;
+            } else {
+                self.speed += SPEED_SMOOTHING * (dx.hypot(dy) / ms.max(MIN_REPORT_MS) - self.speed);
+            }
+        }
+        let gain = accel.gain(self.speed);
+        let x = dx * scale.0 * gain + self.carry.0;
+        let y = dy * scale.1 * gain + self.carry.1;
+        let (ix, iy) = (x.trunc(), y.trunc());
+        self.carry = (x - ix, y - iy);
+        (ix as i32, iy as i32)
+    }
 }
 
 /// The mouse and media keys, shared by every controller: trackpads move one pointer, and a
@@ -160,12 +216,14 @@ pub struct Desktop {
     pointers: HashMap<Mac, Pointer>,
     /// Next repeat while a REPEATING key is held, and the interval after it
     next_repeat: Option<(Instant, Duration)>,
-    /// Trackpad counts -> pixels, x and y
+    /// Trackpad counts -> pixels at full gain, x and y
     mouse_scale: (f32, f32),
+    /// How finger speed eases that scale down
+    accel: Accel,
 }
 
 impl Desktop {
-    pub fn new(mouse_scale: (f32, f32)) -> Self {
+    pub fn new(mouse_scale: (f32, f32), accel: Accel) -> Self {
         Desktop {
             input: Input::new(),
             keys: Held::default(),
@@ -173,6 +231,7 @@ impl Desktop {
             pointers: HashMap::new(),
             next_repeat: None,
             mouse_scale,
+            accel,
         }
     }
 
@@ -183,16 +242,12 @@ impl Desktop {
         self.pointers.remove(src);
     }
 
-    /// Relative move in trackpad counts, scaled to pixels
+    /// Relative move in trackpad counts, scaled to pixels and eased by finger speed
     pub fn move_counts(&mut self, src: &Mac, dx: f32, dy: f32) {
-        let (sx, sy) = self.mouse_scale;
         let p = self.pointers.entry(*src).or_default();
-        let x = dx * sx + p.carry.0;
-        let y = dy * sy + p.carry.1;
-        let (ix, iy) = (x.trunc(), y.trunc());
-        p.carry = (x - ix, y - iy);
-        if ix != 0.0 || iy != 0.0 {
-            self.input.move_by(ix as i32, iy as i32);
+        let (ix, iy) = p.step(dx, dy, self.mouse_scale, self.accel, Instant::now());
+        if ix != 0 || iy != 0 {
+            self.input.move_by(ix, iy);
         }
     }
 
@@ -388,6 +443,126 @@ mod tests {
     fn spurious_button_is_dropped() {
         let p = Pad { buttons: btn::SPURIOUS, ..Pad::default() };
         assert_eq!(to_pad_state(&p).buttons, 0);
+    }
+
+    const ACCEL: Accel = Accel { min: 0.35, knee: 1.0 };
+
+    #[test]
+    fn gain_is_min_when_still() {
+        assert_eq!(ACCEL.gain(0.0), 0.35);
+    }
+
+    #[test]
+    fn gain_is_full_at_the_knee_and_past_it() {
+        assert_eq!(ACCEL.gain(1.0), 1.0);
+        assert_eq!(ACCEL.gain(50.0), 1.0);
+    }
+
+    #[test]
+    fn gain_rises_smoothly_between() {
+        // Smoothstep is halfway at the middle of its range
+        assert!((ACCEL.gain(0.5) - 0.675).abs() < 1e-6);
+        let mut last = ACCEL.gain(0.0);
+        for i in 1..=20 {
+            let g = ACCEL.gain(i as f32 / 20.0);
+            assert!(g >= last, "gain fell at step {i}");
+            last = g;
+        }
+    }
+
+    #[test]
+    fn gain_off_is_always_full() {
+        assert_eq!(Accel { min: 1.0, knee: 1.0 }.gain(0.0), 1.0);
+        assert_eq!(Accel { min: 1.5, knee: 1.0 }.gain(0.0), 1.0, "past 1.0 is still off");
+        assert_eq!(Accel { min: 0.35, knee: 0.0 }.gain(0.0), 1.0, "no knee, no ramp");
+    }
+
+    #[test]
+    fn gain_out_of_range_is_off_not_garbage() {
+        for a in [
+            Accel { min: f32::NAN, knee: 1.0 },
+            Accel { min: -0.5, knee: 1.0 },
+            Accel { min: 0.35, knee: f32::NAN },
+            Accel { min: 0.35, knee: -1.0 },
+        ] {
+            assert_eq!(a.gain(0.0), 1.0, "{a:?}");
+            assert_eq!(a.gain(0.5), 1.0, "{a:?}");
+        }
+    }
+
+    #[test]
+    fn a_pause_starts_a_new_stroke() {
+        let mut p = Pointer::default();
+        let (_, now) = feed(&mut p, 10, (10.0, 0.0), 8, ACCEL, Instant::now());
+        // Finger lifted and came back with no reset in between, as in --receiver mode
+        let (x, _) = p.step(1.0, 0.0, SCALE, ACCEL, now + Duration::from_secs(1));
+        assert_eq!(x, 1, "old speed leaked into the new touch");
+    }
+
+    const SCALE: (f32, f32) = (3.0, 4.5);
+    const OFF: Accel = Accel { min: 1.0, knee: 1.0 };
+
+    /// Feeds `n` identical reports `ms` apart; returns each step and the clock after
+    fn feed(p: &mut Pointer, n: usize, d: (f32, f32), ms: u64, accel: Accel, from: Instant) -> (Vec<(i32, i32)>, Instant) {
+        let mut now = from;
+        let mut steps = Vec::new();
+        for _ in 0..n {
+            now += Duration::from_millis(ms);
+            steps.push(p.step(d.0, d.1, SCALE, accel, now));
+        }
+        (steps, now)
+    }
+
+    #[test]
+    fn slow_motion_moves_in_small_steps() {
+        let mut p = Pointer::default();
+        let (steps, _) = feed(&mut p, 100, (1.0, 0.0), 8, ACCEL, Instant::now());
+        assert!(steps.iter().all(|&(x, _)| x <= 2), "a single count skipped {:?}", steps.iter().max());
+        // Flat scale would be 300; the slow end of the curve is around a third of that
+        let total: i32 = steps.iter().map(|&(x, _)| x).sum();
+        assert!((105..=135).contains(&total), "total {total}");
+    }
+
+    #[test]
+    fn fast_motion_gets_the_full_scale() {
+        let mut p = Pointer::default();
+        let (steps, _) = feed(&mut p, 10, (10.0, 0.0), 8, ACCEL, Instant::now());
+        assert_eq!(steps.last(), Some(&(30, 0)));
+    }
+
+    #[test]
+    fn off_is_the_flat_scale() {
+        let mut p = Pointer::default();
+        let (steps, _) = feed(&mut p, 3, (1.0, 1.0), 8, OFF, Instant::now());
+        assert!(steps.iter().all(|&(x, _)| x == 3), "{steps:?}");
+        // 4.5 a report: the half carries over, so 4, 5, 4
+        assert_eq!(steps.iter().map(|&(_, y)| y).collect::<Vec<_>>(), [4, 5, 4]);
+    }
+
+    #[test]
+    fn a_fresh_finger_starts_slow() {
+        let mut p = Pointer::default();
+        let (steps, _) = feed(&mut p, 1, (10.0, 0.0), 8, ACCEL, Instant::now());
+        // 10 counts at the 0.35 floor, not the 30 pixels of full gain
+        assert_eq!(steps, [(10, 0)]);
+    }
+
+    #[test]
+    fn reports_in_a_burst_dont_overshoot() {
+        let mut p = Pointer::default();
+        let t = Instant::now();
+        p.step(10.0, 0.0, SCALE, ACCEL, t);
+        // Same instant: the floor on the gap, so gain tops out at full instead of going wild
+        let (x, _) = p.step(10.0, 0.0, SCALE, ACCEL, t);
+        assert!(x <= 30, "{x}");
+    }
+
+    #[test]
+    fn a_long_pause_doesnt_stall_or_spike() {
+        let mut p = Pointer::default();
+        let (_, now) = feed(&mut p, 10, (10.0, 0.0), 8, ACCEL, Instant::now());
+        let (x, _) = p.step(10.0, 0.0, SCALE, ACCEL, now + Duration::from_secs(10));
+        assert!((1..=30).contains(&x), "{x}");
     }
 
     #[test]
