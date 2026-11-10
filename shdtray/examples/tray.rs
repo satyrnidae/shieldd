@@ -58,7 +58,7 @@ fn main() {
     loop {
         if next < steps.len() && at.elapsed() >= Duration::from_secs(if next == 0 { 0 } else { 8 }) {
             println!("step {next}");
-            status = steps[next].clone();
+            status = Status { mouse: status.mouse, ..steps[next].clone() };
             tray.update(status.clone());
             next += 1;
             at = Instant::now();
@@ -81,6 +81,11 @@ fn main() {
                     status.controllers.retain(|c| c.mac != mac);
                     status.sent_away = true;
                 }
+                Command::Accel(on) => {
+                    status.mouse.accel = on;
+                    status.mouse.trackball &= on;
+                }
+                Command::Trackball(on) => status.mouse.trackball = on,
                 Command::Identify(_) => tray.problem("Identify", "Nothing to identify in the example."),
                 _ => {}
             }

@@ -14,6 +14,9 @@ menu-network = { $ssid }, ch.{ $channel }
 menu-none-connected = No controllers connected
 menu-pair = &Pair controller...
 menu-reconfigure = Re&configure network
+menu-mouse = &Mouse options
+menu-mouse-accel = &Pointer acceleration
+menu-mouse-trackball = &Trackball
 menu-exit = E&xit
 
 ## A controller's line and submenu

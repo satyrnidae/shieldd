@@ -13,7 +13,7 @@ use shdnet::mac::MacFmt;
 
 use crate::battery::Battery;
 use crate::tr;
-use crate::{About, Command, Connected, MAX_CONTROLLERS, Signal, Status};
+use crate::{About, Command, Connected, MAX_CONTROLLERS, Mouse, Signal, Status};
 
 /// From Tray::start, for the menu's title and the About box
 pub(crate) static ABOUT: OnceLock<About> = OnceLock::new();
@@ -44,6 +44,8 @@ pub(crate) struct Item {
     pub(crate) sub: Vec<Item>,
     /// The image beside the text
     pub(crate) mark: Option<Mark>,
+    /// A toggle, with whether it's on; None for an item that isn't one
+    pub(crate) checked: Option<bool>,
 }
 
 /// The image beside a controller's line: its signal bars, or in their place, with its battery
@@ -59,7 +61,7 @@ pub(crate) enum Mark {
 
 impl Item {
     fn new(kind: Kind, id: usize, text: impl Into<String>) -> Item {
-        Item { kind, id, text: text.into(), sub: Vec::new(), mark: None }
+        Item { kind, id, text: text.into(), sub: Vec::new(), mark: None, checked: None }
     }
 
     fn separator() -> Item {
@@ -74,6 +76,9 @@ pub(crate) mod id {
     pub const PAIR: usize = 2;
     pub const RECONFIGURE: usize = 3;
     pub const EXIT: usize = 4;
+    /// In the Mouse options submenu
+    pub const ACCEL: usize = 5;
+    pub const TRACKBALL: usize = 6;
     /// A controller's submenu: CONTROLLER + its index * PER_CONTROLLER + one of the below
     pub const CONTROLLER: usize = 0x100;
     pub const PER_CONTROLLER: usize = 0x10;
@@ -202,9 +207,9 @@ pub(crate) fn menu_items(s: &Status, pct: impl Fn(&[u8; 6]) -> Option<u8>, lit: 
     }
     items.push(Item::separator());
     let pair = tr!("menu-pair");
-    let (reconfigure, exit) = (tr!("menu-reconfigure"), tr!("menu-exit"));
+    let (reconfigure, mouse, exit) = (tr!("menu-reconfigure"), tr!("menu-mouse"), tr!("menu-exit"));
     // Controllers get the letters the rest leave
-    let mut used: Vec<char> = [&pair, &reconfigure, &exit].into_iter().filter_map(|t| accel(t)).collect();
+    let mut used: Vec<char> = [&pair, &reconfigure, &mouse, &exit].into_iter().filter_map(|t| accel(t)).collect();
     for (n, c) in s.controllers.iter().enumerate() {
         let mut sub = vec![Item::new(title, 0, tr!("controller-mac", mac = c.mac.fmt()))];
         if let Some(v) = &c.firmware {
@@ -235,10 +240,21 @@ pub(crate) fn menu_items(s: &Status, pct: impl Fn(&[u8; 6]) -> Option<u8>, lit: 
         // Already open, or no room for another
         Item::new(gray(!s.pairing && s.controllers.len() < MAX_CONTROLLERS), id::PAIR, pair),
         Item::new(Kind::Normal, id::RECONFIGURE, reconfigure),
+        Item { sub: mouse_items(s.mouse), ..Item::new(Kind::Normal, 0, mouse) },
         Item::separator(),
         Item::new(Kind::Normal, id::EXIT, exit),
     ]);
     items
+}
+
+/// The Mouse options submenu: a check for each that's on, trackball grayed without acceleration
+fn mouse_items(m: Mouse) -> Vec<Item> {
+    let checked = |item: Item, on: bool| Item { checked: Some(on), ..item };
+    let trackball = if m.accel { Kind::Normal } else { Kind::Grayed };
+    vec![
+        checked(Item::new(Kind::Normal, id::ACCEL, tr!("menu-mouse-accel")), m.accel),
+        checked(Item::new(trackball, id::TRACKBALL, tr!("menu-mouse-trackball")), m.trackball),
+    ]
 }
 
 /// The image beside `c`'s line, the warning `lit` or not
@@ -271,6 +287,9 @@ pub(crate) fn command(picked: usize, s: &Status, d: &impl Dialogs) -> Option<Com
         _ if d.quitting() => return None,
         (id::PAIR, _) if confirm_pair(d) => Command::Pair,
         (id::RECONFIGURE, _) if confirm_reconfigure(d) => Command::Reconfigure,
+        (id::ACCEL, _) => Command::Accel(!s.mouse.accel),
+        // Grayed without acceleration, so a stale pick does nothing
+        (id::TRACKBALL, _) if s.mouse.accel => Command::Trackball(!s.mouse.trackball),
         (id::EXIT, _) => Command::Exit,
         (id::ABOUT, _) => {
             about(d);
@@ -406,6 +425,7 @@ pub(crate) mod tests {
                 "",
                 "&Pair controller...",
                 "Re&configure network",
+                "&Mouse options",
                 "",
                 "E&xit",
             ]
@@ -441,6 +461,64 @@ pub(crate) mod tests {
         };
         assert!(!pair_grayed(3));
         assert!(pair_grayed(4));
+    }
+
+    #[test]
+    fn mouse_options_follow_reconfigure() {
+        let items = menu_items(&Status::default(), |_| None, true);
+        let at = items.iter().position(|i| i.id == id::RECONFIGURE).unwrap();
+        let mouse = &items[at + 1];
+        assert_eq!(mouse.text, "&Mouse options");
+        let sub: Vec<_> = mouse.sub.iter().map(|i| (i.id, i.text.as_str(), i.checked, i.kind)).collect();
+        assert_eq!(
+            sub,
+            [
+                (id::ACCEL, "&Pointer acceleration", Some(false), Kind::Normal),
+                (id::TRACKBALL, "&Trackball", Some(false), Kind::Grayed),
+            ]
+        );
+        assert_eq!(items[at + 2].kind, Kind::Separator, "Exit stays apart");
+    }
+
+    #[test]
+    fn mouse_options_show_what_is_on() {
+        let on = |accel, trackball| {
+            let s = Status { mouse: Mouse { accel, trackball }, ..Default::default() };
+            let items = menu_items(&s, |_| None, true);
+            let m = items.iter().find(|i| i.text == "&Mouse options").unwrap();
+            m.sub.iter().map(|i| (i.checked, i.kind)).collect::<Vec<_>>()
+        };
+        let some = Some;
+        assert_eq!(on(true, false), [(some(true), Kind::Normal), (some(false), Kind::Normal)]);
+        assert_eq!(on(true, true), [(some(true), Kind::Normal), (some(true), Kind::Normal)]);
+        // Trackball can't be on without acceleration, and can't be picked
+        assert_eq!(on(false, false), [(some(false), Kind::Normal), (some(false), Kind::Grayed)]);
+    }
+
+    struct Quiet;
+    impl Dialogs for Quiet {
+        fn quitting(&self) -> bool {
+            false
+        }
+        fn inform(&self, _: &str, _: &str) {}
+        fn inform_link(&self, _: &str, _: &str, _: &str) {}
+        fn confirm(&self, _: &str, _: &str, _: bool) -> bool {
+            true
+        }
+        fn ask_name(&self, _: &str, _: &str, _: &str) -> Option<String> {
+            None
+        }
+    }
+
+    #[test]
+    fn picking_a_mouse_option_flips_it() {
+        let s = |accel, trackball| Status { mouse: Mouse { accel, trackball }, ..Default::default() };
+        assert_eq!(command(id::ACCEL, &s(true, false), &Quiet), Some(Command::Accel(false)));
+        assert_eq!(command(id::ACCEL, &s(false, false), &Quiet), Some(Command::Accel(true)));
+        assert_eq!(command(id::TRACKBALL, &s(true, false), &Quiet), Some(Command::Trackball(true)));
+        assert_eq!(command(id::TRACKBALL, &s(true, true), &Quiet), Some(Command::Trackball(false)));
+        // Grayed: a stale pick does nothing
+        assert_eq!(command(id::TRACKBALL, &s(false, false), &Quiet), None);
     }
 
     #[test]
