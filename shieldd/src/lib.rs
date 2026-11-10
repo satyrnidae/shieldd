@@ -75,6 +75,14 @@ pub struct Args {
     /// Vertical scale on its own, overriding --mouse-scale
     #[arg(long)]
     mouse_scale_y: Option<f32>,
+    /// Trackpad gain for the slowest finger motion, as a fraction of --mouse-scale. It ramps up to
+    /// the full scale as the finger speeds up, so small moves land on exact pixels. 1 turns
+    /// acceleration off.
+    #[arg(long, default_value_t = 0.35, value_parser = non_negative)]
+    mouse_accel_min: f32,
+    /// Finger speed, in trackpad counts per ms, where the gain reaches the full --mouse-scale
+    #[arg(long, default_value_t = 1.0, value_parser = non_negative)]
+    mouse_accel_knee: f32,
     /// Open the mic stream even with audio off, where it goes nowhere. It keeps the controller from
     /// dozing between inputs, at the cost of a steady stream of frames. Doesn't change the lag.
     #[arg(long)]
@@ -161,6 +169,40 @@ impl Args {
 
     fn scale(&self) -> (f32, f32) {
         (self.mouse_scale_x.unwrap_or(self.mouse_scale), self.mouse_scale_y.unwrap_or(self.mouse_scale * 1.5))
+    }
+
+    fn accel(&self) -> outputs::Accel {
+        outputs::Accel { min: self.mouse_accel_min, knee: self.mouse_accel_knee }
+    }
+}
+
+/// For the accel flags: a finite number, 0 or more
+fn non_negative(s: &str) -> Result<f32, String> {
+    let v: f32 = s.parse().map_err(|e| format!("{e}"))?;
+    if v.is_finite() && v >= 0.0 { Ok(v) } else { Err("must be a finite number, 0 or more".into()) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accel_is_on_by_default() {
+        let a = Args::parse_from(["shieldd"]).accel();
+        assert_eq!(a, outputs::Accel { min: 0.35, knee: 1.0 });
+    }
+
+    #[test]
+    fn accel_flags_reject_nonsense() {
+        for bad in [["--mouse-accel-min", "nan"], ["--mouse-accel-min", "-0.5"], ["--mouse-accel-knee", "nan"], ["--mouse-accel-knee", "-1"]] {
+            assert!(Args::try_parse_from(["shieldd", bad[0], bad[1]]).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn accel_flags_are_read() {
+        let a = Args::parse_from(["shieldd", "--mouse-accel-min", "0.5", "--mouse-accel-knee", "2"]).accel();
+        assert_eq!(a, outputs::Accel { min: 0.5, knee: 2.0 });
     }
 }
 
@@ -261,7 +303,7 @@ fn dispatch(mut args: Args, windowless: bool, claimed: Option<Quit>) -> Result<(
     // run() claims for anything that hosts, before logging starts
     let quit = anyhow::Context::context(claimed, "hosting without the instance")?;
     if args.receiver {
-        return receiver::run(args.listen, args.scale(), &quit);
+        return receiver::run(args.listen, args.scale(), args.accel(), &quit);
     }
     radio::run(args, &quit)
 }
