@@ -365,7 +365,7 @@ fn seat_mut<'a>(seats: &'a mut [Seat], mac: &Mac) -> Option<&'a mut Seat> {
 }
 
 fn run_once(args: &Args, start: Start, quit: &AtomicBool, sh: &mut Shared) -> Result<Next> {
-    let mut desktop = Desktop::new(args.scale(), args.accel());
+    let mut desktop = Desktop::new(args.scale(), args.accel(), args.trackball());
     let reconfigure = start.reconfigure || (start.pair && sh.unsaved.is_none() && !args.conf.exists());
     let mut group = match &sh.unsaved {
         // An unsaved group stays until the new one's saved or takes its place, in case the radio

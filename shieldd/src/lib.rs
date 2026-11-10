@@ -83,6 +83,14 @@ pub struct Args {
     /// Finger speed, in trackpad counts per ms, where the gain reaches the full --mouse-scale
     #[arg(long, default_value_t = 1.0, value_parser = non_negative)]
     mouse_accel_knee: f32,
+    /// Trackball emulation: flick the trackpad and let go, and the pointer keeps gliding and slows
+    /// to a stop. Needs acceleration, so it can't go with --mouse-accel-min 1. Not for --receiver.
+    #[arg(long)]
+    trackball: bool,
+    /// How long the --trackball glide takes to lose about two thirds of its speed, in ms. Longer
+    /// glides further.
+    #[arg(long, default_value_t = 350.0, value_parser = positive)]
+    trackball_glide: f32,
     /// Open the mic stream even with audio off, where it goes nowhere. It keeps the controller from
     /// dozing between inputs, at the cost of a steady stream of frames. Doesn't change the lag.
     #[arg(long)]
@@ -174,6 +182,29 @@ impl Args {
     fn accel(&self) -> outputs::Accel {
         outputs::Accel { min: self.mouse_accel_min, knee: self.mouse_accel_knee }
     }
+
+    /// The glide, if --trackball asked for one
+    fn trackball(&self) -> Option<outputs::Trackball> {
+        self.trackball.then_some(outputs::Trackball { glide_ms: self.trackball_glide })
+    }
+
+    /// Flags that don't go together
+    fn validate(&self) -> Result<()> {
+        if self.trackball && !self.accel().enabled() {
+            anyhow::bail!(
+                "--trackball needs pointer acceleration, which --mouse-accel-min {} and --mouse-accel-knee {} turn off",
+                self.mouse_accel_min,
+                self.mouse_accel_knee
+            );
+        }
+        Ok(())
+    }
+}
+
+/// For --trackball-glide: a finite number above 0
+fn positive(s: &str) -> Result<f32, String> {
+    let v = non_negative(s)?;
+    if v > 0.0 { Ok(v) } else { Err("must be above 0".into()) }
 }
 
 /// For the accel flags: a finite number, 0 or more
@@ -197,6 +228,38 @@ mod tests {
         for bad in [["--mouse-accel-min", "nan"], ["--mouse-accel-min", "-0.5"], ["--mouse-accel-knee", "nan"], ["--mouse-accel-knee", "-1"]] {
             assert!(Args::try_parse_from(["shieldd", bad[0], bad[1]]).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn trackball_is_off_by_default() {
+        let a = Args::parse_from(["shieldd"]);
+        assert_eq!(a.trackball(), None);
+        assert!(a.validate().is_ok());
+    }
+
+    #[test]
+    fn trackball_flags_are_read() {
+        let a = Args::parse_from(["shieldd", "--trackball"]);
+        assert_eq!(a.trackball(), Some(outputs::Trackball { glide_ms: 350.0 }));
+        assert!(a.validate().is_ok());
+        let a = Args::parse_from(["shieldd", "--trackball", "--trackball-glide", "500"]);
+        assert_eq!(a.trackball(), Some(outputs::Trackball { glide_ms: 500.0 }));
+    }
+
+    #[test]
+    fn trackball_glide_rejects_nonsense() {
+        for bad in ["0", "-1", "nan", "inf"] {
+            assert!(Args::try_parse_from(["shieldd", "--trackball-glide", bad]).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn trackball_needs_acceleration() {
+        let a = Args::parse_from(["shieldd", "--trackball", "--mouse-accel-min", "1"]);
+        let e = a.validate().expect_err("no acceleration, no trackball").to_string();
+        assert!(e.contains("--trackball") && e.contains("--mouse-accel-min"), "{e}");
+        // Without the flag, acceleration off is fine
+        assert!(Args::parse_from(["shieldd", "--mouse-accel-min", "1"]).validate().is_ok());
     }
 
     #[test]
@@ -303,8 +366,13 @@ fn dispatch(mut args: Args, windowless: bool, claimed: Option<Quit>) -> Result<(
     // run() claims for anything that hosts, before logging starts
     let quit = anyhow::Context::context(claimed, "hosting without the instance")?;
     if args.receiver {
+        if args.trackball {
+            // Its packets carry no finger up or down
+            tracing::warn!("--trackball does nothing with --receiver");
+        }
         return receiver::run(args.listen, args.scale(), args.accel(), &quit);
     }
+    args.validate()?;
     radio::run(args, &quit)
 }
 

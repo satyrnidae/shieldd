@@ -70,7 +70,7 @@ const TRANSMITTER: Mac = [0; 6];
 /// Runs until ctrl+c.
 pub fn run(listen: SocketAddr, mouse_scale: (f32, f32), accel: Accel, quit: &AtomicBool) -> Result<()> {
     let mut gamepad = Gamepad::new();
-    let mut desktop = Desktop::new(mouse_scale, accel);
+    let mut desktop = Desktop::new(mouse_scale, accel, None);
     let sock = UdpSocket::bind(listen).with_context(|| format!("binding {listen}; is shield_rx.py still running?"))?;
     sock.set_read_timeout(Some(STALE))?;
     info!(%listen, "receiver mode: waiting for shieldd --transmit (or shield_tx.py). ctrl+c to stop");

@@ -226,6 +226,11 @@ Options worth knowing, the rest in `shieldd --help`:
 - `--mouse-accel-min N`, `--mouse-accel-knee N`: slow finger motion gets a fraction of the
   scale, default 0.35, easing up to the full scale at the knee, default 1 count per ms. Small
   moves land on exact pixels. `--mouse-accel-min 1` turns it off.
+- `--trackball`, `--trackball-glide MS`: flick the trackpad and let go, and the pointer keeps
+  gliding and slows to a stop. Slow lifts don't glide, and touching the pad or clicking stops
+  it. Off by default. Needs acceleration, so it won't start with `--mouse-accel-min 1`. The
+  glide time is how long it takes to lose about two thirds of its speed, default 350. Not for
+  `--receiver`, whose packets don't say when a finger lifts.
 - `--mic`: keep the controller's mic stream open even with audio off, which keeps the controller
   from dozing between inputs.
 - `--audio-backend vban|pipewire`: where controller audio goes, see [Audio](#audio).
