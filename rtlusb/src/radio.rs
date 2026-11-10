@@ -362,7 +362,8 @@ pub fn rx_loop(
                 if p.c2h {
                     c2h += 1;
                 }
-                if p.crc_err {
+                // C2H reports reuse the descriptor layout, so icv_err only means something on real frames
+                if p.crc_err || (!p.c2h && p.icv_err) {
                     crc_errs += 1;
                     continue;
                 }

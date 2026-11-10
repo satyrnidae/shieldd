@@ -793,7 +793,8 @@ impl Bss {
 
         let mut at = 24 + if sub & 0x8 != 0 { 2 } else { 0 };
         let mut end = f.len() - 4;
-        if fc & 0x4000 != 0 {
+        let protected = fc & 0x4000 != 0;
+        if protected {
             if !decrypted {
                 debug!(sta = sa.fmt(), "protected frame the hardware didn't decrypt");
                 return Ok(None);
@@ -815,7 +816,8 @@ impl Bss {
             }
             return self.on_eapol(chip, tx, sa, payload);
         }
-        if !matches!(sta.state, State::Connected) {
+        // Only EAPOL may arrive in the clear; anything else spoofing a connected MAC gets dropped
+        if !protected || !matches!(sta.state, State::Connected) {
             return Ok(None);
         }
         Ok(Some(Event::Data(sa, ethertype, payload.to_vec())))
