@@ -203,7 +203,7 @@ impl Glide {
     fn step(&mut self, now: Instant, glide_ms: f32) -> (i32, i32) {
         let ms = now.saturating_duration_since(self.last).as_secs_f32() * 1000.0;
         self.last = now;
-        if !(glide_ms > 0.0) {
+        if glide_ms.is_nan() || glide_ms <= 0.0 {
             self.v = (0.0, 0.0);
             return (0, 0);
         }
