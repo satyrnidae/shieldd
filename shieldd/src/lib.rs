@@ -19,6 +19,7 @@
 mod background;
 mod controller;
 mod known_clients;
+mod mouse;
 mod outputs;
 mod p2pconf;
 mod pair;
@@ -183,11 +184,6 @@ impl Args {
         outputs::Accel { min: self.mouse_accel_min, knee: self.mouse_accel_knee }
     }
 
-    /// The glide, if --trackball asked for one
-    fn trackball(&self) -> Option<outputs::Trackball> {
-        self.trackball.then_some(outputs::Trackball { glide_ms: self.trackball_glide })
-    }
-
     /// Flags that don't go together
     fn validate(&self) -> Result<()> {
         if self.trackball && !self.accel().enabled() {
@@ -221,6 +217,8 @@ mod tests {
     fn accel_is_on_by_default() {
         let a = Args::parse_from(["shieldd"]).accel();
         assert_eq!(a, outputs::Accel { min: 0.35, knee: 1.0 });
+        // What the tray turns acceleration on to after a flag turned it off
+        assert_eq!(a, outputs::Accel::DEFAULT);
     }
 
     #[test]
@@ -233,17 +231,18 @@ mod tests {
     #[test]
     fn trackball_is_off_by_default() {
         let a = Args::parse_from(["shieldd"]);
-        assert_eq!(a.trackball(), None);
+        assert!(!a.trackball);
         assert!(a.validate().is_ok());
     }
 
     #[test]
     fn trackball_flags_are_read() {
         let a = Args::parse_from(["shieldd", "--trackball"]);
-        assert_eq!(a.trackball(), Some(outputs::Trackball { glide_ms: 350.0 }));
+        assert!(a.trackball);
+        assert_eq!(a.trackball_glide, 350.0);
         assert!(a.validate().is_ok());
         let a = Args::parse_from(["shieldd", "--trackball", "--trackball-glide", "500"]);
-        assert_eq!(a.trackball(), Some(outputs::Trackball { glide_ms: 500.0 }));
+        assert_eq!(a.trackball_glide, 500.0);
     }
 
     #[test]

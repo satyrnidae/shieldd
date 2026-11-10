@@ -42,8 +42,8 @@ Works:
 - Battery in the tray, colored for the taskbar theme, with a notification when it goes critical;
   a short rumble when charging starts. Rumble cuts out near empty, and a controller that
   connects flat is sent away until it's plugged in.
-- Tray menu: pair, reconfigure the network, and per controller identify, rename, audio on/off
-  and disconnect; about
+- Tray menu: pair, reconfigure the network, mouse options, and per controller identify, rename,
+  audio on/off and disconnect; about
 - Runs at login, windowless, and picks the adapter back up after a replug
 - Mic and headset audio over VBAN, tested with Voicemeeter Potato; on Linux, a mic and a headset
   in PipeWire
@@ -288,6 +288,11 @@ The rest:
 - **Reconfigure network**: a new network as `--reconfigure-network` makes, after a warning,
   since every paired controller is disconnected and has to pair again. Pairing opens right
   after.
+- **Mouse options**: **Pointer acceleration** and **Trackball** as checks, which take effect
+  at once and are remembered in a `mouse` file in the settings folder next to `p2p.conf`. Once
+  that file exists it wins over `--mouse-accel-min` and `--trackball`; delete it to go back to
+  the flags. Trackball is grayed out while acceleration is off, and turning acceleration off
+  turns trackball off with it.
 - **Exit**
 
 ### Audio

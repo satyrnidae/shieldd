@@ -58,6 +58,17 @@ pub struct Status {
     pub sent_away: bool,
     /// Where controller audio goes, for the box when the first one turns it on
     pub audio: shdlib::audio::Backend,
+    /// What the Mouse options submenu has checked
+    pub mouse: Mouse,
+}
+
+/// The trackpad's mouse options as they stand
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Mouse {
+    /// Finger speed eases the pointer
+    pub accel: bool,
+    /// A flick keeps the pointer gliding. Never on without `accel`.
+    pub trackball: bool,
 }
 
 /// How well a controller's link is holding up, as the bars by its line in the menu
@@ -98,6 +109,10 @@ pub enum Command {
     Pair,
     /// A new network, which every controller pairs to again
     Reconfigure,
+    /// Pointer acceleration on or off. Off takes trackball with it.
+    Accel(bool),
+    /// Trackball glide on or off
+    Trackball(bool),
     Identify([u8; 6]),
     /// Goes by this name now, already cleaned up
     Rename([u8; 6], String),

@@ -152,6 +152,11 @@ pub struct Accel {
 }
 
 impl Accel {
+    /// What --mouse-accel-min and --mouse-accel-knee start at
+    pub const DEFAULT: Accel = Accel { min: 0.35, knee: 1.0 };
+    /// No easing: the full scale at any speed
+    pub const OFF: Accel = Accel { min: 1.0, knee: 1.0 };
+
     /// Whether this eases anything at all. Written so NaN lands on the off side too: anything out
     /// of range is off, not a poisoned carry.
     pub fn enabled(&self) -> bool {
@@ -407,6 +412,18 @@ impl Desktop {
         self.input.keys(&downs);
         // A stalled caller gets one repeat, not a burst
         self.next_repeat = Some(((at + interval).max(now), interval));
+    }
+
+    /// Switches the pointer options while running. Anything coasting stops, since a glide that
+    /// is no longer wanted shouldn't finish.
+    pub fn set_mouse(&mut self, accel: Accel, trackball: Option<Trackball>) {
+        self.accel = accel;
+        self.trackball = trackball;
+        if trackball.is_none() {
+            for p in self.pointers.values_mut() {
+                p.touched();
+            }
+        }
     }
 
     /// Moves every pointer that's coasting after a flick

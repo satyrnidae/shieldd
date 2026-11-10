@@ -42,7 +42,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, ES_AUTOHSCROLL, EndDialog, EndMenu, EnumThreadWindows, GetClassNameW, GetCursorPos,
     GetDlgItemTextW, GetMessageW, HICON, HMENU, ICONINFO, IDCANCEL, IDOK, KillTimer, MB_DEFBUTTON2, MB_ICONINFORMATION,
     MB_ICONWARNING, MB_OK, MB_OKCANCEL, MB_SETFOREGROUND, MENU_ITEM_FLAGS, MENUITEMINFOW, MESSAGEBOX_RESULT,
-    MESSAGEBOX_STYLE, MF_DISABLED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MIIM_BITMAP, MSG, MessageBoxW,
+    MESSAGEBOX_STYLE, MF_CHECKED, MF_DISABLED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED,
+    MIIM_BITMAP, MSG, MessageBoxW,
     PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SM_CXSMICON, SW_SHOWNORMAL,
     SendDlgItemMessageW, SetDlgItemTextW, SetForegroundWindow, SetMenuItemInfoW, SetTimer, TPM_RETURNCMD,
     TrackPopupMenu, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_COMMAND, WM_CONTEXTMENU, WM_INITDIALOG, WM_LBUTTONUP,
@@ -564,7 +565,7 @@ unsafe fn build_menu(items: &[Item], size: u32) -> Option<HMENU> {
         for (n, i) in items.iter().enumerate() {
             let text = wide(&i.text);
             let (flags, id) = match i.sub.is_empty() {
-                true => (flags(i.kind), i.id),
+                true => (flags(i.kind) | if i.checked == Some(true) { MF_CHECKED } else { MF_UNCHECKED }, i.id),
                 false => match build_menu(&i.sub, size) {
                     Some(sub) => (flags(i.kind) | MF_POPUP, sub.0 as usize),
                     None => (flags(i.kind) | MF_GRAYED, 0),

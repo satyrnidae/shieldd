@@ -31,6 +31,7 @@ use shdnet::mac::{Mac, MacFmt};
 use shdtray::{Command, Status, Tray, tr};
 use tracing::{debug, info, trace, warn};
 
+use crate::mouse::{self, Mouse};
 use crate::outputs::Desktop;
 use crate::seat::{Leaving, MAX_SEATS, Seat};
 use crate::{Args, hex, known_clients, p2pconf, pair};
@@ -100,6 +101,8 @@ struct Shared {
     seal: bool,
     /// Picked from the tray with no adapter to do it on; done once there is
     pending: Option<Start>,
+    /// The trackpad's mouse options, which the tray flips and a run starts from
+    mouse: Mouse,
 }
 
 impl Shared {
@@ -161,7 +164,31 @@ impl Shared {
 
     /// What the tray shows with no radio up
     fn idle_status(&self) -> Status {
-        Status { audio: self.backend, ..Status::default() }
+        Status { audio: self.backend, mouse: self.mouse_status(), ..Status::default() }
+    }
+
+    /// What the tray's Mouse options show
+    fn mouse_status(&self) -> shdtray::Mouse {
+        shdtray::Mouse { accel: self.mouse.accel_on(), trackball: self.mouse.trackball_on() }
+    }
+
+    /// Applies a Mouse options pick and keeps it for next time. Returns whether anything changed,
+    /// so a running desktop needs the new options.
+    fn mouse_command(&mut self, cmd: &Command) -> bool {
+        let changed = match *cmd {
+            Command::Accel(on) => self.mouse.set_accel(on),
+            Command::Trackball(on) => self.mouse.set_trackball(on),
+            _ => false,
+        };
+        if changed {
+            info!(accel = self.mouse.accel_on(), trackball = self.mouse.trackball_on(), "mouse options");
+            let saved = std::fs::create_dir_all(crate::settings_dir())
+                .and_then(|()| std::fs::write(mouse::file(), self.mouse.render()));
+            if let Err(e) = saved {
+                warn!("remembering the mouse options: {e}");
+            }
+        }
+        changed
     }
 
     /// Saves a controller's new name, or says why it couldn't. Returns whether it did.
@@ -209,6 +236,9 @@ impl Shared {
                     Command::Rename(mac, name) => {
                         self.rename(&mac, &name);
                     }
+                    Command::Accel(_) | Command::Trackball(_) => {
+                        self.mouse_command(&cmd);
+                    }
                     Command::Identify(_) | Command::Disconnect(_) | Command::Forget(_) => {}
                 }
             }
@@ -232,6 +262,12 @@ pub fn run(args: Args, quit: &AtomicBool) -> Result<()> {
         conf: args.conf.clone(),
         seal: crate::is_default_conf(&args.conf),
         pending: None,
+        mouse: Mouse::new(
+            args.accel(),
+            args.trackball_glide,
+            args.trackball,
+            &std::fs::read_to_string(mouse::file()).unwrap_or_default(),
+        ),
     };
     debug!(backend = ?sh.backend, "controller audio");
     sh.load_audio();
@@ -365,7 +401,7 @@ fn seat_mut<'a>(seats: &'a mut [Seat], mac: &Mac) -> Option<&'a mut Seat> {
 }
 
 fn run_once(args: &Args, start: Start, quit: &AtomicBool, sh: &mut Shared) -> Result<Next> {
-    let mut desktop = Desktop::new(args.scale(), args.accel(), args.trackball());
+    let mut desktop = Desktop::new(args.scale(), sh.mouse.accel(), sh.mouse.trackball());
     let reconfigure = start.reconfigure || (start.pair && sh.unsaved.is_none() && !args.conf.exists());
     let mut group = match &sh.unsaved {
         // An unsaved group stays until the new one's saved or takes its place, in case the radio
@@ -396,6 +432,7 @@ fn run_once(args: &Args, start: Start, quit: &AtomicBool, sh: &mut Shared) -> Re
         pairing,
         ssid: Some(group.ssid.clone()),
         channel: (group.channel != 0).then_some(group.channel),
+        mouse: sh.mouse_status(),
         ..Status::default()
     });
     let mut radio = Radio::start(opts)?;
@@ -539,6 +576,11 @@ fn run_once(args: &Args, start: Start, quit: &AtomicBool, sh: &mut Shared) -> Re
                                     s.set_audio(on, args.mic);
                                 }
                             }
+                            Command::Accel(_) | Command::Trackball(_) => {
+                                if sh.mouse_command(&cmd) {
+                                    desktop.set_mouse(sh.mouse.accel(), sh.mouse.trackball());
+                                }
+                            }
                             Command::Identify(mac) => {
                                 if let Some(s) = seat_mut(&mut seats, &mac) {
                                     s.ctl.identify();
@@ -641,6 +683,7 @@ fn run_once(args: &Args, start: Start, quit: &AtomicBool, sh: &mut Shared) -> Re
                         joining: seats.iter().any(|s| s.joining.is_some()),
                         sent_away: seats.iter().any(|s| s.sent_away),
                         audio: sh.backend,
+                        mouse: sh.mouse_status(),
                     });
                 }
             }

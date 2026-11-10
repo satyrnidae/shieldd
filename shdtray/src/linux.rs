@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use gtk4::{self as gtk, gio, glib, prelude::*};
 use ksni::blocking::TrayMethods;
-use ksni::menu::{StandardItem, SubMenu};
+use ksni::menu::{CheckmarkItem, StandardItem, SubMenu};
 use resvg::tiny_skia::Pixmap;
 use tracing::{debug, info, trace, warn};
 use zbus::blocking::Connection;
@@ -312,7 +312,10 @@ impl Sni {
                         let _ = t.picks.send(id);
                     }
                 });
-                StandardItem { label, enabled, icon_data, activate, ..Default::default() }.into()
+                match i.checked {
+                    Some(checked) => CheckmarkItem { label, enabled, checked, icon_data, activate, ..Default::default() }.into(),
+                    None => StandardItem { label, enabled, icon_data, activate, ..Default::default() }.into(),
+                }
             }
         }
     }
